@@ -506,6 +506,7 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                     Event::CastStopped { stream_id } => {
                         println!("Cast stopped: stream id {stream_id}");
                     }
+                    _ => println!("Unknown event: {event:?}"),
                 }
             }
         }

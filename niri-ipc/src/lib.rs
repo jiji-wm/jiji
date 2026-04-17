@@ -64,6 +64,7 @@ pub mod state;
 /// Request from client to niri.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
 pub enum Request {
     /// Request the version string for the running niri instance.
     Version,
@@ -134,6 +135,7 @@ pub type Reply = Result<Response, String>;
 /// Successful response from niri to client.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
 pub enum Response {
     /// A request that does not need a response was handled successfully.
     Handled,
@@ -191,6 +193,7 @@ pub struct PickedColor {
 #[cfg_attr(feature = "clap", command(subcommand_value_name = "ACTION"))]
 #[cfg_attr(feature = "clap", command(subcommand_help_heading = "Actions"))]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
 pub enum Action {
     /// Exit niri.
     Quit {
@@ -1568,6 +1571,7 @@ pub enum CastTarget {
 /// A compositor event.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
 pub enum Event {
     /// The workspace configuration has changed.
     WorkspacesChanged {

@@ -701,6 +701,10 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::SetWindowUrgent { id } => Self::SetWindowUrgent(id),
             niri_ipc::Action::UnsetWindowUrgent { id } => Self::UnsetWindowUrgent(id),
             niri_ipc::Action::LoadConfigFile { path } => Self::LoadConfigFile(path),
+            // niri_ipc::Action is #[non_exhaustive]: any new variant added to
+            // niri_ipc without a matching arm here is a coding error that
+            // surfaces as a panic when the unmapped action is dispatched.
+            _ => unreachable!("unhandled niri_ipc::Action variant; add a match arm above"),
         }
     }
 }
