@@ -118,14 +118,33 @@ impl EventStreamStatePart for EventStreamState {
 
 impl EventStreamStatePart for WorkspacesState {
     fn replicate(&self) -> Vec<Event> {
-        let workspaces = self.workspaces.values().cloned().collect();
-        vec![Event::WorkspacesChanged { workspaces }]
+        let workspaces: Vec<_> = self.workspaces.values().cloned().collect();
+
+        // Emit per-workspace deltas first, then the full-list event for
+        // backwards-compatible consumers. Per `docs/activities-design.md` §4.6,
+        // consumers that handle the delta events should ignore `WorkspacesChanged`.
+        let mut events: Vec<Event> = workspaces
+            .iter()
+            .cloned()
+            .map(|workspace| Event::WorkspaceOpenedOrChanged { workspace })
+            .collect();
+        events.push(Event::WorkspacesChanged { workspaces });
+        events
     }
 
     fn apply(&mut self, event: Event) -> Option<Event> {
         match event {
             Event::WorkspacesChanged { workspaces } => {
                 self.workspaces = workspaces.into_iter().map(|ws| (ws.id, ws)).collect();
+            }
+            Event::WorkspaceOpenedOrChanged { workspace } => {
+                self.workspaces.insert(workspace.id, workspace);
+            }
+            Event::WorkspaceClosed { id } => {
+                // Tolerant of unknown ids (e.g. a late-connecting client that
+                // never saw the corresponding WorkspaceOpenedOrChanged). The
+                // matching WindowClosed path intentionally panics instead.
+                self.workspaces.remove(&id);
             }
             Event::WorkspaceUrgencyChanged { id, urgent } => {
                 for ws in self.workspaces.values_mut() {
@@ -319,5 +338,159 @@ impl EventStreamStatePart for CastsState {
             event => return Some(event),
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ws(id: u64, idx: u8, output: &str) -> Workspace {
+        Workspace {
+            id,
+            idx,
+            name: None,
+            output: Some(output.to_owned()),
+            is_urgent: false,
+            is_active: false,
+            is_focused: false,
+            active_window_id: None,
+        }
+    }
+
+    #[test]
+    fn workspace_opened_or_changed_inserts_new() {
+        let mut state = WorkspacesState::default();
+        assert!(state
+            .apply(Event::WorkspaceOpenedOrChanged {
+                workspace: ws(1, 1, "HDMI-1")
+            })
+            .is_none());
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[&1].idx, 1);
+    }
+
+    #[test]
+    fn workspace_opened_or_changed_updates_existing() {
+        let mut state = WorkspacesState::default();
+        state.apply(Event::WorkspaceOpenedOrChanged {
+            workspace: ws(1, 1, "HDMI-1"),
+        });
+        // Same id, different idx — should replace.
+        state.apply(Event::WorkspaceOpenedOrChanged {
+            workspace: ws(1, 3, "HDMI-1"),
+        });
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[&1].idx, 3);
+    }
+
+    #[test]
+    fn workspace_closed_removes() {
+        let mut state = WorkspacesState::default();
+        state.apply(Event::WorkspaceOpenedOrChanged {
+            workspace: ws(1, 1, "HDMI-1"),
+        });
+        state.apply(Event::WorkspaceOpenedOrChanged {
+            workspace: ws(2, 2, "HDMI-1"),
+        });
+        assert_eq!(state.workspaces.len(), 2);
+
+        assert!(state.apply(Event::WorkspaceClosed { id: 1 }).is_none());
+        assert_eq!(state.workspaces.len(), 1);
+        assert!(!state.workspaces.contains_key(&1));
+    }
+
+    #[test]
+    fn workspace_closed_for_missing_id_is_noop() {
+        // Closed events for ids we never saw must be tolerated (e.g. a
+        // client that connected after the workspace was already gone).
+        let mut state = WorkspacesState::default();
+        assert!(state.apply(Event::WorkspaceClosed { id: 99 }).is_none());
+        assert!(state.workspaces.is_empty());
+    }
+
+    #[test]
+    fn replicate_emits_deltas_then_full_list() {
+        let mut source = WorkspacesState::default();
+        source.apply(Event::WorkspaceOpenedOrChanged {
+            workspace: ws(1, 1, "HDMI-1"),
+        });
+        source.apply(Event::WorkspaceOpenedOrChanged {
+            workspace: ws(2, 2, "DP-1"),
+        });
+
+        let events = source.replicate();
+        assert_eq!(events.len(), 3); // 2 deltas + 1 full list
+
+        // All deltas come first; the full-list event is last.
+        let (last, deltas) = events.split_last().unwrap();
+        for event in deltas {
+            assert!(matches!(event, Event::WorkspaceOpenedOrChanged { .. }));
+        }
+        assert!(matches!(last, Event::WorkspacesChanged { .. }));
+    }
+
+    #[test]
+    fn delta_events_alone_reconstruct_full_state() {
+        // Phase 0a promise: consumers that ignore WorkspacesChanged and only
+        // process WorkspaceOpenedOrChanged / WorkspaceClosed still get the
+        // correct view of the world.
+        let mut source = WorkspacesState::default();
+        source.apply(Event::WorkspaceOpenedOrChanged {
+            workspace: ws(1, 1, "HDMI-1"),
+        });
+        source.apply(Event::WorkspaceOpenedOrChanged {
+            workspace: ws(2, 2, "DP-1"),
+        });
+
+        let mut replica = WorkspacesState::default();
+        for event in source.replicate() {
+            if matches!(event, Event::WorkspacesChanged { .. }) {
+                continue;
+            }
+            replica.apply(event);
+        }
+        assert_eq!(replica.workspaces, source.workspaces);
+    }
+
+    #[test]
+    fn full_list_alone_reconstructs_full_state() {
+        // Backwards compatibility: a client that only processes the legacy
+        // WorkspacesChanged event still ends up with the right state.
+        let mut source = WorkspacesState::default();
+        source.apply(Event::WorkspaceOpenedOrChanged {
+            workspace: ws(1, 1, "HDMI-1"),
+        });
+        source.apply(Event::WorkspaceOpenedOrChanged {
+            workspace: ws(2, 2, "DP-1"),
+        });
+
+        let mut replica = WorkspacesState::default();
+        for event in source.replicate() {
+            if !matches!(event, Event::WorkspacesChanged { .. }) {
+                continue;
+            }
+            replica.apply(event);
+        }
+        assert_eq!(replica.workspaces, source.workspaces);
+    }
+
+    #[test]
+    fn applying_both_paths_is_idempotent() {
+        // Dual-event-path consumers (§4.6): ones that process both the deltas
+        // and the full-list event end up with the correct state regardless.
+        let mut source = WorkspacesState::default();
+        source.apply(Event::WorkspaceOpenedOrChanged {
+            workspace: ws(1, 1, "HDMI-1"),
+        });
+        source.apply(Event::WorkspaceOpenedOrChanged {
+            workspace: ws(2, 2, "DP-1"),
+        });
+
+        let mut replica = WorkspacesState::default();
+        for event in source.replicate() {
+            replica.apply(event);
+        }
+        assert_eq!(replica.workspaces, source.workspaces);
     }
 }

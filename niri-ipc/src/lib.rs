@@ -1581,6 +1581,30 @@ pub enum Event {
         /// workspaces are missing from here, then they were deleted.
         workspaces: Vec<Workspace>,
     },
+    /// A workspace was added or its structural properties changed.
+    ///
+    /// On initial event stream connection, one event is emitted per workspace (full state).
+    /// After that, emitted for structural changes only: workspace added, `idx`, `name`, or
+    /// `output` changed. Per-field property changes continue using the existing dedicated
+    /// events: [`Event::WorkspaceActivated`] (`is_active`/`is_focused`),
+    /// [`Event::WorkspaceUrgencyChanged`] (`is_urgent`),
+    /// [`Event::WorkspaceActiveWindowChanged`] (`active_window_id`).
+    ///
+    /// This matches the [`Event::WindowOpenedOrChanged`] pattern on the window side.
+    ///
+    /// [`Event::WorkspacesChanged`] continues to be emitted alongside these delta events for
+    /// backwards compatibility. New consumers can ignore [`Event::WorkspacesChanged`] entirely
+    /// and reconstruct full state from [`Event::WorkspaceOpenedOrChanged`] and
+    /// [`Event::WorkspaceClosed`] alone.
+    WorkspaceOpenedOrChanged {
+        /// The new or updated workspace.
+        workspace: Workspace,
+    },
+    /// A workspace was closed / removed.
+    WorkspaceClosed {
+        /// Id of the removed workspace.
+        id: u64,
+    },
     /// The workspace urgency changed.
     WorkspaceUrgencyChanged {
         /// Id of the workspace.
