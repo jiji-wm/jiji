@@ -601,65 +601,82 @@ impl State {
         let layout = &self.niri.layout;
         let focused_ws_id = layout.active_workspace().map(|ws| ws.id().get());
 
-        // Check for workspace changes.
         let mut seen = HashSet::new();
-        let mut need_workspaces_changed = false;
+        let mut any_structural = false;
+
         for (mon, ws_idx, ws) in layout.workspaces() {
             let id = ws.id().get();
             seen.insert(id);
-
-            let Some(ipc_ws) = state.workspaces.get(&id) else {
-                // A new workspace was added.
-                need_workspaces_changed = true;
-                break;
+            let new_ipc = Workspace {
+                id,
+                idx: u8::try_from(ws_idx + 1).unwrap_or(u8::MAX),
+                name: ws.name().cloned(),
+                output: mon.map(|mon| mon.output_name().clone()),
+                is_urgent: ws.is_urgent(),
+                is_active: mon.is_some_and(|mon| mon.active_workspace_idx() == ws_idx),
+                is_focused: Some(id) == focused_ws_id,
+                active_window_id: ws.active_window().map(|win| win.id().get()),
             };
 
-            // Check for any changes that we can't signal as individual events.
-            let output_name = mon.map(|mon| mon.output_name());
-            if ipc_ws.idx != u8::try_from(ws_idx + 1).unwrap_or(u8::MAX)
-                || ipc_ws.name.as_ref() != ws.name()
-                || ipc_ws.output.as_ref() != output_name
-            {
-                need_workspaces_changed = true;
-                break;
-            }
+            let Some(ipc_ws) = state.workspaces.get(&id) else {
+                // New workspace — structural addition.
+                any_structural = true;
+                events.push(Event::WorkspaceOpenedOrChanged { workspace: new_ipc });
+                continue;
+            };
 
-            let active_window_id = ws.active_window().map(|win| win.id().get());
-            if ipc_ws.active_window_id != active_window_id {
-                events.push(Event::WorkspaceActiveWindowChanged {
-                    workspace_id: id,
-                    active_window_id,
+            // Structural change (anything not covered by a per-field event).
+            let structural_changed = ipc_ws.idx != new_ipc.idx
+                || ipc_ws.name != new_ipc.name
+                || ipc_ws.output != new_ipc.output;
+            if structural_changed {
+                any_structural = true;
+                events.push(Event::WorkspaceOpenedOrChanged {
+                    workspace: new_ipc.clone(),
                 });
             }
 
-            // Check if this workspace urgent state changed.
-            let urgent = ws.is_urgent();
-            if urgent != ipc_ws.is_urgent {
-                events.push(Event::WorkspaceUrgencyChanged { id, urgent });
+            // Per-field events fire independently of structural changes so a
+            // structural change on one workspace in the same frame as an urgency
+            // or activation change on another workspace no longer silently drops
+            // the per-field event (the previous `events.clear()` bail).
+            if ipc_ws.active_window_id != new_ipc.active_window_id {
+                events.push(Event::WorkspaceActiveWindowChanged {
+                    workspace_id: id,
+                    active_window_id: new_ipc.active_window_id,
+                });
             }
-
-            // Check if this workspace became focused.
-            let is_focused = Some(id) == focused_ws_id;
-            if is_focused && !ipc_ws.is_focused {
+            if ipc_ws.is_urgent != new_ipc.is_urgent {
+                events.push(Event::WorkspaceUrgencyChanged {
+                    id,
+                    urgent: new_ipc.is_urgent,
+                });
+            }
+            if new_ipc.is_focused && !ipc_ws.is_focused {
                 events.push(Event::WorkspaceActivated { id, focused: true });
                 continue;
             }
-
-            // Check if this workspace became active.
-            let is_active = mon.is_some_and(|mon| mon.active_workspace_idx() == ws_idx);
-            if is_active && !ipc_ws.is_active {
+            if new_ipc.is_active && !ipc_ws.is_active {
                 events.push(Event::WorkspaceActivated { id, focused: false });
             }
         }
 
-        // Check if any workspaces were removed.
-        if !need_workspaces_changed && state.workspaces.keys().any(|id| !seen.contains(id)) {
-            need_workspaces_changed = true;
+        // Closed workspaces — structural removals.
+        let closed_ids: Vec<u64> = state
+            .workspaces
+            .keys()
+            .copied()
+            .filter(|id| !seen.contains(id))
+            .collect();
+        for id in closed_ids {
+            any_structural = true;
+            events.push(Event::WorkspaceClosed { id });
         }
 
-        if need_workspaces_changed {
-            events.clear();
-
+        // BC: emit the full-list WorkspacesChanged whenever a structural change
+        // happened, so consumers that only handle the legacy event still keep up.
+        // Per docs/activities-design.md §4.6, deltas come first, then the full list.
+        if any_structural {
             let workspaces = layout
                 .workspaces()
                 .map(|(mon, ws_idx, ws)| {
@@ -676,7 +693,6 @@ impl State {
                     }
                 })
                 .collect();
-
             events.push(Event::WorkspacesChanged { workspaces });
         }
 
