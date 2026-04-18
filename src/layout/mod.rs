@@ -4190,6 +4190,14 @@ impl<W: LayoutElement> Layout<W> {
         // Dragging in the overview shouldn't switch the workspace and so on.
         let allow_to_activate_workspace = !self.overview_open;
 
+        // Pair the `output_enter` fired on the tile during drag start / cross-output update
+        // (in `interactive_move_update`). Whichever arm below handles the drop will re-enter
+        // the window against the destination output via `add_tile(Some(&mon.output), ...)`,
+        // or leave it unbound in the NoOutputs arm — both cases require the drag-tracked
+        // marker to be cleared first so we don't leak it when the destination output differs
+        // (including the case where `move_.output` has just been disconnected).
+        move_.tile.window().output_leave(&move_.output);
+
         match &mut self.monitor_set {
             MonitorSet::Normal {
                 monitors,
