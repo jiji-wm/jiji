@@ -2006,7 +2006,7 @@ fn removing_output_must_keep_empty_focus_on_primary() {
 
     // The workspace from the removed output was inserted at position 0, so the active workspace
     // must change to 1 to keep the focus on the empty workspace.
-    assert_eq!(monitors[0].active_workspace_idx, 1);
+    assert_eq!(monitors[0].view.active_position(), 1);
 }
 
 #[test]
@@ -2274,7 +2274,7 @@ fn move_workspace_to_output() {
     assert_eq!(active_monitor_idx, 1);
     assert_eq!(monitors[0].workspaces.len(), 1);
     assert!(!monitors[0].workspaces[0].has_windows());
-    assert_eq!(monitors[1].active_workspace_idx, 0);
+    assert_eq!(monitors[1].view.active_position(), 0);
     assert_eq!(monitors[1].workspaces.len(), 2);
     assert!(monitors[1].workspaces[0].has_windows());
 }
@@ -2304,7 +2304,8 @@ fn open_right_of_on_different_workspace() {
 
     let mon = monitors.into_iter().next().unwrap();
     assert_eq!(
-        mon.active_workspace_idx, 1,
+        mon.view.active_position(),
+        1,
         "the second workspace must remain active"
     );
     assert_eq!(
@@ -2347,7 +2348,8 @@ fn open_right_of_on_different_workspace_ewaf() {
 
     let mon = monitors.into_iter().next().unwrap();
     assert_eq!(
-        mon.active_workspace_idx, 2,
+        mon.view.active_position(),
+        2,
         "the second workspace must remain active"
     );
     assert_eq!(
@@ -2698,7 +2700,7 @@ fn output_active_workspace_is_preserved() {
         unreachable!()
     };
 
-    assert_eq!(monitors[0].active_workspace_idx, 1);
+    assert_eq!(monitors[0].view.active_position(), 1);
 }
 
 #[test]
@@ -2723,7 +2725,7 @@ fn output_active_workspace_is_preserved_with_other_outputs() {
         unreachable!()
     };
 
-    assert_eq!(monitors[1].active_workspace_idx, 1);
+    assert_eq!(monitors[1].view.active_position(), 1);
 }
 
 #[test]
@@ -2842,6 +2844,108 @@ fn add_and_remove_output() {
         ..Default::default()
     };
     check_ops_with_options(options, ops);
+}
+
+// Move the currently-focused forced-top-empty workspace under
+// `empty_workspace_above_first`. Pre-`WorkspaceView` behaviour: a fresh
+// forced-top-empty is created, focus lands on it, and the moved empty is
+// removed by the immediate `clean_up_workspaces` (because focus moved away
+// from it). Final layout is [E, W, W, W, E] with active at position 0.
+//
+// Pinning this here because the code-review of Phase 0b-1 flagged a possible
+// drift: `WorkspaceView::move_within` keeps focus tracking the moved id, which
+// would leave the moved empty in place at position 3 and the active cursor
+// pinned there, preventing cleanup from removing it.
+#[test]
+fn move_workspace_to_idx_active_at_top_empty_under_ewaf() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::FocusWorkspace(0),
+        Op::MoveWorkspaceToIndex {
+            ws_name: None,
+            target_idx: 2,
+        },
+    ];
+    let options = Options {
+        layout: niri_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let layout = check_ops_with_options(options, ops);
+
+    let MonitorSet::Normal { monitors, .. } = layout.monitor_set else {
+        unreachable!()
+    };
+    let m = &monitors[0];
+    let named: Vec<bool> = m
+        .workspaces
+        .iter()
+        .map(|w| w.has_windows_or_name())
+        .collect();
+
+    assert_eq!(
+        m.workspaces.len(),
+        5,
+        "expected 5 workspaces, got {named:?}"
+    );
+    assert_eq!(
+        named,
+        vec![false, true, true, true, false],
+        "expected [E, W, W, W, E]"
+    );
+    assert_eq!(
+        m.active_workspace_idx(),
+        0,
+        "focus should land on the new forced-top-empty"
+    );
+}
+
+#[test]
+fn add_output_consolidation_preserves_ewaf_pin() {
+    // Exercises `Layout::add_output`'s `keep_active_pinned` branch: when a
+    // reconnecting output's original workspaces are moved off the primary under
+    // `empty_workspace_above_first`, focus must stay on the first named
+    // workspace (position 1), not slip onto the forced-empty position 0.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(0),
+        },
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::RemoveOutput(2),
+        Op::AddOutput(2),
+    ];
+    let options = Options {
+        layout: niri_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let layout = check_ops_with_options(options, ops);
+
+    let MonitorSet::Normal { monitors, .. } = layout.monitor_set else {
+        unreachable!()
+    };
+    assert_eq!(monitors[0].view.active_position(), 1);
 }
 
 #[test]
@@ -3495,7 +3599,7 @@ fn move_column_to_workspace_down_focus_false_on_floating_window() {
         unreachable!()
     };
 
-    assert_eq!(monitors[0].active_workspace_idx, 0);
+    assert_eq!(monitors[0].view.active_position(), 0);
 }
 
 #[test]
@@ -3518,7 +3622,7 @@ fn move_column_to_workspace_focus_false_on_floating_window() {
         unreachable!()
     };
 
-    assert_eq!(monitors[0].active_workspace_idx, 0);
+    assert_eq!(monitors[0].view.active_position(), 0);
 }
 
 #[test]
