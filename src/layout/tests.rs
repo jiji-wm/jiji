@@ -1837,10 +1837,13 @@ fn operations_dont_panic() {
                 let mut layout = Layout::default();
                 first.clone().apply(&mut layout);
                 layout.verify_invariants();
+                verify_output_bindings(&layout);
                 second.clone().apply(&mut layout);
                 layout.verify_invariants();
+                verify_output_bindings(&layout);
                 third.clone().apply(&mut layout);
                 layout.verify_invariants();
+                verify_output_bindings(&layout);
             }
         }
     }
@@ -2021,10 +2024,13 @@ fn operations_from_starting_state_dont_panic() {
                 let mut layout = Layout::default();
                 first.clone().apply(&mut layout);
                 layout.verify_invariants();
+                verify_output_bindings(&layout);
                 second.clone().apply(&mut layout);
                 layout.verify_invariants();
+                verify_output_bindings(&layout);
                 third.clone().apply(&mut layout);
                 layout.verify_invariants();
+                verify_output_bindings(&layout);
             }
         }
     }
@@ -2484,6 +2490,7 @@ fn config_change_updates_cached_sizes() {
     layout.update_config(&config);
 
     layout.verify_invariants();
+    verify_output_bindings(&layout);
 }
 
 #[test]
@@ -3040,6 +3047,7 @@ fn switch_ewaf_on() {
         ..Default::default()
     });
     layout.verify_invariants();
+    verify_output_bindings(&layout);
 }
 
 #[test]
@@ -3061,6 +3069,7 @@ fn switch_ewaf_off() {
     let mut layout = check_ops_with_options(options, ops);
     layout.update_options(Options::default());
     layout.verify_invariants();
+    verify_output_bindings(&layout);
 }
 
 #[test]
