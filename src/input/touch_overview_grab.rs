@@ -192,7 +192,7 @@ impl TouchGrab<State> for TouchOverviewGrab {
             // Check if the gesture moved far enough to decide. Threshold copied from libadwaita.
             if c.x * c.x + c.y * c.y >= 16. * 16. {
                 if let Some(ws_id) = self.workspace_id.filter(|_| c.x.abs() > c.y.abs()) {
-                    if let Some((ws_idx, _ws)) = layout.find_workspace_by_id(ws_id) {
+                    if let Some((ws_idx, _)) = layout.find_workspace_by_id(ws_id) {
                         if layout.output_for_workspace(ws_id) == Some(&self.output) {
                             layout.view_offset_gesture_begin(&self.output, Some(ws_idx), false);
                             self.gesture = GestureState::ViewOffset;

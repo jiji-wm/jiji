@@ -3426,17 +3426,22 @@ impl<W: LayoutElement> Layout<W> {
                 .position(|mon| &mon.output == output)
                 .unwrap();
 
-            let current = &mut monitors[*active_monitor_idx];
+            let current = &monitors[*active_monitor_idx];
             let active_pos = current.view.active_position();
-            // Borrow `workspaces` and `output` as disjoint fields so the Workspace call can
-            // still see the Smithay handle for the output_leave event.
-            let current_output = &current.output;
-            let ws = &mut current.workspaces[active_pos];
 
-            if ws.floating_is_active() {
+            // Check floating status on a shared borrow first; move_to_output needs `&mut self`,
+            // so we can't take a mutable borrow yet.
+            if current.workspaces[active_pos].floating_is_active() {
                 self.move_to_output(None, output, None, ActivateWindow::Smart);
                 return;
             }
+
+            // Scrolling path: re-borrow `monitors` mutably and split into disjoint field borrows
+            // (`&output` + `&mut workspaces[active_pos]`) so `remove_active_column` can fire
+            // `output_leave` against the current monitor's Smithay handle.
+            let current = &mut monitors[*active_monitor_idx];
+            let current_output = &current.output;
+            let ws = &mut current.workspaces[active_pos];
 
             let Some(column) = ws.remove_active_column(Some(current_output)) else {
                 return;
