@@ -53,6 +53,7 @@ use tile::{Tile, TileRenderElement};
 use workspace::{WorkspaceAddWindowTarget, WorkspaceId};
 
 pub use self::monitor::MonitorRenderElement;
+use self::activity::WorkspaceView;
 use self::monitor::{Monitor, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
 use crate::animation::{Animation, Clock};
@@ -127,6 +128,55 @@ pub enum SizingMode {
     Normal,
     Maximized,
     Fullscreen,
+}
+
+/// Read-only context for render and hit-test paths on a monitor.
+///
+/// Bundles `(&pool, &view)` so render-path method signatures don't have to
+/// juggle both as separate args. Pre-activities the view lives on `Monitor`
+/// and the pool on `Layout`; post-activities (Phase 1a) the view relocates to
+/// `Activity.views` — render sites that already consume a `LayoutCtx` keep
+/// their signatures unchanged through that move.
+///
+/// Construct at call sites as `LayoutCtx::new(pool, &mon.view)`. Both borrows
+/// are shared, so a caller holding `&mon` can pass `ctx` into `&self` methods
+/// on the same `mon` without conflict.
+#[derive(Debug, Clone, Copy)]
+pub struct LayoutCtx<'a, W: LayoutElement> {
+    pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+    view: &'a WorkspaceView,
+}
+
+impl<'a, W: LayoutElement> LayoutCtx<'a, W> {
+    pub fn new(
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        view: &'a WorkspaceView,
+    ) -> Self {
+        Self { pool, view }
+    }
+
+    pub fn pool(&self) -> &'a HashMap<WorkspaceId, Workspace<W>> {
+        self.pool
+    }
+
+    pub fn view(&self) -> &'a WorkspaceView {
+        self.view
+    }
+
+    /// Borrow a workspace by id. Panics if the id is not in the pool — a broken
+    /// pool/view invariant, not user error.
+    pub fn workspace(&self, id: WorkspaceId) -> &'a Workspace<W> {
+        self.pool
+            .get(&id)
+            .expect("workspace id must be a key in the pool")
+    }
+
+    /// Borrow the workspace at visual position `pos` within the view. Panics
+    /// if `pos` is out of range for the view, or the id is absent from the
+    /// pool — both indicate a broken invariant.
+    pub fn workspace_at(&self, pos: usize) -> &'a Workspace<W> {
+        self.workspace(self.view.ids()[pos])
+    }
 }
 
 pub trait LayoutElement {
