@@ -56,7 +56,7 @@ pub struct Workspace<W: LayoutElement> {
     /// The workspace's designated output, by stable identifier.
     ///
     /// After an output disconnection, this remains pointing at the disconnected output so
-    /// reconnect can re-bind the workspace. `None` is reserved; no current code path produces it.
+    /// reconnect can re-bind the workspace.
     pub(super) output_id: Option<OutputId>,
 
     /// Latest known output scale for this workspace.
@@ -485,13 +485,21 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.is_active_pending_fullscreen()
     }
 
-    /// Binds this workspace to `output`: normalizes `output_id`, syncs cached geometry via
-    /// `update_output_size`, and fires `output_enter` + `set_preferred_scale_transform` on every
-    /// window. Must be paired with a prior `unbind_output` if the workspace was already bound to
-    /// a different output — Smithay accumulates per-output overlaps, so a bind without a matching
-    /// leave leaves windows marked as present on both outputs.
+    /// Binds this workspace to `output`: syncs cached geometry via `update_output_size`, and
+    /// fires `output_enter` + `set_preferred_scale_transform` on every window. Also refreshes
+    /// `output_id` to its canonical form (e.g. connector → make/model/serial) when `output_id`
+    /// already points to this output; does NOT reassign `output_id` when binding to a different
+    /// output (reclaim design — workspaces retain their designated output so that the original
+    /// monitor can pick them back up on reconnect). `output_id` is set at construction time.
+    ///
+    /// Must be paired with a prior `unbind_output` if the workspace was already bound to a
+    /// different output — Smithay accumulates per-output overlaps in a `HashMap`, so a bind
+    /// without a matching leave leaves windows marked as present on both outputs. Safe to call
+    /// on a freshly-constructed workspace: the windows list is empty, so `output_enter` is a
+    /// no-op and the caller contract is trivially satisfied.
     pub fn bind_output(&mut self, output: &Output) {
-        // Normalize designated output id: possibly replace connector with make/model/serial.
+        // Refresh OutputId when it already matches: the previous form could be a connector name
+        // from a workspace-config block, and we prefer the make/model/serial form post-bind.
         if self.output_id.as_ref().is_some_and(|id| id.matches(output)) {
             self.output_id = Some(OutputId::new(output));
         }
@@ -505,7 +513,9 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     /// Fires `output_leave` on every window. Caller supplies the output the workspace is
-    /// currently bound to — `Workspace` does not track it.
+    /// currently bound to — `Workspace` does not track it. Must be called before
+    /// `bind_output(&new)` on any transfer between monitors; see `bind_output` for the pairing
+    /// rule and rationale.
     pub fn unbind_output(&mut self, output: &Output) {
         for win in self.windows() {
             win.output_leave(output);

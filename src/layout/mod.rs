@@ -1095,7 +1095,6 @@ impl<W: LayoutElement> Layout<W> {
                 let scrolling_width = ws.resolve_scrolling_width(&window, width);
 
                 let tile = ws.make_tile(window);
-                // NoOutputs branch: workspace has no bound output; skip enter/leave.
                 ws.add_tile(
                     None,
                     tile,
@@ -1195,7 +1194,6 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for (idx, ws) in workspaces.iter_mut().enumerate() {
                     if ws.has_window(window) {
-                        // NoOutputs: no bound output; skip output_leave.
                         let removed = ws.remove_tile(None, window, transaction);
 
                         // Clean up empty workspaces.
@@ -1284,8 +1282,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     /// Returns the Smithay `Output` of the `Monitor` currently owning the workspace with the
-    /// given id, or `None` if the workspace lives in `MonitorSet::NoOutputs` (no monitor
-    /// connected) or doesn't exist.
+    /// given id, or `None` if no monitor currently owns this workspace or the id is unknown.
     pub fn output_for_workspace(&self, id: WorkspaceId) -> Option<&Output> {
         let MonitorSet::Normal { monitors, .. } = &self.monitor_set else {
             return None;
