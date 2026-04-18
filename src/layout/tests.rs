@@ -1,4 +1,5 @@
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::HashMap;
 
 use niri_config::utils::{Flag, MergeWith as _};
 use niri_config::workspace::WorkspaceName;
@@ -41,6 +42,10 @@ struct TestWindowInner {
     animate_next_configure: Cell<bool>,
     animation_snapshot: RefCell<Option<LayoutElementRenderSnapshot>>,
     rules: ResolvedWindowRules,
+    // Per-output `output_enter` count, matching Smithay's `Window::output_enter` semantics.
+    // Incremented on `output_enter`, decremented on `output_leave`; entries are dropped at zero.
+    // Used by `verify_output_bindings` to catch bind/unbind symmetry violations in the layout.
+    bound_outputs: RefCell<HashMap<Output, u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,7 +98,12 @@ impl TestWindow {
             animate_next_configure: Cell::new(false),
             animation_snapshot: RefCell::new(None),
             rules: params.rules.unwrap_or_default(),
+            bound_outputs: RefCell::new(HashMap::new()),
         }))
+    }
+
+    fn bound_outputs(&self) -> Vec<Output> {
+        self.0.bound_outputs.borrow().keys().cloned().collect()
     }
 
     fn communicate(&self) -> bool {
@@ -205,9 +215,24 @@ impl LayoutElement for TestWindow {
         false
     }
 
-    fn output_enter(&self, _output: &Output) {}
+    fn output_enter(&self, output: &Output) {
+        *self
+            .0
+            .bound_outputs
+            .borrow_mut()
+            .entry(output.clone())
+            .or_insert(0) += 1;
+    }
 
-    fn output_leave(&self, _output: &Output) {}
+    fn output_leave(&self, output: &Output) {
+        let mut bindings = self.0.bound_outputs.borrow_mut();
+        if let Some(count) = bindings.get_mut(output) {
+            *count -= 1;
+            if *count == 0 {
+                bindings.remove(output);
+            }
+        }
+    }
 
     fn set_offscreen_data(&self, _data: Option<OffscreenData>) {}
 
@@ -1634,6 +1659,49 @@ fn check_ops_on_layout(layout: &mut Layout<TestWindow>, ops: impl IntoIterator<I
     for op in ops {
         op.apply(layout);
         layout.verify_invariants();
+        verify_output_bindings(layout);
+    }
+}
+
+/// Asserts the bind/unbind symmetry contract from `Workspace::bind_output`: every window is
+/// marked (via `output_enter`) against exactly the `Output` of the `Monitor` that owns its
+/// workspace, and windows in `MonitorSet::NoOutputs` carry no bindings. Runs after every `Op`
+/// in `check_ops_on_layout` so `check_ops` proptest sequences catch any site that rebinds
+/// without unbinding, forgets to unbind on transfer, or drops the Smithay markers.
+#[track_caller]
+fn verify_output_bindings(layout: &Layout<TestWindow>) {
+    match &layout.monitor_set {
+        MonitorSet::Normal { monitors, .. } => {
+            for mon in monitors {
+                for ws in &mon.workspaces {
+                    for win in ws.windows() {
+                        let bound = win.bound_outputs();
+                        assert_eq!(
+                            bound,
+                            vec![mon.output.clone()],
+                            "window {:?} on monitor {} must be bound to exactly that monitor's \
+                             output; got {:?}",
+                            win.id(),
+                            mon.output.name(),
+                            bound.iter().map(|o| o.name()).collect::<Vec<_>>(),
+                        );
+                    }
+                }
+            }
+        }
+        MonitorSet::NoOutputs { workspaces } => {
+            for ws in workspaces {
+                for win in ws.windows() {
+                    let bound = win.bound_outputs();
+                    assert!(
+                        bound.is_empty(),
+                        "window {:?} on a NoOutputs workspace must have no bound outputs; got {:?}",
+                        win.id(),
+                        bound.iter().map(|o| o.name()).collect::<Vec<_>>(),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -2437,6 +2505,7 @@ fn preset_height_change_removes_preset() {
     layout.update_config(&config);
 
     layout.verify_invariants();
+    verify_output_bindings(&layout);
 }
 
 #[test]
