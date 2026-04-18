@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -597,106 +597,27 @@ impl State {
         let mut state = server.event_stream_state.borrow_mut();
         let state = &mut state.workspaces;
 
-        let mut events = Vec::new();
         let layout = &self.niri.layout;
         let focused_ws_id = layout.active_workspace().map(|ws| ws.id().get());
 
-        let mut seen = HashSet::new();
-        let mut any_structural = false;
-
-        for (mon, ws_idx, ws) in layout.workspaces() {
-            let id = ws.id().get();
-            seen.insert(id);
-            let new_ipc = Workspace {
-                id,
-                idx: u8::try_from(ws_idx + 1).unwrap_or(u8::MAX),
-                name: ws.name().cloned(),
-                output: mon.map(|mon| mon.output_name().clone()),
-                is_urgent: ws.is_urgent(),
-                is_active: mon.is_some_and(|mon| mon.active_workspace_idx() == ws_idx),
-                is_focused: Some(id) == focused_ws_id,
-                active_window_id: ws.active_window().map(|win| win.id().get()),
-            };
-
-            let Some(ipc_ws) = state.workspaces.get(&id) else {
-                // New workspace — structural addition.
-                any_structural = true;
-                events.push(Event::WorkspaceOpenedOrChanged { workspace: new_ipc });
-                continue;
-            };
-
-            // Structural change (anything not covered by a per-field event).
-            let structural_changed = ipc_ws.idx != new_ipc.idx
-                || ipc_ws.name != new_ipc.name
-                || ipc_ws.output != new_ipc.output;
-            if structural_changed {
-                any_structural = true;
-                events.push(Event::WorkspaceOpenedOrChanged {
-                    workspace: new_ipc.clone(),
-                });
-            }
-
-            // Per-field events fire independently of structural changes so a
-            // structural change on one workspace in the same frame as an urgency
-            // or activation change on another workspace no longer silently drops
-            // the per-field event (the previous `events.clear()` bail).
-            if ipc_ws.active_window_id != new_ipc.active_window_id {
-                events.push(Event::WorkspaceActiveWindowChanged {
-                    workspace_id: id,
-                    active_window_id: new_ipc.active_window_id,
-                });
-            }
-            if ipc_ws.is_urgent != new_ipc.is_urgent {
-                events.push(Event::WorkspaceUrgencyChanged {
+        let current: Vec<Workspace> = layout
+            .workspaces()
+            .map(|(mon, ws_idx, ws)| {
+                let id = ws.id().get();
+                Workspace {
                     id,
-                    urgent: new_ipc.is_urgent,
-                });
-            }
-            if new_ipc.is_focused && !ipc_ws.is_focused {
-                events.push(Event::WorkspaceActivated { id, focused: true });
-                continue;
-            }
-            if new_ipc.is_active && !ipc_ws.is_active {
-                events.push(Event::WorkspaceActivated { id, focused: false });
-            }
-        }
-
-        // Closed workspaces — structural removals.
-        let closed_ids: Vec<u64> = state
-            .workspaces
-            .keys()
-            .copied()
-            .filter(|id| !seen.contains(id))
+                    idx: u8::try_from(ws_idx + 1).unwrap_or(u8::MAX),
+                    name: ws.name().cloned(),
+                    output: mon.map(|mon| mon.output_name().clone()),
+                    is_urgent: ws.is_urgent(),
+                    is_active: mon.is_some_and(|mon| mon.active_workspace_idx() == ws_idx),
+                    is_focused: Some(id) == focused_ws_id,
+                    active_window_id: ws.active_window().map(|win| win.id().get()),
+                }
+            })
             .collect();
-        for id in closed_ids {
-            any_structural = true;
-            events.push(Event::WorkspaceClosed { id });
-        }
 
-        // BC: emit the full-list WorkspacesChanged whenever a structural change
-        // happened, so consumers that only handle the legacy event still keep up.
-        // Per docs/activities-design.md §4.6, deltas come first, then the full list.
-        if any_structural {
-            let workspaces = layout
-                .workspaces()
-                .map(|(mon, ws_idx, ws)| {
-                    let id = ws.id().get();
-                    Workspace {
-                        id,
-                        idx: u8::try_from(ws_idx + 1).unwrap_or(u8::MAX),
-                        name: ws.name().cloned(),
-                        output: mon.map(|mon| mon.output_name().clone()),
-                        is_urgent: ws.is_urgent(),
-                        is_active: mon.is_some_and(|mon| mon.active_workspace_idx() == ws_idx),
-                        is_focused: Some(id) == focused_ws_id,
-                        active_window_id: ws.active_window().map(|win| win.id().get()),
-                    }
-                })
-                .collect();
-            events.push(Event::WorkspacesChanged { workspaces });
-        }
-
-        for event in events {
+        for event in diff_workspaces(&state.workspaces, &current) {
             state.apply(event.clone());
             server.send_event(event);
         }
@@ -958,5 +879,250 @@ impl State {
         let event = Event::ScreenshotCaptured { path };
         state.apply(event.clone());
         server.send_event(event);
+    }
+}
+
+/// Diff the previously-emitted workspace snapshot against the current one and
+/// produce the list of `Event`s to emit.
+///
+/// Order: for each workspace in `current`, any `WorkspaceOpenedOrChanged`
+/// (structural) comes first, followed by per-field events
+/// (`WorkspaceActiveWindowChanged`, `WorkspaceUrgencyChanged`,
+/// `WorkspaceActivated`). Then `WorkspaceClosed` for each id in `previous` not
+/// present in `current`. Finally, a single backwards-compatible
+/// `WorkspacesChanged` if any structural change happened in this frame.
+///
+/// See `docs/activities-design.md` §4.5 / §4.6 / §9 (Phase 0a).
+fn diff_workspaces(previous: &HashMap<u64, Workspace>, current: &[Workspace]) -> Vec<Event> {
+    let mut events = Vec::new();
+    let mut seen = HashSet::with_capacity(current.len());
+    let mut any_structural = false;
+
+    for new_ipc in current {
+        let id = new_ipc.id;
+        seen.insert(id);
+
+        let Some(ipc_ws) = previous.get(&id) else {
+            // New workspace — structural addition. No per-field events for a
+            // fresh workspace; its full state is carried by WorkspaceOpenedOrChanged.
+            any_structural = true;
+            events.push(Event::WorkspaceOpenedOrChanged {
+                workspace: new_ipc.clone(),
+            });
+            continue;
+        };
+
+        // Structural change = anything not covered by a per-field event.
+        let structural_changed = ipc_ws.idx != new_ipc.idx
+            || ipc_ws.name != new_ipc.name
+            || ipc_ws.output != new_ipc.output;
+        if structural_changed {
+            any_structural = true;
+            events.push(Event::WorkspaceOpenedOrChanged {
+                workspace: new_ipc.clone(),
+            });
+        }
+
+        // Per-field events fire independently of structural changes: a
+        // structural change on one workspace in the same frame as an urgency
+        // or activation change on another workspace must not silently drop
+        // the per-field event (regression guard for the previous
+        // `events.clear()` bail).
+        if ipc_ws.active_window_id != new_ipc.active_window_id {
+            events.push(Event::WorkspaceActiveWindowChanged {
+                workspace_id: id,
+                active_window_id: new_ipc.active_window_id,
+            });
+        }
+        if ipc_ws.is_urgent != new_ipc.is_urgent {
+            events.push(Event::WorkspaceUrgencyChanged {
+                id,
+                urgent: new_ipc.is_urgent,
+            });
+        }
+        if new_ipc.is_focused && !ipc_ws.is_focused {
+            events.push(Event::WorkspaceActivated { id, focused: true });
+            continue;
+        }
+        if new_ipc.is_active && !ipc_ws.is_active {
+            events.push(Event::WorkspaceActivated { id, focused: false });
+        }
+    }
+
+    for &id in previous.keys() {
+        if !seen.contains(&id) {
+            any_structural = true;
+            events.push(Event::WorkspaceClosed { id });
+        }
+    }
+
+    if any_structural {
+        events.push(Event::WorkspacesChanged {
+            workspaces: current.to_vec(),
+        });
+    }
+
+    events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ws(id: u64, idx: u8, output: &str) -> Workspace {
+        Workspace {
+            id,
+            idx,
+            name: None,
+            output: Some(output.to_owned()),
+            is_urgent: false,
+            is_active: false,
+            is_focused: false,
+            active_window_id: None,
+        }
+    }
+
+    fn previous_from(items: &[Workspace]) -> HashMap<u64, Workspace> {
+        items.iter().cloned().map(|w| (w.id, w)).collect()
+    }
+
+    #[test]
+    fn empty_previous_emits_delta_per_workspace_and_full_list() {
+        let current = vec![ws(1, 1, "HDMI-1"), ws(2, 2, "HDMI-1")];
+        let events = diff_workspaces(&HashMap::new(), &current);
+        assert_eq!(events.len(), 3);
+        assert!(matches!(
+            &events[0],
+            Event::WorkspaceOpenedOrChanged { workspace } if workspace.id == 1
+        ));
+        assert!(matches!(
+            &events[1],
+            Event::WorkspaceOpenedOrChanged { workspace } if workspace.id == 2
+        ));
+        assert!(matches!(&events[2], Event::WorkspacesChanged { .. }));
+    }
+
+    #[test]
+    fn no_change_emits_nothing() {
+        let prev = previous_from(&[ws(1, 1, "HDMI-1")]);
+        let current = vec![ws(1, 1, "HDMI-1")];
+        let events = diff_workspaces(&prev, &current);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn per_field_only_change_does_not_emit_workspaces_changed() {
+        // Urgency flip on an existing workspace: per-field event only; no
+        // structural change means no BC full-list event.
+        let prev = previous_from(&[ws(1, 1, "HDMI-1")]);
+        let mut now = ws(1, 1, "HDMI-1");
+        now.is_urgent = true;
+        let events = diff_workspaces(&prev, &[now]);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            Event::WorkspaceUrgencyChanged {
+                id: 1,
+                urgent: true
+            }
+        ));
+    }
+
+    #[test]
+    fn structural_change_on_one_plus_per_field_on_another_emits_both() {
+        // Regression guard for the previous bail-to-full-replacement bug:
+        // a structural change on ws-1 in the same frame as an urgency change
+        // on ws-2 must emit BOTH events, not swallow ws-2's urgency.
+        let prev = previous_from(&[ws(1, 1, "HDMI-1"), ws(2, 2, "HDMI-1")]);
+        let mut ws1 = ws(1, 3, "HDMI-1"); // idx shifted 1 → 3
+        ws1.is_urgent = false;
+        let mut ws2 = ws(2, 2, "HDMI-1");
+        ws2.is_urgent = true; // new urgency on ws-2
+        let events = diff_workspaces(&prev, &[ws1, ws2]);
+
+        // Expected: WorkspaceOpenedOrChanged(id=1) + WorkspaceUrgencyChanged(id=2) +
+        // WorkspacesChanged
+        assert_eq!(events.len(), 3, "got {events:?}");
+        assert!(matches!(
+            &events[0],
+            Event::WorkspaceOpenedOrChanged { workspace } if workspace.id == 1 && workspace.idx == 3
+        ));
+        assert!(matches!(
+            events[1],
+            Event::WorkspaceUrgencyChanged {
+                id: 2,
+                urgent: true
+            }
+        ));
+        assert!(matches!(&events[2], Event::WorkspacesChanged { .. }));
+    }
+
+    #[test]
+    fn same_workspace_with_structural_and_per_field_changes_emits_both() {
+        // A single workspace with BOTH a structural change (idx) AND a per-field
+        // change (urgency) in the same frame must emit both events — the
+        // per-field check runs unconditionally after the structural check for
+        // every workspace, not just as a fallback when no structural change.
+        let prev = previous_from(&[ws(1, 1, "HDMI-1")]);
+        let mut now = ws(1, 3, "HDMI-1"); // idx: 1 → 3
+        now.is_urgent = true;
+        let events = diff_workspaces(&prev, &[now]);
+
+        assert_eq!(events.len(), 3, "got {events:?}");
+        assert!(matches!(
+            &events[0],
+            Event::WorkspaceOpenedOrChanged { workspace } if workspace.id == 1 && workspace.idx == 3
+        ));
+        assert!(matches!(
+            events[1],
+            Event::WorkspaceUrgencyChanged {
+                id: 1,
+                urgent: true
+            }
+        ));
+        assert!(matches!(&events[2], Event::WorkspacesChanged { .. }));
+    }
+
+    #[test]
+    fn removed_workspace_emits_closed_and_workspaces_changed() {
+        let prev = previous_from(&[ws(1, 1, "HDMI-1"), ws(2, 2, "HDMI-1")]);
+        let current = vec![ws(1, 1, "HDMI-1")];
+        let events = diff_workspaces(&prev, &current);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], Event::WorkspaceClosed { id: 2 }));
+        assert!(matches!(&events[1], Event::WorkspacesChanged { .. }));
+    }
+
+    #[test]
+    fn becoming_focused_suppresses_focused_false_event() {
+        // A workspace that flips to focused=true must not also emit the
+        // focused=false (active-only) event in the same diff.
+        let prev = previous_from(&[ws(1, 1, "HDMI-1")]);
+        let mut now = ws(1, 1, "HDMI-1");
+        now.is_focused = true;
+        now.is_active = true;
+        let events = diff_workspaces(&prev, &[now]);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            Event::WorkspaceActivated {
+                id: 1,
+                focused: true
+            }
+        ));
+    }
+
+    #[test]
+    fn new_workspace_emits_only_opened_or_changed() {
+        // New workspace with urgency/focus set: full state rides on
+        // WorkspaceOpenedOrChanged, not on separate per-field events.
+        let mut fresh = ws(1, 1, "HDMI-1");
+        fresh.is_urgent = true;
+        fresh.is_focused = true;
+        fresh.is_active = true;
+        let events = diff_workspaces(&HashMap::new(), &[fresh]);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], Event::WorkspaceOpenedOrChanged { .. }));
+        assert!(matches!(&events[1], Event::WorkspacesChanged { .. }));
     }
 }
