@@ -1378,8 +1378,12 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::NoOutputs { workspaces } => {
                 let pool = &self.workspaces;
                 if let Some((index, id)) = workspaces.iter().enumerate().find(|(_, id)| {
-                    pool.get(id)
-                        .and_then(|w| w.name.as_ref())
+                    let workspace = pool
+                        .get(id)
+                        .expect("NoOutputs id must be a key in the workspace pool");
+                    workspace
+                        .name
+                        .as_ref()
                         .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
                 }) {
                     return Some((index, pool.get(id).unwrap()));
@@ -2551,7 +2555,16 @@ impl<W: LayoutElement> Layout<W> {
                 monitors,
                 primary_idx,
                 active_monitor_idx,
-            } => (monitors, primary_idx, active_monitor_idx),
+            } => {
+                // 3a part 1 invariant: in Normal state the pool holds no workspaces
+                // (all owned workspaces live on their Monitor). Complements the
+                // NoOutputs arm's count-equality check below.
+                assert!(
+                    self.workspaces.is_empty(),
+                    "pool must be empty in Normal state"
+                );
+                (monitors, primary_idx, active_monitor_idx)
+            }
             MonitorSet::NoOutputs { workspaces } => {
                 // 3a part 1 invariant: every id in NoOutputs.workspaces is a key in the pool,
                 // and the pool holds exactly those workspaces (no connected monitors own any).
