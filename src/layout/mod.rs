@@ -1363,11 +1363,16 @@ impl<W: LayoutElement> Layout<W> {
                 for mon in monitors {
                     if let Some(index) = mon.view.ids().iter().position(|id| {
                         pool.get(id)
-                            .and_then(|ws| ws.name.as_ref())
+                            .expect("view id must be a key in the pool")
+                            .name
+                            .as_ref()
                             .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
                     }) {
                         let id = mon.view.ids()[index];
-                        return Some((index, pool.get(&id).unwrap()));
+                        return Some((
+                            index,
+                            pool.get(&id).expect("view id must be a key in the pool"),
+                        ));
                     }
                 }
             }
@@ -1962,7 +1967,9 @@ impl<W: LayoutElement> Layout<W> {
         self.monitors().find(|monitor| {
             monitor.view.ids().iter().any(|id| {
                 pool.get(id)
-                    .and_then(|ws| ws.name.as_ref())
+                    .expect("view id must be a key in the pool")
+                    .name
+                    .as_ref()
                     .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
             })
         })

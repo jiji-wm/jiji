@@ -455,12 +455,13 @@ impl<W: LayoutElement> Monitor<W> {
         pool: &'a HashMap<WorkspaceId, Workspace<W>>,
         workspace_name: &str,
     ) -> Option<&'a Workspace<W>> {
-        let id = self.view.ids().iter().copied().find(|id| {
-            pool.get(id)
-                .and_then(|ws| ws.name.as_ref())
+        self.view.ids().iter().find_map(|id| {
+            let ws = pool.get(id).expect("view id must be a key in the pool");
+            ws.name
+                .as_ref()
                 .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
-        })?;
-        pool.get(&id)
+                .then_some(ws)
+        })
     }
 
     pub fn find_named_workspace_index(
@@ -470,7 +471,9 @@ impl<W: LayoutElement> Monitor<W> {
     ) -> Option<usize> {
         self.view.ids().iter().position(|id| {
             pool.get(id)
-                .and_then(|ws| ws.name.as_ref())
+                .expect("view id must be a key in the pool")
+                .name
+                .as_ref()
                 .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
         })
     }
@@ -489,7 +492,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.view
             .ids()
             .iter()
-            .filter_map(move |id| pool.get(id))
+            .map(move |id| pool.get(id).expect("view id must be a key in the pool"))
             .flat_map(|ws| ws.windows())
     }
 
@@ -1255,7 +1258,7 @@ impl<W: LayoutElement> Monitor<W> {
                 .view
                 .ids()
                 .iter()
-                .filter_map(|id| pool.get(id))
+                .map(|id| pool.get(id).expect("view id must be a key in the pool"))
                 .any(|ws| ws.are_animations_ongoing())
     }
 
@@ -1265,7 +1268,7 @@ impl<W: LayoutElement> Monitor<W> {
                 .view
                 .ids()
                 .iter()
-                .filter_map(|id| pool.get(id))
+                .map(|id| pool.get(id).expect("view id must be a key in the pool"))
                 .any(|ws| ws.are_transitions_ongoing())
     }
 
