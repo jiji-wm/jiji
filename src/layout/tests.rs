@@ -2070,6 +2070,46 @@ fn primary_active_workspace_idx_not_updated_on_output_add() {
 }
 
 #[test]
+fn named_workspace_reattaches_to_same_output_after_reconnect() {
+    // A named workspace originally owned by output1 carries a window through a disconnect and
+    // reconnect. On reconnect, it must reattach to output1 (not to a sibling output that stayed
+    // connected), and the window must still be present on it.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: Some(1),
+            layout_config: None,
+        },
+        Op::AddWindowToNamedWorkspace {
+            params: TestWindowParams::new(0),
+            ws_name: 1,
+        },
+        Op::RemoveOutput(1),
+        Op::AddOutput(1),
+    ];
+
+    let layout = check_ops(ops);
+
+    let (_idx, ws) = layout
+        .find_workspace_by_name("ws1")
+        .expect("named workspace must still exist after reconnect");
+    assert!(
+        ws.has_window(&0),
+        "window added to named workspace must persist through disconnect/reconnect",
+    );
+    let output = layout
+        .output_for_workspace(ws.id())
+        .expect("named workspace must be bound to a connected output after reconnect");
+    assert_eq!(
+        output.name(),
+        "output1",
+        "named workspace must reattach to its original output after reconnect",
+    );
+}
+
+#[test]
 fn window_closed_on_previous_workspace() {
     let ops = [
         Op::AddOutput(1),
