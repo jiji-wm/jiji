@@ -945,63 +945,64 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn remove_output(&mut self, output: &Output) {
-        self.monitor_set = match mem::take(&mut self.monitor_set) {
-            MonitorSet::Normal {
-                mut monitors,
-                mut primary_idx,
-                mut active_monitor_idx,
-            } => {
-                let idx = monitors
-                    .iter()
-                    .position(|mon| &mon.output == output)
-                    .expect("trying to remove non-existing output");
-                let monitor = monitors.remove(idx);
+        let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set else {
+            panic!("tried to remove output when there were already none")
+        };
 
-                self.last_active_workspace_id
-                    .insert(monitor.output_name().clone(), monitor.view.active());
+        let idx = monitors
+            .iter()
+            .position(|mon| &mon.output == output)
+            .expect("trying to remove non-existing output");
+        let monitor = monitors.remove(idx);
 
-                let workspace_ids = monitor.into_workspace_ids(&mut self.workspaces);
+        self.last_active_workspace_id
+            .insert(monitor.output_name().clone(), monitor.view.active());
 
-                if monitors.is_empty() {
-                    // Removed the last monitor. Values already live in the pool; just reset their
-                    // options to layout-root ones.
-                    for id in &workspace_ids {
-                        self.workspaces
-                            .get_mut(id)
-                            .expect("workspace id must be a key in the pool")
-                            .update_config(self.options.clone());
-                    }
+        let workspace_ids = self.take_workspace_ids(&monitor);
 
-                    MonitorSet::NoOutputs {
-                        workspaces: workspace_ids,
-                    }
-                } else {
-                    if primary_idx >= idx {
-                        // Update primary_idx to either still point at the same monitor, or at some
-                        // other monitor if the primary has been removed.
-                        primary_idx = primary_idx.saturating_sub(1);
-                    }
-                    if active_monitor_idx >= idx {
-                        // Update active_monitor_idx to either still point at the same monitor, or
-                        // at some other monitor if the active monitor has
-                        // been removed.
-                        active_monitor_idx = active_monitor_idx.saturating_sub(1);
-                    }
+        // Re-destructure after take_workspace_ids: that call needed &mut self, so the earlier
+        // `monitors.remove(idx)` borrow had to end before it ran. Same constraint applies before
+        // the self.append_workspaces_to_monitor(...) tail call below — which is why the old
+        // single-`match mem::take(&mut self.monitor_set)` shape doesn't survive the refactor.
+        // Nothing between the borrows swaps the variant, so the else arm stays unreachable.
+        let MonitorSet::Normal {
+            monitors,
+            primary_idx,
+            active_monitor_idx,
+        } = &mut self.monitor_set
+        else {
+            unreachable!("monitor_set was Normal before take_workspace_ids ran on &mut self")
+        };
 
-                    let primary = &mut monitors[primary_idx];
-                    primary.append_workspaces(&mut self.workspaces, workspace_ids);
-
-                    MonitorSet::Normal {
-                        monitors,
-                        primary_idx,
-                        active_monitor_idx,
-                    }
-                }
+        if monitors.is_empty() {
+            // Removed the last monitor. Values already live in the pool; just reset their options
+            // to layout-root ones.
+            for id in &workspace_ids {
+                self.workspaces
+                    .get_mut(id)
+                    .expect("workspace id must be a key in the pool")
+                    .update_config(self.options.clone());
             }
-            MonitorSet::NoOutputs { .. } => {
-                panic!("tried to remove output when there were already none")
-            }
+
+            self.monitor_set = MonitorSet::NoOutputs {
+                workspaces: workspace_ids,
+            };
+            return;
         }
+
+        if *primary_idx >= idx {
+            // Update primary_idx to either still point at the same monitor, or at some other
+            // monitor if the primary has been removed.
+            *primary_idx = primary_idx.saturating_sub(1);
+        }
+        if *active_monitor_idx >= idx {
+            // Update active_monitor_idx to either still point at the same monitor, or at some
+            // other monitor if the active monitor has been removed.
+            *active_monitor_idx = active_monitor_idx.saturating_sub(1);
+        }
+
+        let primary_idx = *primary_idx;
+        self.append_workspaces_to_monitor(primary_idx, workspace_ids);
     }
 
     pub fn add_column_by_idx(
@@ -1542,9 +1543,16 @@ impl<W: LayoutElement> Layout<W> {
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
-                    if mon.unname_workspace(pool, id) {
-                        return;
+                    if !mon.view.ids().contains(&id) {
+                        continue;
                     }
+                    pool.get_mut(&id)
+                        .expect("view id must be a key in the pool")
+                        .unname();
+                    if mon.workspace_switch.is_none() {
+                        mon.clean_up_workspaces(pool);
+                    }
+                    return;
                 }
             }
             MonitorSet::NoOutputs { workspaces } => {
@@ -2077,6 +2085,162 @@ impl<W: LayoutElement> Layout<W> {
                 &mut [][..]
             };
         (monitors, &mut self.workspaces)
+    }
+
+    /// Remove the workspace at `view_idx` from the monitor at `mon_idx`, unbind it from the
+    /// output, and return its id. The workspace value remains in `self.workspaces` under that id —
+    /// caller decides whether to re-attach it to another monitor or drop it.
+    fn remove_workspace_from_monitor(
+        &mut self,
+        mon_idx: usize,
+        mut view_idx: usize,
+    ) -> WorkspaceId {
+        let (monitors, pool) = self.monitors_and_pool_mut();
+        let mon = &mut monitors[mon_idx];
+
+        if view_idx == mon.view.len() - 1 {
+            mon.add_workspace_bottom(pool);
+        }
+        if mon.options.layout.empty_workspace_above_first && view_idx == 0 {
+            mon.add_workspace_top(pool);
+            view_idx += 1;
+        }
+
+        // For monitor current workspace removal, we focus previous rather than next (<= rather
+        // than <). This is different from columns and tiles, but it lets move-workspace-to-monitor
+        // back and forth to preserve position. `WorkspaceView::remove_at` enforces this rule.
+        let id = mon.view.ids()[view_idx];
+        mon.view.remove_at(view_idx);
+
+        pool.get_mut(&id)
+            .expect("view id must be a key in the pool")
+            .unbind_output(&mon.output);
+
+        mon.workspace_switch = None;
+        mon.clean_up_workspaces(pool);
+
+        id
+    }
+
+    /// Attach an existing pool-held workspace to the monitor at `mon_idx` at `view_idx`.
+    ///
+    /// `id` must already be a key in `self.workspaces`. Binds the workspace to this monitor's
+    /// output, refreshes its config, inserts it into the view (adding a top empty bookend first if
+    /// `empty_workspace_above_first` is on), optionally activates it, clears any in-flight
+    /// `workspace_switch`, and runs `clean_up_workspaces`.
+    fn insert_workspace_onto_monitor(
+        &mut self,
+        mon_idx: usize,
+        id: WorkspaceId,
+        mut view_idx: usize,
+        activate: bool,
+    ) {
+        let (monitors, pool) = self.monitors_and_pool_mut();
+        let mon = &mut monitors[mon_idx];
+
+        let ws = pool
+            .get_mut(&id)
+            .expect("workspace id must be a key in the pool");
+        ws.bind_output(&mon.output);
+        ws.update_config(mon.options.clone());
+
+        // Don't insert past the last empty workspace.
+        if view_idx == mon.view.len() {
+            view_idx -= 1;
+        }
+        if view_idx == 0 && mon.options.layout.empty_workspace_above_first {
+            // Insert a new empty workspace on top to prepare for insertion of new workspace.
+            mon.add_workspace_top(pool);
+            view_idx += 1;
+        }
+
+        mon.view.insert(view_idx, id);
+
+        if activate {
+            mon.workspace_switch = None;
+            mon.activate_workspace(view_idx);
+        }
+
+        mon.workspace_switch = None;
+        mon.clean_up_workspaces(pool);
+    }
+
+    /// Attach a list of existing pool-held workspaces to the monitor at `mon_idx`, in order, just
+    /// above the bottom empty workspace.
+    ///
+    /// All `workspace_ids` must already be keys in `self.workspaces`.
+    fn append_workspaces_to_monitor(&mut self, mon_idx: usize, workspace_ids: Vec<WorkspaceId>) {
+        if workspace_ids.is_empty() {
+            return;
+        }
+
+        let (monitors, pool) = self.monitors_and_pool_mut();
+        let mon = &mut monitors[mon_idx];
+
+        for id in &workspace_ids {
+            let ws = pool
+                .get_mut(id)
+                .expect("workspace id must be a key in the pool");
+            ws.bind_output(&mon.output);
+            ws.update_config(mon.options.clone());
+        }
+
+        let empty_was_focused = mon.view.active_position() == mon.view.len() - 1;
+
+        // Insert in place so the view stays non-empty at every step
+        // (`WorkspaceView` requires at least one id).
+        let start = mon.view.len() - 1;
+        for (offset, id) in workspace_ids.into_iter().enumerate() {
+            let insert_pos = start + offset;
+            mon.view.insert(insert_pos, id);
+        }
+
+        // If empty_workspace_above_first is set and the first workspace is now no longer empty,
+        // add a new empty workspace on top.
+        if mon.options.layout.empty_workspace_above_first
+            && mon.workspace_at(pool, 0).has_windows_or_name()
+        {
+            mon.add_workspace_top(pool);
+        }
+
+        // If the empty workspace was focused on the primary monitor, keep it focused.
+        // Use `set_active_at` (not `activate`) so `previous` isn't clobbered — this is
+        // an output reshuffle, not a user-visible workspace switch.
+        if empty_was_focused {
+            mon.view.set_active_at(mon.view.len() - 1);
+        }
+
+        // FIXME: if we're adding workspaces to currently invisible positions
+        // (outside the workspace switch), we don't need to cancel it.
+        mon.workspace_switch = None;
+        mon.clean_up_workspaces(pool);
+    }
+
+    /// Detach the workspaces owned by `monitor` from its output.
+    ///
+    /// Non-empty workspaces stay in the pool with `output` unbound; empty unnamed workspaces
+    /// (typically the bookends added by `Monitor::new`) are removed from the pool since no caller
+    /// needs them back. Returns the retained ids in view order. Used when the output is
+    /// disconnecting and `monitor` has already been removed from `self.monitor_set`.
+    fn take_workspace_ids(&mut self, monitor: &Monitor<W>) -> Vec<WorkspaceId> {
+        let pool = &mut self.workspaces;
+        let mut kept = Vec::with_capacity(monitor.view.ids().len());
+        for id in monitor.view.ids() {
+            let ws = pool
+                .get_mut(id)
+                .expect("monitor ids must be keys in the pool");
+            if ws.has_windows_or_name() {
+                ws.unbind_output(&monitor.output);
+                kept.push(*id);
+            } else {
+                // Empty bookends: drop from the pool.
+                assert!(
+                    pool.remove(id).is_some(),
+                    "monitor id must be a key in the pool",
+                );
+            }
+        }
+        kept
     }
 
     pub fn monitors(&self) -> impl Iterator<Item = &Monitor<W>> + '_ {
@@ -3391,7 +3555,6 @@ impl<W: LayoutElement> Layout<W> {
         let clock = self.clock.clone();
         let options = self.options.clone();
 
-        let pool = &mut self.workspaces;
         match &mut self.monitor_set {
             MonitorSet::Normal {
                 monitors,
@@ -3408,7 +3571,7 @@ impl<W: LayoutElement> Layout<W> {
                             .unwrap_or(*primary_idx)
                     })
                     .unwrap_or(*active_monitor_idx);
-                let mon = &mut monitors[mon_idx];
+                let mon = &monitors[mon_idx];
 
                 let ws = Workspace::new_with_config(
                     &mon.output,
@@ -3417,14 +3580,20 @@ impl<W: LayoutElement> Layout<W> {
                     options,
                 );
                 let id = ws.id();
-                assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
-                mon.insert_workspace(pool, id, 0, false);
+                assert!(
+                    self.workspaces.insert(id, ws).is_none(),
+                    "fresh id must be unique",
+                );
+                self.insert_workspace_onto_monitor(mon_idx, id, 0, false);
             }
             MonitorSet::NoOutputs { workspaces } => {
                 let ws =
                     Workspace::new_with_config_no_outputs(Some(ws_config.clone()), clock, options);
                 let id = ws.id();
-                assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
+                assert!(
+                    self.workspaces.insert(id, ws).is_none(),
+                    "fresh id must be unique",
+                );
                 workspaces.insert(0, id);
             }
         }
@@ -3942,59 +4111,75 @@ impl<W: LayoutElement> Layout<W> {
         old_output: Option<Output>,
         new_output: &Output,
     ) -> bool {
-        let MonitorSet::Normal {
-            monitors,
-            active_monitor_idx,
-            ..
-        } = &mut self.monitor_set
-        else {
-            return false;
-        };
+        // Resolve monitor indices, bail-out conditions, and the `activate` flag under a shared
+        // borrow so the subsequent self-methods (`remove_workspace_from_monitor`,
+        // `insert_workspace_onto_monitor`) can take `&mut self`.
+        let (current_idx, target_idx, target_pos, activate) = {
+            let MonitorSet::Normal {
+                monitors,
+                active_monitor_idx,
+                ..
+            } = &self.monitor_set
+            else {
+                return false;
+            };
 
-        let current_idx = if let Some(old_output) = old_output {
-            monitors
+            let current_idx = if let Some(old_output) = old_output {
+                monitors
+                    .iter()
+                    .position(|mon| mon.output == old_output)
+                    .unwrap()
+            } else {
+                *active_monitor_idx
+            };
+            let target_idx = monitors
                 .iter()
-                .position(|mon| mon.output == old_output)
-                .unwrap()
-        } else {
-            *active_monitor_idx
+                .position(|mon| mon.output == *new_output)
+                .unwrap();
+
+            let current = &monitors[current_idx];
+            if current.view.len() <= old_idx {
+                return false;
+            }
+
+            // Only switch active monitor if the workspace to be moved is the currently focused
+            // one on the current monitor. Computed eagerly on both the cross-output and same-
+            // output paths; on the same-output short-circuit these are pure reads of view state,
+            // so the wasted work is harmless and keeps the shared-borrow scope rectangular.
+            let activate =
+                current_idx == *active_monitor_idx && old_idx == current.view.active_position();
+            let target_pos = monitors[target_idx].view.active_position() + 1;
+
+            (current_idx, target_idx, target_pos, activate)
         };
-        let target_idx = monitors
-            .iter()
-            .position(|mon| mon.output == *new_output)
-            .unwrap();
 
-        let pool = &mut self.workspaces;
-        let current = &mut monitors[current_idx];
-
-        if current.view.len() <= old_idx {
-            return false;
-        }
-
-        // Do not do anything if the output is already correct
+        // Do not do anything if the output is already correct.
         if current_idx == target_idx {
             // Just update the designated output id since this is an explicit movement action.
-            current.workspace_at_mut(pool, old_idx).output_id =
-                Some(OutputId::new(&current.output));
-
+            let (monitors, pool) = self.monitors_and_pool_mut();
+            let mon = &mut monitors[current_idx];
+            let new_output_id = Some(OutputId::new(mon.output()));
+            mon.workspace_at_mut(pool, old_idx).output_id = new_output_id;
             return false;
         }
 
-        // Only switch active monitor if the workspace to be moved is the currently focused one on
-        // the current monitor.
-        let activate =
-            current_idx == *active_monitor_idx && old_idx == current.view.active_position();
-
-        let ws_id = current.remove_workspace_by_idx(pool, old_idx);
-        pool.get_mut(&ws_id)
+        let ws_id = self.remove_workspace_from_monitor(current_idx, old_idx);
+        self.workspaces
+            .get_mut(&ws_id)
             .expect("workspace id must be a key in the pool")
             .output_id = Some(OutputId::new(new_output));
-
-        let target = &mut monitors[target_idx];
-        let target_pos = target.view.active_position() + 1;
-        target.insert_workspace(pool, ws_id, target_pos, activate);
+        self.insert_workspace_onto_monitor(target_idx, ws_id, target_pos, activate);
 
         if activate {
+            // Re-destructure: the insert_workspace_onto_monitor call above took &mut self, so the
+            // earlier shared-borrow scope is long gone. Variant is still Normal (early-return
+            // above guards it and the call chain since doesn't swap it).
+            let MonitorSet::Normal {
+                active_monitor_idx, ..
+            } = &mut self.monitor_set
+            else {
+                unreachable!("monitor_set must be Normal after insert_workspace_onto_monitor")
+            };
             *active_monitor_idx = target_idx;
         }
 
