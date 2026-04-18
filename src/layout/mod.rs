@@ -734,7 +734,10 @@ impl<W: LayoutElement> Layout<W> {
                     opts.clone(),
                 );
                 let id = workspace.id();
-                workspaces.insert(id, workspace);
+                assert!(
+                    workspaces.insert(id, workspace).is_none(),
+                    "fresh id must be unique"
+                );
                 id
             })
             .collect();
@@ -800,7 +803,10 @@ impl<W: LayoutElement> Layout<W> {
                             workspace_ids.push(id);
                         } else {
                             // Empty unnamed workspaces don't come along — drop from the pool.
-                            pool.remove(&id);
+                            assert!(
+                                pool.remove(&id).is_some(),
+                                "view id must be a key in the pool",
+                            );
                         }
 
                         // Without this exception, the first monitor to connect can end up
@@ -1095,7 +1101,7 @@ impl<W: LayoutElement> Layout<W> {
                             let ws =
                                 Workspace::new_no_outputs(self.clock.clone(), self.options.clone());
                             let id = ws.id();
-                            pool.insert(id, ws);
+                            assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
                             workspaces.push(id);
                         }
 
@@ -1128,7 +1134,7 @@ impl<W: LayoutElement> Layout<W> {
                                     self.options.clone(),
                                 );
                                 let id = ws.id();
-                                pool.insert(id, ws);
+                                assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
                                 workspaces.push(id);
                             }
 
@@ -1236,7 +1242,10 @@ impl<W: LayoutElement> Layout<W> {
                                 && mon.workspace_switch.is_none()
                             {
                                 mon.view.remove_at(idx);
-                                pool.remove(&id);
+                                assert!(
+                                    pool.remove(&id).is_some(),
+                                    "view id must be a key in the pool",
+                                );
                             }
 
                             // Special case handling when empty_workspace_above_first is set and all
@@ -1249,7 +1258,10 @@ impl<W: LayoutElement> Layout<W> {
                                 assert!(!mon.workspace_at(pool, 1).has_windows_or_name());
                                 let drop_id = mon.view.ids()[1];
                                 mon.view.remove_at(1);
-                                pool.remove(&drop_id);
+                                assert!(
+                                    pool.remove(&drop_id).is_some(),
+                                    "view id must be a key in the pool",
+                                );
                             }
                             return Some(removed);
                         }
@@ -1267,7 +1279,10 @@ impl<W: LayoutElement> Layout<W> {
                         // Clean up empty workspaces.
                         if !ws.has_windows_or_name() {
                             workspaces.remove(idx);
-                            pool.remove(&id);
+                            assert!(
+                                pool.remove(&id).is_some(),
+                                "NoOutputs id must be a key in the workspace pool",
+                            );
                         }
 
                         return Some(removed);
@@ -1450,7 +1465,10 @@ impl<W: LayoutElement> Layout<W> {
                     // Clean up empty workspaces.
                     if !ws.has_windows() {
                         workspaces.remove(idx);
-                        pool.remove(&id);
+                        assert!(
+                            pool.remove(&id).is_some(),
+                            "NoOutputs id must be a key in the workspace pool",
+                        );
                     }
                 }
             }
@@ -3258,14 +3276,14 @@ impl<W: LayoutElement> Layout<W> {
                     options,
                 );
                 let id = ws.id();
-                pool.insert(id, ws);
+                assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
                 mon.insert_workspace(pool, id, 0, false);
             }
             MonitorSet::NoOutputs { workspaces } => {
                 let ws =
                     Workspace::new_with_config_no_outputs(Some(ws_config.clone()), clock, options);
                 let id = ws.id();
-                pool.insert(id, ws);
+                assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
                 workspaces.insert(0, id);
             }
         }
@@ -4695,7 +4713,7 @@ impl<W: LayoutElement> Layout<W> {
                 if workspaces.is_empty() {
                     let ws = Workspace::new_no_outputs(self.clock.clone(), self.options.clone());
                     let id = ws.id();
-                    pool.insert(id, ws);
+                    assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
                     workspaces.push(id);
                 }
                 let ws = pool.get_mut(&workspaces[0]).unwrap();

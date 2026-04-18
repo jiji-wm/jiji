@@ -394,7 +394,10 @@ impl<W: LayoutElement> Monitor<W> {
                 kept.push(*id);
             } else {
                 // Empty bookends: drop from the pool.
-                pool.remove(id);
+                assert!(
+                    pool.remove(id).is_some(),
+                    "monitor id must be a key in the pool",
+                );
             }
         }
         kept
@@ -745,7 +748,10 @@ impl<W: LayoutElement> Monitor<W> {
             if !self.workspace_at(pool, idx).has_windows_or_name() {
                 let id = self.view.ids()[idx];
                 self.view.remove_at(idx);
-                pool.remove(&id);
+                assert!(
+                    pool.remove(&id).is_some(),
+                    "view id must be a key in the pool",
+                );
             }
         }
 
@@ -756,7 +762,10 @@ impl<W: LayoutElement> Monitor<W> {
             assert!(!self.workspace_at(pool, 1).has_windows_or_name());
             let id = self.view.ids()[1];
             self.view.remove_at(1);
-            pool.remove(&id);
+            assert!(
+                pool.remove(&id).is_some(),
+                "view id must be a key in the pool",
+            );
         }
     }
 
@@ -1396,7 +1405,10 @@ impl<W: LayoutElement> Monitor<W> {
             } else if self.workspace_switch.is_none() && self.view.active_position() != 0 {
                 let id = self.view.ids()[0];
                 self.view.remove_at(0);
-                pool.remove(&id);
+                assert!(
+                    pool.remove(&id).is_some(),
+                    "view id must be a key in the pool",
+                );
             }
         }
 
