@@ -20,7 +20,7 @@ use super::workspace::{
     compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
     WorkspaceRenderElement,
 };
-use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options};
+use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutCtx, LayoutElement, Options};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::niri_render_elements;
@@ -436,6 +436,12 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn output_name(&self) -> &String {
         &self.output_name
+    }
+
+    /// Access the per-monitor workspace view. Use with [`LayoutCtx::new`] to
+    /// build the render/hit-test context for this monitor.
+    pub fn view(&self) -> &WorkspaceView {
+        &self.view
     }
 
     pub fn active_workspace_idx(&self) -> usize {
@@ -1733,41 +1739,26 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn workspaces_with_render_geo<'a>(
         &'a self,
-        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        ctx: LayoutCtx<'a, W>,
     ) -> impl Iterator<Item = (&'a Workspace<W>, Rectangle<f64, Logical>)> + 'a {
         let output_geo = Rectangle::from_size(self.view_size);
 
         let geo = self.workspaces_render_geo();
-        let ids = self.view.ids();
-        zip(ids.iter(), geo)
-            .map(move |(id, geo)| {
-                (
-                    pool.get(id).expect("view id must be a key in the pool"),
-                    geo,
-                )
-            })
+        zip(ctx.view().ids().iter().copied(), geo)
+            .map(move |(id, geo)| (ctx.workspace(id), geo))
             // Cull out workspaces outside the output.
             .filter(move |(_ws, geo)| geo.intersection(output_geo).is_some())
     }
 
     pub fn workspaces_with_render_geo_idx<'a>(
         &'a self,
-        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        ctx: LayoutCtx<'a, W>,
     ) -> impl Iterator<Item = ((usize, &'a Workspace<W>), Rectangle<f64, Logical>)> + 'a {
         let output_geo = Rectangle::from_size(self.view_size);
 
         let geo = self.workspaces_render_geo();
-        let ids = self.view.ids();
-        zip(ids.iter().enumerate(), geo)
-            .map(move |((idx, id), geo)| {
-                (
-                    (
-                        idx,
-                        pool.get(id).expect("view id must be a key in the pool"),
-                    ),
-                    geo,
-                )
-            })
+        zip(ctx.view().ids().iter().copied().enumerate(), geo)
+            .map(move |((idx, id), geo)| ((idx, ctx.workspace(id)), geo))
             // Cull out workspaces outside the output.
             .filter(move |(_ws, geo)| geo.intersection(output_geo).is_some())
     }
@@ -1790,37 +1781,35 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn workspace_under<'a>(
         &'a self,
-        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        ctx: LayoutCtx<'a, W>,
         pos_within_output: Point<f64, Logical>,
     ) -> Option<(&'a Workspace<W>, Rectangle<f64, Logical>)> {
-        let (ws, geo) = self
-            .workspaces_with_render_geo(pool)
-            .find_map(|(ws, geo)| {
-                // Extend width to entire output.
-                let loc = Point::from((0., geo.loc.y));
-                let size = Size::from((self.view_size.w, geo.size.h));
-                let bounds = Rectangle::new(loc, size);
+        let (ws, geo) = self.workspaces_with_render_geo(ctx).find_map(|(ws, geo)| {
+            // Extend width to entire output.
+            let loc = Point::from((0., geo.loc.y));
+            let size = Size::from((self.view_size.w, geo.size.h));
+            let bounds = Rectangle::new(loc, size);
 
-                bounds.contains(pos_within_output).then_some((ws, geo))
-            })?;
+            bounds.contains(pos_within_output).then_some((ws, geo))
+        })?;
         Some((ws, geo))
     }
 
     pub fn workspace_under_narrow<'a>(
         &'a self,
-        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        ctx: LayoutCtx<'a, W>,
         pos_within_output: Point<f64, Logical>,
     ) -> Option<&'a Workspace<W>> {
-        self.workspaces_with_render_geo(pool)
+        self.workspaces_with_render_geo(ctx)
             .find_map(|(ws, geo)| geo.contains(pos_within_output).then_some(ws))
     }
 
     pub fn window_under<'a>(
         &'a self,
-        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        ctx: LayoutCtx<'a, W>,
         pos_within_output: Point<f64, Logical>,
     ) -> Option<(&'a W, HitType)> {
-        let (ws, geo) = self.workspace_under(pool, pos_within_output)?;
+        let (ws, geo) = self.workspace_under(ctx, pos_within_output)?;
 
         if self.overview_progress.is_some() {
             let zoom = self.overview_zoom();
@@ -1837,23 +1826,23 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn resize_edges_under(
         &self,
-        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        ctx: LayoutCtx<'_, W>,
         pos_within_output: Point<f64, Logical>,
     ) -> Option<ResizeEdge> {
         if self.overview_progress.is_some() {
             return None;
         }
 
-        let (ws, geo) = self.workspace_under(pool, pos_within_output)?;
+        let (ws, geo) = self.workspace_under(ctx, pos_within_output)?;
         ws.resize_edges_under(pos_within_output - geo.loc)
     }
 
     pub(super) fn insert_position(
         &self,
-        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        ctx: LayoutCtx<'_, W>,
         pos_within_output: Point<f64, Logical>,
     ) -> (InsertWorkspace, Rectangle<f64, Logical>) {
-        let mut iter = self.workspaces_with_render_geo_idx(pool);
+        let mut iter = self.workspaces_with_render_geo_idx(ctx);
 
         let dummy = Rectangle::default();
 
@@ -1898,13 +1887,14 @@ impl<W: LayoutElement> Monitor<W> {
         (InsertWorkspace::NewAt(last_idx + 1), dummy)
     }
 
-    pub fn render_above_top_layer(&self, pool: &HashMap<WorkspaceId, Workspace<W>>) -> bool {
+    pub fn render_above_top_layer(&self, ctx: LayoutCtx<'_, W>) -> bool {
         // Render above the top layer only if the view is stationary.
         if self.workspace_switch.is_some() || self.overview_progress.is_some() {
             return false;
         }
 
-        self.active_workspace_ref(pool).render_above_top_layer()
+        ctx.workspace_at(ctx.view().active_position())
+            .render_above_top_layer()
     }
 
     pub fn render_insert_hint_between_workspaces<R: NiriRenderer>(
@@ -1934,7 +1924,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn render_workspaces<R: NiriRenderer>(
         &self,
-        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        lctx: LayoutCtx<'_, W>,
         mut ctx: RenderCtx<R>,
         focus_ring: bool,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
@@ -1985,7 +1975,7 @@ impl<W: LayoutElement> Monitor<W> {
             )
         };
 
-        for (ws, geo) in self.workspaces_with_render_geo(pool) {
+        for (ws, geo) in self.workspaces_with_render_geo(lctx) {
             // Macro instead of closure because ws and insert hint have different elem types.
             macro_rules! push {
                 () => {{
@@ -2016,7 +2006,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn render_workspace_shadows<R: NiriRenderer>(
         &self,
-        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        ctx: LayoutCtx<'_, W>,
         renderer: &mut R,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
@@ -2030,7 +2020,7 @@ impl<W: LayoutElement> Monitor<W> {
         let scale = self.scale.fractional_scale();
         let zoom = self.overview_zoom();
 
-        for (ws, geo) in self.workspaces_with_render_geo(pool) {
+        for (ws, geo) in self.workspaces_with_render_geo(ctx) {
             ws.render_shadow(renderer, &mut |elem| {
                 let elem = elem.with_alpha(alpha);
                 let elem = MonitorInnerRenderElement::Shadow(elem);
@@ -2428,7 +2418,10 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         let scale = self.scale().fractional_scale();
-        let iter = self.workspaces_with_render_geo(pool);
+        // TODO: source ctx from the active activity's view for this monitor,
+        // not `self.view`.
+        let ctx = LayoutCtx::new(pool, &self.view);
+        let iter = self.workspaces_with_render_geo(ctx);
         for (_ws, ws_geo) in iter {
             let pos = ws_geo.loc;
             let rounded_pos = pos.to_physical_precise_round(scale).to_logical(scale);

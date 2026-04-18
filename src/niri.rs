@@ -141,7 +141,8 @@ use crate::layer::MappedLayer;
 use crate::layout::tile::TileRenderElement;
 use crate::layout::workspace::{Workspace, WorkspaceId};
 use crate::layout::{
-    HitType, Layout, LayoutElement as _, LayoutElementRenderElement, MonitorRenderElement,
+    HitType, Layout, LayoutCtx, LayoutElement as _, LayoutElementRenderElement,
+    MonitorRenderElement,
 };
 use crate::niri_render_elements;
 use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
@@ -1149,6 +1150,7 @@ impl State {
         } else if let Some(output) = self.niri.layout.active_output() {
             let pool_ = self.niri.layout.workspace_pool();
             let mon = self.niri.layout.monitor_for_output(output).unwrap();
+            let ctx_ = LayoutCtx::new(pool_, mon.view());
             let layers = layer_map_for_output(output);
 
             // Explicitly check for layer-shell popup grabs here, our keyboard focus will stay on
@@ -1221,7 +1223,7 @@ impl State {
 
             surface = surface.or_else(|| focus_on_layer(Layer::Overlay));
 
-            if mon.render_above_top_layer(pool_) {
+            if mon.render_above_top_layer(ctx_) {
                 surface = surface.or_else(layout_focus);
                 surface = surface.or_else(|| focus_on_layer(Layer::Top));
                 surface = surface.or_else(|| focus_on_layer(Layer::Bottom));
@@ -3141,7 +3143,8 @@ impl Niri {
 
         let pool = self.layout.workspace_pool();
         let mon = self.layout.monitor_for_output(output).unwrap();
-        if mon.render_above_top_layer(pool) {
+        let ctx = LayoutCtx::new(pool, mon.view());
+        if mon.render_above_top_layer(ctx) {
             return false;
         }
 
@@ -3184,7 +3187,8 @@ impl Niri {
                     // Background and bottom layers move together with the workspaces.
                     let pool = self.layout.workspace_pool();
                     let mon = self.layout.monitor_for_output(output)?;
-                    let (_, geo) = mon.workspace_under(pool, pos_within_output)?;
+                    let ctx = LayoutCtx::new(pool, mon.view());
+                    let (_, geo) = mon.workspace_under(ctx, pos_within_output)?;
                     layer_pos_within_output += geo.loc;
 
                     let surface_type = WindowSurfaceType::POPUP | WindowSurfaceType::SUBSURFACE;
@@ -3348,7 +3352,8 @@ impl Niri {
                     if matches!(layer, Layer::Background | Layer::Bottom) {
                         let pool = self.layout.workspace_pool();
                         let mon = self.layout.monitor_for_output(output)?;
-                        let (_, geo) = mon.workspace_under(pool, pos_within_output)?;
+                        let ctx = LayoutCtx::new(pool, mon.view());
+                        let (_, geo) = mon.workspace_under(ctx, pos_within_output)?;
                         layer_pos_within_output += geo.loc;
                         // Don't need to deal with zoom here because in the overview background and
                         // bottom layers don't receive input.
@@ -3406,6 +3411,7 @@ impl Niri {
 
         let pool = self.layout.workspace_pool();
         let mon = self.layout.monitor_for_output(output).unwrap();
+        let ctx = LayoutCtx::new(pool, mon.view());
 
         let mut under =
             layer_popup_under(Layer::Overlay).or_else(|| layer_toplevel_under(Layer::Overlay));
@@ -3414,7 +3420,7 @@ impl Niri {
 
         // When rendering above the top layer, we put the regular monitor elements first.
         // Otherwise, we will render all layer-shell pop-ups and the top layer on top.
-        if mon.render_above_top_layer(pool) {
+        if mon.render_above_top_layer(ctx) {
             under = under
                 .or_else(interactive_moved_window_under)
                 .or_else(window_under)
@@ -4119,7 +4125,8 @@ impl Niri {
                 state.xray.workspaces.clear();
                 let pool = self.layout.workspace_pool();
                 let mon = self.layout.monitor_for_output(out).unwrap();
-                for (ws, geo) in mon.workspaces_with_render_geo(pool) {
+                let lctx = LayoutCtx::new(pool, mon.view());
+                for (ws, geo) in mon.workspaces_with_render_geo(lctx) {
                     let bg_color = ws.render_background().color();
                     state.xray.workspaces.push((geo, bg_color));
                 }
@@ -4306,6 +4313,7 @@ impl Niri {
         // Get monitor elements.
         let pool = self.layout.workspace_pool();
         let mon = self.layout.monitor_for_output(output).unwrap();
+        let lctx = LayoutCtx::new(pool, mon.view());
         let zoom = mon.overview_zoom();
 
         // Get layer-shell elements.
@@ -4372,13 +4380,13 @@ impl Niri {
 
         // When rendering above the top layer, we put the regular monitor elements first.
         // Otherwise, we will render all layer-shell pop-ups and the top layer on top.
-        if mon.render_above_top_layer(pool) {
+        if mon.render_above_top_layer(lctx) {
             self.layout
                 .render_interactive_move_for_output(ctx.r(), output, &mut |elem| push(elem.into()));
 
             mon.render_insert_hint_between_workspaces(ctx.renderer, &mut |elem| push(elem.into()));
 
-            mon.render_workspaces(pool, ctx.r(), focus_ring, &mut |elem| push(elem.into()));
+            mon.render_workspaces(lctx, ctx.r(), focus_ring, &mut |elem| push(elem.into()));
 
             push_popups_from_layer!(Layer::Top);
             push_normal_from_layer!(Layer::Top);
@@ -4389,7 +4397,7 @@ impl Niri {
             push_normal_from_layer!(Layer::Background);
 
             // We don't expect more than one workspace when render_above_top_layer().
-            if let Some((ws, _geo)) = mon.workspaces_with_render_geo(pool).next() {
+            if let Some((ws, _geo)) = mon.workspaces_with_render_geo(lctx).next() {
                 push(ws.render_background().into());
             }
         } else {
@@ -4412,16 +4420,16 @@ impl Niri {
                 }};
             }
 
-            for (ws, geo) in mon.workspaces_with_render_geo(pool) {
+            for (ws, geo) in mon.workspaces_with_render_geo(lctx) {
                 let ns = Some(ws.id().get() as usize);
                 let xray_pos = XrayPos::new(geo.loc, zoom);
                 push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
                 push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
             }
 
-            mon.render_workspaces(pool, ctx.r(), focus_ring, &mut |elem| push(elem.into()));
+            mon.render_workspaces(lctx, ctx.r(), focus_ring, &mut |elem| push(elem.into()));
 
-            for (ws, geo) in mon.workspaces_with_render_geo(pool) {
+            for (ws, geo) in mon.workspaces_with_render_geo(lctx) {
                 // The render element namespace. This will be set to the workspace index for
                 // elements duplicated across workspaces (i.e. background and bottom layers) in
                 // order to have their non-xray framebuffer effects separated from each other.
@@ -4439,7 +4447,7 @@ impl Niri {
             }
         }
 
-        mon.render_workspace_shadows(pool, ctx.renderer, &mut |elem| push(elem.into()));
+        mon.render_workspace_shadows(lctx, ctx.renderer, &mut |elem| push(elem.into()));
 
         // Then the backdrop.
         push_popups_from_layer!(Layer::Background, true);

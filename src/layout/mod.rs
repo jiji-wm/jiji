@@ -52,8 +52,8 @@ use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size, Transform};
 use tile::{Tile, TileRenderElement};
 use workspace::{WorkspaceAddWindowTarget, WorkspaceId};
 
-pub use self::monitor::MonitorRenderElement;
 use self::activity::WorkspaceView;
+pub use self::monitor::MonitorRenderElement;
 use self::monitor::{Monitor, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
 use crate::animation::{Animation, Clock};
@@ -133,25 +133,30 @@ pub enum SizingMode {
 /// Read-only context for render and hit-test paths on a monitor.
 ///
 /// Bundles `(&pool, &view)` so render-path method signatures don't have to
-/// juggle both as separate args. Pre-activities the view lives on `Monitor`
-/// and the pool on `Layout`; post-activities (Phase 1a) the view relocates to
-/// `Activity.views` — render sites that already consume a `LayoutCtx` keep
-/// their signatures unchanged through that move.
+/// juggle both as separate args, and so the view's storage location can
+/// change without re-touching every call site.
 ///
-/// Construct at call sites as `LayoutCtx::new(pool, &mon.view)`. Both borrows
+/// Construct at call sites as `LayoutCtx::new(pool, mon.view())`. Both borrows
 /// are shared, so a caller holding `&mon` can pass `ctx` into `&self` methods
 /// on the same `mon` without conflict.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct LayoutCtx<'a, W: LayoutElement> {
     pool: &'a HashMap<WorkspaceId, Workspace<W>>,
     view: &'a WorkspaceView,
 }
 
+// Manual `Copy`/`Clone` — the derives would otherwise inherit `W: Copy` /
+// `W: Clone`, but `LayoutCtx` only holds shared references so `W` doesn't need
+// either bound.
+impl<W: LayoutElement> Copy for LayoutCtx<'_, W> {}
+impl<W: LayoutElement> Clone for LayoutCtx<'_, W> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 impl<'a, W: LayoutElement> LayoutCtx<'a, W> {
-    pub fn new(
-        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
-        view: &'a WorkspaceView,
-    ) -> Self {
+    pub fn new(pool: &'a HashMap<WorkspaceId, Workspace<W>>, view: &'a WorkspaceView) -> Self {
         Self { pool, view }
     }
 
@@ -2724,7 +2729,8 @@ impl<W: LayoutElement> Layout<W> {
         pos_within_output: Point<f64, Logical>,
     ) -> Option<(&W, HitType)> {
         let mon = self.monitor_for_output(output)?;
-        mon.window_under(&self.workspaces, pos_within_output)
+        let ctx = LayoutCtx::new(&self.workspaces, &mon.view);
+        mon.window_under(ctx, pos_within_output)
     }
 
     pub fn resize_edges_under(
@@ -2733,7 +2739,8 @@ impl<W: LayoutElement> Layout<W> {
         pos_within_output: Point<f64, Logical>,
     ) -> Option<ResizeEdge> {
         let mon = self.monitor_for_output(output)?;
-        mon.resize_edges_under(&self.workspaces, pos_within_output)
+        let ctx = LayoutCtx::new(&self.workspaces, &mon.view);
+        mon.resize_edges_under(ctx, pos_within_output)
     }
 
     pub fn workspace_under(
@@ -2750,11 +2757,12 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         let mon = self.monitor_for_output(output)?;
+        let ctx = LayoutCtx::new(&self.workspaces, &mon.view);
         if extended_bounds {
-            mon.workspace_under(&self.workspaces, pos_within_output)
+            mon.workspace_under(ctx, pos_within_output)
                 .map(|(ws, _)| ws)
         } else {
-            mon.workspace_under_narrow(&self.workspaces, pos_within_output)
+            mon.workspace_under_narrow(ctx, pos_within_output)
         }
     }
 
@@ -3067,8 +3075,9 @@ impl<W: LayoutElement> Layout<W> {
                     scrolled |= mon.dnd_scroll_gesture_scroll(pos_within_output, 1. / zoom);
 
                     if is_scrolling {
+                        let ctx = LayoutCtx::new(&*pool, &mon.view);
                         if let Some((ws_id, geo)) = mon
-                            .workspace_under(pool, pos_within_output)
+                            .workspace_under(ctx, pos_within_output)
                             .map(|(ws, geo)| (ws.id(), geo))
                         {
                             let ws = pool
@@ -3088,11 +3097,12 @@ impl<W: LayoutElement> Layout<W> {
                             dnd.hold = None;
                         }
                     } else if is_dnd {
+                        let ctx = LayoutCtx::new(&*pool, &mon.view);
                         let target = mon
-                            .window_under(pool, pos_within_output)
+                            .window_under(ctx, pos_within_output)
                             .map(|(win, _)| DndHoldTarget::Window(win.id().clone()))
                             .or_else(|| {
-                                mon.workspace_under_narrow(pool, pos_within_output)
+                                mon.workspace_under_narrow(ctx, pos_within_output)
                                     .map(|ws| DndHoldTarget::Workspace(ws.id()))
                             });
 
@@ -3327,7 +3337,8 @@ impl<W: LayoutElement> Layout<W> {
         if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
             if let Some(mon) = monitors.iter_mut().find(|m| m.output == move_.output) {
                 let zoom = mon.overview_zoom();
-                let (insert_ws, geo) = mon.insert_position(pool, move_.pointer_pos_within_output);
+                let ctx = LayoutCtx::new(&*pool, &mon.view);
+                let (insert_ws, geo) = mon.insert_position(ctx, move_.pointer_pos_within_output);
                 match insert_ws {
                     InsertWorkspace::Existing(ws_id) => {
                         let ws = pool
@@ -4311,7 +4322,8 @@ impl<W: LayoutElement> Layout<W> {
 
         let pool = &self.workspaces;
         let Some((mon, (ws, ws_geo))) = self.monitors().find_map(|mon| {
-            mon.workspaces_with_render_geo(pool)
+            let ctx = LayoutCtx::new(pool, &mon.view);
+            mon.workspaces_with_render_geo(ctx)
                 .find(|(ws, _)| ws.has_window(&window_id))
                 .map(|rv| (mon, rv))
         }) else {
@@ -4443,7 +4455,8 @@ impl<W: LayoutElement> Layout<W> {
                 let pool = &self.workspaces;
                 let mut tile_pos = None;
                 if let Some((mon, (ws, ws_geo))) = self.monitors().find_map(|mon| {
-                    mon.workspaces_with_render_geo(pool)
+                    let ctx = LayoutCtx::new(pool, &mon.view);
+                    mon.workspaces_with_render_geo(ctx)
                         .find(|(ws, _)| ws.has_window(window))
                         .map(|rv| (mon, rv))
                 }) {
@@ -4538,8 +4551,8 @@ impl<W: LayoutElement> Layout<W> {
 
                 let mut ws_id = None;
                 if let Some(mon) = self.monitor_for_output(&output) {
-                    let (insert_ws, _) =
-                        mon.insert_position(&self.workspaces, move_.pointer_pos_within_output);
+                    let ctx = LayoutCtx::new(&self.workspaces, &mon.view);
+                    let (insert_ws, _) = mon.insert_position(ctx, move_.pointer_pos_within_output);
                     if let InsertWorkspace::Existing(id) = insert_ws {
                         ws_id = Some(id);
                     }
@@ -4684,8 +4697,9 @@ impl<W: LayoutElement> Layout<W> {
                     if let Some(mon) = monitors.iter_mut().find(|mon| mon.output == move_.output) {
                         let zoom = mon.overview_zoom();
 
+                        let ctx = LayoutCtx::new(&*pool, &mon.view);
                         let (insert_ws, geo) =
-                            mon.insert_position(pool, move_.pointer_pos_within_output);
+                            mon.insert_position(ctx, move_.pointer_pos_within_output);
                         let (position, offset) = match insert_ws {
                             InsertWorkspace::Existing(ws_id) => {
                                 let ws_idx = mon.view.position_of(ws_id).unwrap();
@@ -5356,8 +5370,9 @@ impl<W: LayoutElement> Layout<W> {
                 let Some(mon) = monitors.iter_mut().find(|m| m.output == output) else {
                     return;
                 };
+                let ctx = LayoutCtx::new(&*pool, &mon.view);
                 let Some((ws_id, ws_geo)) = mon
-                    .workspace_under(pool, pointer_pos_within_output)
+                    .workspace_under(ctx, pointer_pos_within_output)
                     .map(|(ws, geo)| (ws.id(), geo))
                 else {
                     return;

@@ -3964,7 +3964,8 @@ fn workspace_render_geo_at_fractional_scale() {
     };
 
     let mon = &monitors[0];
-    let mut iter = mon.workspaces_with_render_geo(pool);
+    let ctx = LayoutCtx::new(pool, mon.view());
+    let mut iter = mon.workspaces_with_render_geo(ctx);
     let (_ws, geo) = iter.next().unwrap();
     assert!(
         iter.next().is_none(),

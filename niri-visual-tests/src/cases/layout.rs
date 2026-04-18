@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use niri::animation::Clock;
-use niri::layout::{ActivateWindow, AddWindowTarget, LayoutElement as _, Options, SizingMode};
+use niri::layout::{
+    ActivateWindow, AddWindowTarget, LayoutCtx, LayoutElement as _, Options, SizingMode,
+};
 use niri::render_helpers::{RenderCtx, RenderTarget};
 use niri_config::{Color, OutputName, PresetSize};
 use smithay::backend::renderer::element::RenderElement;
@@ -271,15 +273,14 @@ impl TestCase for Layout {
 
         let mut rv = Vec::new();
         let pool = self.layout.workspace_pool();
+        let mon = self.layout.monitor_for_output(&self.output).unwrap();
+        let lctx = LayoutCtx::new(pool, mon.view());
         let ctx = RenderCtx {
             renderer,
             target: RenderTarget::Output,
             xray: None,
         };
-        self.layout
-            .monitor_for_output(&self.output)
-            .unwrap()
-            .render_workspaces(pool, ctx, true, &mut |elem| rv.push(Box::new(elem) as _));
+        mon.render_workspaces(lctx, ctx, true, &mut |elem| rv.push(Box::new(elem) as _));
         rv
     }
 }
