@@ -1,8 +1,9 @@
-//! Activity / workspace-view types. See `docs/activities-design.md`.
+//! Activity / workspace-view types.
 //!
-//! While `Monitor` still owns `Vec<Workspace<W>>`, the invariant
-//! `view.ids()[i] == monitor.workspaces[i].id()` is upheld by `Monitor`'s
-//! mutating methods.
+//! `Workspace<W>` values live in `Layout.workspaces:
+//! HashMap<WorkspaceId, Workspace<W>>` and `Monitor` only holds the
+//! `view: WorkspaceView` with the ordered ids. The invariant is: every id
+//! in `Monitor.view.ids()` is a key in `Layout.workspaces`.
 
 use super::workspace::WorkspaceId;
 

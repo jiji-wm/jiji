@@ -270,6 +270,7 @@ impl TestCase for Layout {
         self.layout.update_render_elements(Some(&self.output));
 
         let mut rv = Vec::new();
+        let pool = self.layout.workspace_pool();
         let ctx = RenderCtx {
             renderer,
             target: RenderTarget::Output,
@@ -278,7 +279,7 @@ impl TestCase for Layout {
         self.layout
             .monitor_for_output(&self.output)
             .unwrap()
-            .render_workspaces(ctx, true, &mut |elem| rv.push(Box::new(elem) as _));
+            .render_workspaces(pool, ctx, true, &mut |elem| rv.push(Box::new(elem) as _));
         rv
     }
 }

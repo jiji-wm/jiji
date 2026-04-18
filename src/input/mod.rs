@@ -306,8 +306,9 @@ impl State {
         let window_target = if map_to_focused_window && self.niri.keyboard_focus.is_layout() {
             let output = mapped_output.or_else(|| self.niri.layout.active_output());
             output.and_then(|output| {
+                let pool = self.niri.layout.workspace_pool();
                 let monitor = self.niri.layout.monitor_for_output(output)?;
-                let mut rect = monitor.active_window_visual_rectangle()?;
+                let mut rect = monitor.active_window_visual_rectangle(pool)?;
                 let output_geo = self.niri.global_space.output_geometry(output)?;
                 rect.loc += output_geo.loc.to_f64();
                 Some((rect, output))
@@ -2856,9 +2857,10 @@ impl State {
                 } else {
                     // We don't want to accidentally "catch" the wrong workspace during
                     // animations.
+                    let pool = self.niri.layout.workspace_pool();
                     self.niri.output_under_cursor().and_then(|output| {
                         let mon = self.niri.layout.monitor_for_output(&output)?;
-                        Some((output, mon.active_workspace_ref()))
+                        Some((output, mon.active_workspace_ref(pool)))
                     })
                 };
 
@@ -3870,9 +3872,10 @@ impl State {
                         } else {
                             // We don't want to accidentally "catch" the wrong workspace during
                             // animations.
+                            let pool = self.niri.layout.workspace_pool();
                             self.niri.output_under_cursor().and_then(|output| {
                                 let mon = self.niri.layout.monitor_for_output(&output)?;
-                                Some((output, mon.active_workspace_ref()))
+                                Some((output, mon.active_workspace_ref(pool)))
                             })
                         };
 

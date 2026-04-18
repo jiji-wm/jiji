@@ -321,8 +321,9 @@ impl XdgShellHandler for State {
                     return;
                 }
 
+                let pool = self.niri.layout.workspace_pool();
                 let mon = self.niri.layout.monitor_for_output(output).unwrap();
-                if !mon.render_above_top_layer()
+                if !mon.render_above_top_layer(pool)
                     && layers.layers_on(Layer::Top).any(|l| {
                         (l.cached_state().keyboard_interactivity
                             == wlr_layer::KeyboardInteractivity::Exclusive
@@ -461,8 +462,9 @@ impl XdgShellHandler for State {
                         .map(|(mon, _)| mon.output().clone());
                     let mon = mon.map(|(mon, _)| mon);
 
+                    let pool = self.niri.layout.workspace_pool();
                     let ws = mon
-                        .map(|mon| mon.active_workspace_ref())
+                        .map(|mon| mon.active_workspace_ref(pool))
                         .or_else(|| self.niri.layout.active_workspace());
 
                     if let Some(ws) = ws {
@@ -557,11 +559,12 @@ impl XdgShellHandler for State {
                         .map(|(mon, _)| mon.output().clone());
                     let mon = mon.map(|(mon, _)| mon);
 
+                    let pool = self.niri.layout.workspace_pool();
                     let ws = workspace_name
                         .as_deref()
-                        .and_then(|name| mon.map(|mon| mon.find_named_workspace(name)))
+                        .and_then(|name| mon.map(|mon| mon.find_named_workspace(pool, name)))
                         .unwrap_or_else(|| {
-                            mon.map(|mon| mon.active_workspace_ref())
+                            mon.map(|mon| mon.active_workspace_ref(pool))
                                 .or_else(|| self.niri.layout.active_workspace())
                         });
 
@@ -677,8 +680,9 @@ impl XdgShellHandler for State {
                         .map(|(mon, _)| mon.output().clone());
                     let mon = mon.map(|(mon, _)| mon);
 
+                    let pool = self.niri.layout.workspace_pool();
                     let ws = mon
-                        .map(|mon| mon.active_workspace_ref())
+                        .map(|mon| mon.active_workspace_ref(pool))
                         .or_else(|| self.niri.layout.active_workspace());
 
                     if let Some(ws) = ws {
@@ -768,11 +772,12 @@ impl XdgShellHandler for State {
                         .map(|(mon, _)| mon.output().clone());
                     let mon = mon.map(|(mon, _)| mon);
 
+                    let pool = self.niri.layout.workspace_pool();
                     let ws = workspace_name
                         .as_deref()
-                        .and_then(|name| mon.map(|mon| mon.find_named_workspace(name)))
+                        .and_then(|name| mon.map(|mon| mon.find_named_workspace(pool, name)))
                         .unwrap_or_else(|| {
-                            mon.map(|mon| mon.active_workspace_ref())
+                            mon.map(|mon| mon.active_workspace_ref(pool))
                                 .or_else(|| self.niri.layout.active_workspace())
                         });
 
@@ -1112,12 +1117,13 @@ impl State {
         let is_floating = rules.compute_open_floating(toplevel);
 
         // Tell the surface the preferred size and bounds for its likely output.
+        let pool = self.niri.layout.workspace_pool();
         let ws = rules
             .open_on_workspace
             .as_deref()
-            .and_then(|name| mon.map(|mon| mon.find_named_workspace(name)))
+            .and_then(|name| mon.map(|mon| mon.find_named_workspace(pool, name)))
             .unwrap_or_else(|| {
-                mon.map(|mon| mon.active_workspace_ref())
+                mon.map(|mon| mon.active_workspace_ref(pool))
                     .or_else(|| self.niri.layout.active_workspace())
             });
 

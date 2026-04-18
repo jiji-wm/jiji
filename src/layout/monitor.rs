@@ -1,5 +1,7 @@
 use std::cmp::min;
+use std::collections::HashMap;
 use std::iter::zip;
+use std::marker::PhantomData;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -63,13 +65,15 @@ pub struct Monitor<W: LayoutElement> {
     // should only consider overlay and top layer-shell surfaces. However, Smithay doesn't easily
     // let you do this at the moment.
     working_area: Rectangle<f64, Logical>,
-    // Must always contain at least one.
-    pub(super) workspaces: Vec<Workspace<W>>,
     /// Active / previous cursor and visual ordering of workspaces for this monitor.
     ///
-    /// Invariant: `view.ids()[i] == workspaces[i].id()`, maintained by every
-    /// mutating method on `Monitor`.
+    /// Workspace values live in `Layout.workspaces`; `view.ids()` is the
+    /// authoritative ordering for this monitor. `view` is never empty.
     pub(super) view: WorkspaceView,
+    /// Tie the `W` type parameter to this struct — the workspace values with `W` now live in
+    /// `Layout.workspaces`, but every `Monitor<W>` method still operates on `Workspace<W>` values
+    /// through the threaded pool. The phantom keeps `W` inferable at call sites.
+    _phantom: PhantomData<W>,
     /// In-progress switch between workspaces.
     pub(super) workspace_switch: Option<WorkspaceSwitch>,
     /// Indication where an interactively-moved window is about to be placed.
@@ -291,10 +295,17 @@ impl From<&super::OverviewProgress> for OverviewProgress {
 }
 
 impl<W: LayoutElement> Monitor<W> {
+    /// Build a monitor owning `workspace_ids`.
+    ///
+    /// All `workspace_ids` must already be keys in `pool`. `Monitor::new` binds each of them to
+    /// `output`, syncs config, then inserts empty bookend workspace(s) into the pool (top and/or
+    /// bottom per `options.layout.empty_workspace_above_first`). The resulting `view.ids()` is
+    /// `[optional_top_empty, ...workspace_ids_in_order..., bottom_empty]`.
     pub fn new(
         output: Output,
-        mut workspaces: Vec<Workspace<W>>,
+        workspace_ids: Vec<WorkspaceId>,
         ws_id_to_activate: Option<WorkspaceId>,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         clock: Clock,
         base_options: Rc<Options>,
         layout_config: Option<LayoutPart>,
@@ -309,27 +320,38 @@ impl<W: LayoutElement> Monitor<W> {
         // Prepare the workspaces: bind to output, empty first, empty last.
         let mut active_workspace_idx = 0;
 
-        for (idx, ws) in workspaces.iter_mut().enumerate() {
+        for (idx, id) in workspace_ids.iter().enumerate() {
+            let ws = pool
+                .get_mut(id)
+                .expect("workspace_ids must be keys in the pool");
             assert!(ws.has_windows_or_name());
 
             ws.bind_output(&output);
             ws.update_config(options.clone());
 
-            if ws_id_to_activate.is_some_and(|id| ws.id() == id) {
+            if ws_id_to_activate.is_some_and(|want| *id == want) {
                 active_workspace_idx = idx;
             }
         }
 
-        if options.layout.empty_workspace_above_first && !workspaces.is_empty() {
+        let mut ids = workspace_ids;
+
+        if options.layout.empty_workspace_above_first && !ids.is_empty() {
             let ws = Workspace::new(&output, clock.clone(), options.clone());
-            workspaces.insert(0, ws);
+            let id = ws.id();
+            assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
+            ids.insert(0, id);
             active_workspace_idx += 1;
         }
 
-        let ws = Workspace::new(&output, clock.clone(), options.clone());
-        workspaces.push(ws);
+        let bottom = Workspace::new(&output, clock.clone(), options.clone());
+        let bottom_id = bottom.id();
+        assert!(
+            pool.insert(bottom_id, bottom).is_none(),
+            "fresh id must be unique",
+        );
+        ids.push(bottom_id);
 
-        let ids = workspaces.iter().map(|ws| ws.id()).collect();
         let view = WorkspaceView::new(ids, active_workspace_idx);
 
         Self {
@@ -338,8 +360,8 @@ impl<W: LayoutElement> Monitor<W> {
             scale,
             view_size,
             working_area,
-            workspaces,
             view,
+            _phantom: PhantomData,
             insert_hint: None,
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             insert_hint_render_loc: None,
@@ -353,14 +375,60 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    pub fn into_workspaces(mut self) -> Vec<Workspace<W>> {
-        self.workspaces.retain(|ws| ws.has_windows_or_name());
-
-        for ws in &mut self.workspaces {
-            ws.unbind_output(&self.output);
+    /// Drop this monitor, draining its non-empty workspaces back into the pool-held state.
+    ///
+    /// Empty unnamed workspaces (typically the bookend empty workspaces added by `Monitor::new`)
+    /// are removed from the pool since no caller needs them back. The returned ids are the ones
+    /// that remain in the pool and whose ordering the caller may want to preserve.
+    pub fn into_workspace_ids(
+        self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+    ) -> Vec<WorkspaceId> {
+        let mut kept = Vec::with_capacity(self.view.ids().len());
+        for id in self.view.ids() {
+            let ws = pool
+                .get_mut(id)
+                .expect("monitor ids must be keys in the pool");
+            if ws.has_windows_or_name() {
+                ws.unbind_output(&self.output);
+                kept.push(*id);
+            } else {
+                // Empty bookends: drop from the pool.
+                pool.remove(id);
+            }
         }
+        kept
+    }
 
-        self.workspaces
+    /// Borrow the workspace this monitor displays at position `pos`.
+    ///
+    /// Panics if `pos` is out of bounds for `self.view.ids()` or if the id is absent from `pool`;
+    /// both indicate a broken pool/view invariant, not user error.
+    pub fn workspace_at<'a>(
+        &self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        pos: usize,
+    ) -> &'a Workspace<W> {
+        let id = self.view.ids()[pos];
+        pool.get(&id).expect("view id must be a key in the pool")
+    }
+
+    /// Mutably borrow the workspace this monitor displays at position `pos`.
+    ///
+    /// Panics on the same conditions as [`workspace_at`](Self::workspace_at).
+    pub fn workspace_at_mut<'a>(
+        &self,
+        pool: &'a mut HashMap<WorkspaceId, Workspace<W>>,
+        pos: usize,
+    ) -> &'a mut Workspace<W> {
+        let id = self.view.ids()[pos];
+        pool.get_mut(&id)
+            .expect("view id must be a key in the pool")
+    }
+
+    /// Number of workspaces this monitor displays, including empty bookends.
+    pub fn workspaces_len(&self) -> usize {
+        self.view.len()
     }
 
     pub fn output(&self) -> &Output {
@@ -375,44 +443,65 @@ impl<W: LayoutElement> Monitor<W> {
         self.view.active_position()
     }
 
-    pub fn active_workspace_ref(&self) -> &Workspace<W> {
-        &self.workspaces[self.view.active_position()]
+    pub fn active_workspace_ref<'a>(
+        &self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+    ) -> &'a Workspace<W> {
+        self.workspace_at(pool, self.view.active_position())
     }
 
-    pub fn find_named_workspace(&self, workspace_name: &str) -> Option<&Workspace<W>> {
-        self.workspaces.iter().find(|ws| {
-            ws.name
-                .as_ref()
+    pub fn find_named_workspace<'a>(
+        &self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        workspace_name: &str,
+    ) -> Option<&'a Workspace<W>> {
+        let id = self.view.ids().iter().copied().find(|id| {
+            pool.get(id)
+                .and_then(|ws| ws.name.as_ref())
+                .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
+        })?;
+        pool.get(&id)
+    }
+
+    pub fn find_named_workspace_index(
+        &self,
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        workspace_name: &str,
+    ) -> Option<usize> {
+        self.view.ids().iter().position(|id| {
+            pool.get(id)
+                .and_then(|ws| ws.name.as_ref())
                 .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
         })
     }
 
-    pub fn find_named_workspace_index(&self, workspace_name: &str) -> Option<usize> {
-        self.workspaces.iter().position(|ws| {
-            ws.name
-                .as_ref()
-                .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
-        })
+    pub fn active_workspace<'a>(
+        &self,
+        pool: &'a mut HashMap<WorkspaceId, Workspace<W>>,
+    ) -> &'a mut Workspace<W> {
+        self.workspace_at_mut(pool, self.view.active_position())
     }
 
-    pub fn active_workspace(&mut self) -> &mut Workspace<W> {
-        let idx = self.view.active_position();
-        &mut self.workspaces[idx]
+    pub fn windows<'a>(
+        &'a self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+    ) -> impl Iterator<Item = &'a W> + 'a {
+        self.view
+            .ids()
+            .iter()
+            .filter_map(move |id| pool.get(id))
+            .flat_map(|ws| ws.windows())
     }
 
-    pub fn windows(&self) -> impl Iterator<Item = &W> {
-        self.workspaces.iter().flat_map(|ws| ws.windows())
+    pub fn has_window(&self, pool: &HashMap<WorkspaceId, Workspace<W>>, window: &W::Id) -> bool {
+        self.windows(pool).any(|win| win.id() == window)
     }
 
-    pub fn has_window(&self, window: &W::Id) -> bool {
-        self.windows().any(|win| win.id() == window)
-    }
-
-    pub fn add_workspace_at(&mut self, idx: usize) {
+    pub fn add_workspace_at(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>, idx: usize) {
         let ws = Workspace::new(&self.output, self.clock.clone(), self.options.clone());
 
         let id = ws.id();
-        self.workspaces.insert(idx, ws);
+        assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
         self.view.insert(idx, id);
 
         if let Some(switch) = &mut self.workspace_switch {
@@ -422,12 +511,12 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    pub fn add_workspace_top(&mut self) {
-        self.add_workspace_at(0);
+    pub fn add_workspace_top(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) {
+        self.add_workspace_at(pool, 0);
     }
 
-    pub fn add_workspace_bottom(&mut self) {
-        self.add_workspace_at(self.workspaces.len());
+    pub fn add_workspace_bottom(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) {
+        self.add_workspace_at(pool, self.view.len());
     }
 
     pub fn activate_workspace(&mut self, idx: usize) {
@@ -478,7 +567,8 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub(super) fn resolve_add_window_target<'a>(
-        &mut self,
+        &self,
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
         target: MonitorAddWindowTarget<'a, W>,
     ) -> (usize, WorkspaceAddWindowTarget<'a, W>) {
         match target {
@@ -486,7 +576,7 @@ impl<W: LayoutElement> Monitor<W> {
                 (self.view.active_position(), WorkspaceAddWindowTarget::Auto)
             }
             MonitorAddWindowTarget::Workspace { id, column_idx } => {
-                let idx = self.workspaces.iter().position(|ws| ws.id() == id).unwrap();
+                let idx = self.view.position_of(id).unwrap();
                 let target = if let Some(column_idx) = column_idx {
                     WorkspaceAddWindowTarget::NewColumnAt(column_idx)
                 } else {
@@ -496,9 +586,10 @@ impl<W: LayoutElement> Monitor<W> {
             }
             MonitorAddWindowTarget::NextTo(win_id) => {
                 let idx = self
-                    .workspaces
-                    .iter_mut()
-                    .position(|ws| ws.has_window(win_id))
+                    .view
+                    .ids()
+                    .iter()
+                    .position(|id| pool.get(id).is_some_and(|ws| ws.has_window(win_id)))
                     .unwrap();
                 (idx, WorkspaceAddWindowTarget::NextTo(win_id))
             }
@@ -507,6 +598,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn add_window(
         &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         window: W,
         target: MonitorAddWindowTarget<W>,
         activate: ActivateWindow,
@@ -516,9 +608,10 @@ impl<W: LayoutElement> Monitor<W> {
     ) {
         // Currently, everything a workspace sets on a Tile is the same across all workspaces of a
         // monitor. So we can use any workspace, not necessarily the exact target workspace.
-        let tile = self.workspaces[0].make_tile(window);
+        let tile = self.workspace_at_mut(pool, 0).make_tile(window);
 
         self.add_tile(
+            pool,
             tile,
             target,
             activate,
@@ -529,8 +622,14 @@ impl<W: LayoutElement> Monitor<W> {
         );
     }
 
-    pub fn add_column(&mut self, mut workspace_idx: usize, column: Column<W>, activate: bool) {
-        let workspace = &mut self.workspaces[workspace_idx];
+    pub fn add_column(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        mut workspace_idx: usize,
+        column: Column<W>,
+        activate: bool,
+    ) {
+        let workspace = self.workspace_at_mut(pool, workspace_idx);
 
         workspace.add_column(Some(&self.output), column, activate);
 
@@ -539,11 +638,11 @@ impl<W: LayoutElement> Monitor<W> {
             workspace.output_id = Some(OutputId::new(&self.output));
         }
 
-        if workspace_idx == self.workspaces.len() - 1 {
-            self.add_workspace_bottom();
+        if workspace_idx == self.view.len() - 1 {
+            self.add_workspace_bottom(pool);
         }
         if self.options.layout.empty_workspace_above_first && workspace_idx == 0 {
-            self.add_workspace_top();
+            self.add_workspace_top(pool);
             workspace_idx += 1;
         }
 
@@ -555,6 +654,7 @@ impl<W: LayoutElement> Monitor<W> {
     #[allow(clippy::too_many_arguments)]
     pub fn add_tile(
         &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         tile: Tile<W>,
         target: MonitorAddWindowTarget<W>,
         activate: ActivateWindow,
@@ -564,9 +664,9 @@ impl<W: LayoutElement> Monitor<W> {
         is_full_width: bool,
         is_floating: bool,
     ) {
-        let (mut workspace_idx, target) = self.resolve_add_window_target(target);
+        let (mut workspace_idx, target) = self.resolve_add_window_target(pool, target);
 
-        let workspace = &mut self.workspaces[workspace_idx];
+        let workspace = self.workspace_at_mut(pool, workspace_idx);
 
         workspace.add_tile(
             Some(&self.output),
@@ -583,13 +683,13 @@ impl<W: LayoutElement> Monitor<W> {
             workspace.output_id = Some(OutputId::new(&self.output));
         }
 
-        if workspace_idx == self.workspaces.len() - 1 {
+        if workspace_idx == self.view.len() - 1 {
             // Insert a new empty workspace.
-            self.add_workspace_bottom();
+            self.add_workspace_bottom(pool);
         }
 
         if self.options.layout.empty_workspace_above_first && workspace_idx == 0 {
-            self.add_workspace_top();
+            self.add_workspace_top(pool);
             workspace_idx += 1;
         }
 
@@ -600,6 +700,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn add_tile_to_column(
         &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         workspace_idx: usize,
         column_idx: usize,
         tile_idx: Option<usize>,
@@ -608,7 +709,7 @@ impl<W: LayoutElement> Monitor<W> {
         // FIXME: Refactor ActivateWindow enum to make this better.
         allow_to_activate_workspace: bool,
     ) {
-        let workspace = &mut self.workspaces[workspace_idx];
+        let workspace = self.workspace_at_mut(pool, workspace_idx);
 
         workspace.add_tile_to_column(Some(&self.output), column_idx, tile_idx, tile, activate);
 
@@ -625,7 +726,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    pub fn clean_up_workspaces(&mut self) {
+    pub fn clean_up_workspaces(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) {
         assert!(self.workspace_switch.is_none());
 
         let range_start = if self.options.layout.empty_workspace_above_first {
@@ -633,80 +734,108 @@ impl<W: LayoutElement> Monitor<W> {
         } else {
             0
         };
-        for idx in (range_start..self.workspaces.len() - 1).rev() {
+        for idx in (range_start..self.view.len() - 1).rev() {
             if self.view.active_position() == idx {
                 continue;
             }
 
-            if !self.workspaces[idx].has_windows_or_name() {
-                self.workspaces.remove(idx);
+            if !self.workspace_at(pool, idx).has_windows_or_name() {
+                let id = self.view.ids()[idx];
                 self.view.remove_at(idx);
+                pool.remove(&id);
             }
         }
 
         // Special case handling when empty_workspace_above_first is set and all workspaces
         // are empty.
-        if self.options.layout.empty_workspace_above_first && self.workspaces.len() == 2 {
-            assert!(!self.workspaces[0].has_windows_or_name());
-            assert!(!self.workspaces[1].has_windows_or_name());
-            self.workspaces.remove(1);
+        if self.options.layout.empty_workspace_above_first && self.view.len() == 2 {
+            assert!(!self.workspace_at(pool, 0).has_windows_or_name());
+            assert!(!self.workspace_at(pool, 1).has_windows_or_name());
+            let id = self.view.ids()[1];
             self.view.remove_at(1);
+            pool.remove(&id);
         }
     }
 
-    pub fn unname_workspace(&mut self, id: WorkspaceId) -> bool {
-        let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id() == id) else {
+    pub fn unname_workspace(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        id: WorkspaceId,
+    ) -> bool {
+        if !self.view.ids().contains(&id) {
             return false;
-        };
+        }
 
-        ws.unname();
+        pool.get_mut(&id)
+            .expect("view id must be a key in the pool")
+            .unname();
 
         if self.workspace_switch.is_none() {
-            self.clean_up_workspaces();
+            self.clean_up_workspaces(pool);
         }
 
         true
     }
 
-    pub fn remove_workspace_by_idx(&mut self, mut idx: usize) -> Workspace<W> {
-        if idx == self.workspaces.len() - 1 {
-            self.add_workspace_bottom();
+    /// Remove the workspace at `idx` from this monitor's view, unbind it from the output, and
+    /// return its id. The workspace value remains in `pool` under that id — caller decides whether
+    /// to re-attach it to another monitor or drop it.
+    pub fn remove_workspace_by_idx(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        mut idx: usize,
+    ) -> WorkspaceId {
+        if idx == self.view.len() - 1 {
+            self.add_workspace_bottom(pool);
         }
         if self.options.layout.empty_workspace_above_first && idx == 0 {
-            self.add_workspace_top();
+            self.add_workspace_top(pool);
             idx += 1;
         }
-
-        let mut ws = self.workspaces.remove(idx);
-        ws.unbind_output(&self.output);
 
         // For monitor current workspace removal, we focus previous rather than next (<= rather
         // than <). This is different from columns and tiles, but it lets move-workspace-to-monitor
         // back and forth to preserve position. `WorkspaceView::remove_at` enforces this rule.
+        let id = self.view.ids()[idx];
         self.view.remove_at(idx);
 
-        self.workspace_switch = None;
-        self.clean_up_workspaces();
+        pool.get_mut(&id)
+            .expect("view id must be a key in the pool")
+            .unbind_output(&self.output);
 
-        ws
+        self.workspace_switch = None;
+        self.clean_up_workspaces(pool);
+
+        id
     }
 
-    pub fn insert_workspace(&mut self, mut ws: Workspace<W>, mut idx: usize, activate: bool) {
+    /// Attach an existing workspace to this monitor at position `idx`.
+    ///
+    /// The workspace value must already be a key in `pool`. `Monitor::insert_workspace` only adds
+    /// `id` to the view and binds the workspace to this output.
+    pub fn insert_workspace(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        id: WorkspaceId,
+        mut idx: usize,
+        activate: bool,
+    ) {
+        let ws = pool
+            .get_mut(&id)
+            .expect("workspace id must be a key in the pool");
         ws.bind_output(&self.output);
         ws.update_config(self.options.clone());
 
         // Don't insert past the last empty workspace.
-        if idx == self.workspaces.len() {
+        if idx == self.view.len() {
             idx -= 1;
         }
         if idx == 0 && self.options.layout.empty_workspace_above_first {
             // Insert a new empty workspace on top to prepare for insertion of new workspace.
-            self.add_workspace_top();
+            self.add_workspace_top(pool);
             idx += 1;
         }
 
-        let id = ws.id();
-        self.workspaces.insert(idx, ws);
         self.view.insert(idx, id);
 
         if activate {
@@ -715,86 +844,105 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         self.workspace_switch = None;
-        self.clean_up_workspaces();
+        self.clean_up_workspaces(pool);
     }
 
-    pub fn append_workspaces(&mut self, mut workspaces: Vec<Workspace<W>>) {
-        if workspaces.is_empty() {
+    /// Attach a list of existing pool-held workspaces to this monitor, in order, just above the
+    /// bottom empty workspace.
+    ///
+    /// All `workspace_ids` must already be keys in `pool`.
+    pub fn append_workspaces(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        workspace_ids: Vec<WorkspaceId>,
+    ) {
+        if workspace_ids.is_empty() {
             return;
         }
 
-        for ws in &mut workspaces {
+        for id in &workspace_ids {
+            let ws = pool
+                .get_mut(id)
+                .expect("workspace id must be a key in the pool");
             ws.bind_output(&self.output);
             ws.update_config(self.options.clone());
         }
 
-        let empty_was_focused = self.view.active_position() == self.workspaces.len() - 1;
+        let empty_was_focused = self.view.active_position() == self.view.len() - 1;
 
         // Insert in place so the view stays non-empty at every step
         // (`WorkspaceView` requires at least one id).
-        let start = self.workspaces.len() - 1;
-        for (offset, ws) in workspaces.into_iter().enumerate() {
+        let start = self.view.len() - 1;
+        for (offset, id) in workspace_ids.into_iter().enumerate() {
             let insert_pos = start + offset;
-            let id = ws.id();
-            self.workspaces.insert(insert_pos, ws);
             self.view.insert(insert_pos, id);
         }
 
         // If empty_workspace_above_first is set and the first workspace is now no longer empty,
         // add a new empty workspace on top.
         if self.options.layout.empty_workspace_above_first
-            && self.workspaces[0].has_windows_or_name()
+            && self.workspace_at(pool, 0).has_windows_or_name()
         {
-            self.add_workspace_top();
+            self.add_workspace_top(pool);
         }
 
         // If the empty workspace was focused on the primary monitor, keep it focused.
         // Use `set_active_at` (not `activate`) so `previous` isn't clobbered — this is
         // an output reshuffle, not a user-visible workspace switch.
         if empty_was_focused {
-            self.view.set_active_at(self.workspaces.len() - 1);
+            self.view.set_active_at(self.view.len() - 1);
         }
 
         // FIXME: if we're adding workspaces to currently invisible positions
         // (outside the workspace switch), we don't need to cancel it.
         self.workspace_switch = None;
-        self.clean_up_workspaces();
+        self.clean_up_workspaces(pool);
     }
 
-    pub fn move_down_or_to_workspace_down(&mut self) {
-        if !self.active_workspace().move_down() {
-            self.move_to_workspace_down(true);
+    pub fn move_down_or_to_workspace_down(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+    ) {
+        if !self.active_workspace(pool).move_down() {
+            self.move_to_workspace_down(pool, true);
         }
     }
 
-    pub fn move_up_or_to_workspace_up(&mut self) {
-        if !self.active_workspace().move_up() {
-            self.move_to_workspace_up(true);
+    pub fn move_up_or_to_workspace_up(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) {
+        if !self.active_workspace(pool).move_up() {
+            self.move_to_workspace_up(pool, true);
         }
     }
 
-    pub fn focus_window_or_workspace_down(&mut self) {
-        if !self.active_workspace().focus_down() {
+    pub fn focus_window_or_workspace_down(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+    ) {
+        if !self.active_workspace(pool).focus_down() {
             self.switch_workspace_down();
         }
     }
 
-    pub fn focus_window_or_workspace_up(&mut self) {
-        if !self.active_workspace().focus_up() {
+    pub fn focus_window_or_workspace_up(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) {
+        if !self.active_workspace(pool).focus_up() {
             self.switch_workspace_up();
         }
     }
 
-    pub fn move_to_workspace_up(&mut self, focus: bool) {
+    pub fn move_to_workspace_up(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        focus: bool,
+    ) {
         let source_workspace_idx = self.view.active_position();
 
         let new_idx = source_workspace_idx.saturating_sub(1);
         if new_idx == source_workspace_idx {
             return;
         }
-        let new_id = self.workspaces[new_idx].id();
+        let new_id = self.view.ids()[new_idx];
 
-        let workspace = &mut self.workspaces[source_workspace_idx];
+        let workspace = self.workspace_at_mut(pool, source_workspace_idx);
         let Some(removed) = workspace.remove_active_tile(Some(&self.output), Transaction::new())
         else {
             return;
@@ -807,6 +955,7 @@ impl<W: LayoutElement> Monitor<W> {
         };
 
         self.add_tile(
+            pool,
             removed.tile,
             MonitorAddWindowTarget::Workspace {
                 id: new_id,
@@ -820,16 +969,20 @@ impl<W: LayoutElement> Monitor<W> {
         );
     }
 
-    pub fn move_to_workspace_down(&mut self, focus: bool) {
+    pub fn move_to_workspace_down(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        focus: bool,
+    ) {
         let source_workspace_idx = self.view.active_position();
 
-        let new_idx = min(source_workspace_idx + 1, self.workspaces.len() - 1);
+        let new_idx = min(source_workspace_idx + 1, self.view.len() - 1);
         if new_idx == source_workspace_idx {
             return;
         }
-        let new_id = self.workspaces[new_idx].id();
+        let new_id = self.view.ids()[new_idx];
 
-        let workspace = &mut self.workspaces[source_workspace_idx];
+        let workspace = self.workspace_at_mut(pool, source_workspace_idx);
         let Some(removed) = workspace.remove_active_tile(Some(&self.output), Transaction::new())
         else {
             return;
@@ -842,6 +995,7 @@ impl<W: LayoutElement> Monitor<W> {
         };
 
         self.add_tile(
+            pool,
             removed.tile,
             MonitorAddWindowTarget::Workspace {
                 id: new_id,
@@ -857,30 +1011,32 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn move_to_workspace(
         &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         window: Option<&W::Id>,
         idx: usize,
         activate: ActivateWindow,
     ) {
         let source_workspace_idx = if let Some(window) = window {
-            self.workspaces
+            self.view
+                .ids()
                 .iter()
-                .position(|ws| ws.has_window(window))
+                .position(|id| pool.get(id).is_some_and(|ws| ws.has_window(window)))
                 .unwrap()
         } else {
             self.view.active_position()
         };
 
-        let new_idx = min(idx, self.workspaces.len() - 1);
+        let new_idx = min(idx, self.view.len() - 1);
         if new_idx == source_workspace_idx {
             return;
         }
-        let new_id = self.workspaces[new_idx].id();
+        let new_id = self.view.ids()[new_idx];
 
-        let activate = activate.map_smart(|| {
-            window.is_none_or(|win| self.active_window().map(|win| win.id()) == Some(win))
-        });
+        let active_window_id = self.active_window(pool).map(|win| win.id().clone());
+        let activate =
+            activate.map_smart(|| window.is_none_or(|win| active_window_id.as_ref() == Some(win)));
 
-        let workspace = &mut self.workspaces[source_workspace_idx];
+        let workspace = self.workspace_at_mut(pool, source_workspace_idx);
         let transaction = Transaction::new();
         let removed = if let Some(window) = window {
             workspace.remove_tile(Some(&self.output), window, transaction)
@@ -892,6 +1048,7 @@ impl<W: LayoutElement> Monitor<W> {
         };
 
         self.add_tile(
+            pool,
             removed.tile,
             MonitorAddWindowTarget::Workspace {
                 id: new_id,
@@ -909,11 +1066,15 @@ impl<W: LayoutElement> Monitor<W> {
         );
 
         if self.workspace_switch.is_none() {
-            self.clean_up_workspaces();
+            self.clean_up_workspaces(pool);
         }
     }
 
-    pub fn move_column_to_workspace_up(&mut self, activate: bool) {
+    pub fn move_column_to_workspace_up(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        activate: bool,
+    ) {
         let source_workspace_idx = self.view.active_position();
 
         let new_idx = source_workspace_idx.saturating_sub(1);
@@ -921,9 +1082,9 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         }
 
-        let workspace = &mut self.workspaces[source_workspace_idx];
+        let workspace = self.workspace_at_mut(pool, source_workspace_idx);
         if workspace.floating_is_active() {
-            self.move_to_workspace_up(activate);
+            self.move_to_workspace_up(pool, activate);
             return;
         }
 
@@ -931,20 +1092,24 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         };
 
-        self.add_column(new_idx, column, activate);
+        self.add_column(pool, new_idx, column, activate);
     }
 
-    pub fn move_column_to_workspace_down(&mut self, activate: bool) {
+    pub fn move_column_to_workspace_down(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        activate: bool,
+    ) {
         let source_workspace_idx = self.view.active_position();
 
-        let new_idx = min(source_workspace_idx + 1, self.workspaces.len() - 1);
+        let new_idx = min(source_workspace_idx + 1, self.view.len() - 1);
         if new_idx == source_workspace_idx {
             return;
         }
 
-        let workspace = &mut self.workspaces[source_workspace_idx];
+        let workspace = self.workspace_at_mut(pool, source_workspace_idx);
         if workspace.floating_is_active() {
-            self.move_to_workspace_down(activate);
+            self.move_to_workspace_down(pool, activate);
             return;
         }
 
@@ -952,25 +1117,30 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         };
 
-        self.add_column(new_idx, column, activate);
+        self.add_column(pool, new_idx, column, activate);
     }
 
-    pub fn move_column_to_workspace(&mut self, idx: usize, activate: bool) {
+    pub fn move_column_to_workspace(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        idx: usize,
+        activate: bool,
+    ) {
         let source_workspace_idx = self.view.active_position();
 
-        let new_idx = min(idx, self.workspaces.len() - 1);
+        let new_idx = min(idx, self.view.len() - 1);
         if new_idx == source_workspace_idx {
             return;
         }
 
-        let workspace = &mut self.workspaces[source_workspace_idx];
+        let workspace = self.workspace_at_mut(pool, source_workspace_idx);
         if workspace.floating_is_active() {
             let activate = if activate {
                 ActivateWindow::Smart
             } else {
                 ActivateWindow::No
             };
-            self.move_to_workspace(None, idx, activate);
+            self.move_to_workspace(pool, None, idx, activate);
             return;
         }
 
@@ -978,7 +1148,7 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         };
 
-        self.add_column(new_idx, column, activate);
+        self.add_column(pool, new_idx, column, activate);
     }
 
     pub fn switch_workspace_up(&mut self) {
@@ -987,7 +1157,7 @@ impl<W: LayoutElement> Monitor<W> {
             Some(WorkspaceSwitch::Gesture(gesture)) if gesture.dnd_last_event_time.is_some() => {
                 let current = gesture.current_idx;
                 let new = current.ceil() - 1.;
-                new.clamp(0., (self.workspaces.len() - 1) as f64) as usize
+                new.clamp(0., (self.view.len() - 1) as f64) as usize
             }
             _ => self.view.active_position().saturating_sub(1),
         };
@@ -1001,20 +1171,20 @@ impl<W: LayoutElement> Monitor<W> {
             Some(WorkspaceSwitch::Gesture(gesture)) if gesture.dnd_last_event_time.is_some() => {
                 let current = gesture.current_idx;
                 let new = current.floor() + 1.;
-                new.clamp(0., (self.workspaces.len() - 1) as f64) as usize
+                new.clamp(0., (self.view.len() - 1) as f64) as usize
             }
-            _ => min(self.view.active_position() + 1, self.workspaces.len() - 1),
+            _ => min(self.view.active_position() + 1, self.view.len() - 1),
         };
 
         self.activate_workspace(new_idx);
     }
 
     pub fn switch_workspace(&mut self, idx: usize) {
-        self.activate_workspace(min(idx, self.workspaces.len() - 1));
+        self.activate_workspace(min(idx, self.view.len() - 1));
     }
 
     pub fn switch_workspace_auto_back_and_forth(&mut self, idx: usize) {
-        let idx = min(idx, self.workspaces.len() - 1);
+        let idx = min(idx, self.view.len() - 1);
 
         if idx == self.view.active_position() {
             if let Some(prev_idx) = self.view.previous_position() {
@@ -1031,16 +1201,16 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    pub fn active_window(&self) -> Option<&W> {
-        self.active_workspace_ref().active_window()
+    pub fn active_window<'a>(&self, pool: &'a HashMap<WorkspaceId, Workspace<W>>) -> Option<&'a W> {
+        self.active_workspace_ref(pool).active_window()
     }
 
-    pub fn advance_animations(&mut self) {
+    pub fn advance_animations(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) {
         match &mut self.workspace_switch {
             Some(WorkspaceSwitch::Animation(anim)) => {
                 if anim.is_done() {
                     self.workspace_switch = None;
-                    self.clean_up_workspaces();
+                    self.clean_up_workspaces(pool);
                 }
             }
             Some(WorkspaceSwitch::Gesture(gesture)) => {
@@ -1070,37 +1240,56 @@ impl<W: LayoutElement> Monitor<W> {
             None => (),
         }
 
-        for ws in &mut self.workspaces {
-            ws.advance_animations();
+        for id in self.view.ids() {
+            pool.get_mut(id)
+                .expect("view id must be a key in the pool")
+                .advance_animations();
         }
     }
 
-    pub(super) fn are_animations_ongoing(&self) -> bool {
+    pub(super) fn are_animations_ongoing(&self, pool: &HashMap<WorkspaceId, Workspace<W>>) -> bool {
         self.workspace_switch
             .as_ref()
             .is_some_and(|s| s.is_animation_ongoing())
-            || self.workspaces.iter().any(|ws| ws.are_animations_ongoing())
+            || self
+                .view
+                .ids()
+                .iter()
+                .filter_map(|id| pool.get(id))
+                .any(|ws| ws.are_animations_ongoing())
     }
 
-    pub fn are_transitions_ongoing(&self) -> bool {
+    pub fn are_transitions_ongoing(&self, pool: &HashMap<WorkspaceId, Workspace<W>>) -> bool {
         self.workspace_switch.is_some()
             || self
-                .workspaces
+                .view
+                .ids()
                 .iter()
+                .filter_map(|id| pool.get(id))
                 .any(|ws| ws.are_transitions_ongoing())
     }
 
-    pub fn update_render_elements(&mut self, is_active: bool) {
+    pub fn update_render_elements(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        is_active: bool,
+    ) {
         let mut insert_hint_ws_geo = None;
         let insert_hint_ws_id = self
             .insert_hint
             .as_ref()
             .and_then(|hint| hint.workspace.existing_id());
 
-        for (ws, geo) in self.workspaces_with_render_geo_mut(true) {
+        for (id, geo) in self
+            .workspaces_with_render_geo_ids(true)
+            .collect::<Vec<_>>()
+        {
+            let ws = pool
+                .get_mut(&id)
+                .expect("view id must be a key in the pool");
             ws.update_render_elements(is_active);
 
-            if Some(ws.id()) == insert_hint_ws_id {
+            if Some(id) == insert_hint_ws_id {
                 insert_hint_ws_geo = Some(geo);
             }
         }
@@ -1109,7 +1298,10 @@ impl<W: LayoutElement> Monitor<W> {
         if let Some(hint) = &self.insert_hint {
             match hint.workspace {
                 InsertWorkspace::Existing(ws_id) => {
-                    if let Some(ws) = self.workspaces.iter().find(|ws| ws.id() == ws_id) {
+                    if let Some(ws) = pool
+                        .get(&ws_id)
+                        .filter(|_| self.view.ids().contains(&ws_id))
+                    {
                         if let Some(mut area) = ws.insert_hint_area(hint.position) {
                             let scale = ws.scale().fractional_scale();
                             let view_size = ws.view_size();
@@ -1184,24 +1376,31 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    pub fn update_config(&mut self, base_options: Rc<Options>) {
+    pub fn update_config(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        base_options: Rc<Options>,
+    ) {
         let options =
             Rc::new(Options::clone(&base_options).with_merged_layout(self.layout_config.as_ref()));
 
         if self.options.layout.empty_workspace_above_first
             != options.layout.empty_workspace_above_first
-            && self.workspaces.len() > 1
+            && self.view.len() > 1
         {
             if options.layout.empty_workspace_above_first {
-                self.add_workspace_top();
+                self.add_workspace_top(pool);
             } else if self.workspace_switch.is_none() && self.view.active_position() != 0 {
-                self.workspaces.remove(0);
+                let id = self.view.ids()[0];
                 self.view.remove_at(0);
+                pool.remove(&id);
             }
         }
 
-        for ws in &mut self.workspaces {
-            ws.update_config(options.clone());
+        for id in self.view.ids() {
+            pool.get_mut(id)
+                .expect("view id must be a key in the pool")
+                .update_config(options.clone());
         }
 
         self.insert_hint_element
@@ -1211,52 +1410,59 @@ impl<W: LayoutElement> Monitor<W> {
         self.options = options;
     }
 
-    pub fn update_layout_config(&mut self, layout_config: Option<niri_config::LayoutPart>) -> bool {
+    pub fn update_layout_config(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        layout_config: Option<niri_config::LayoutPart>,
+    ) -> bool {
         if self.layout_config == layout_config {
             return false;
         }
 
         self.layout_config = layout_config;
-        self.update_config(self.base_options.clone());
+        self.update_config(pool, self.base_options.clone());
 
         true
     }
 
-    pub fn update_shaders(&mut self) {
-        for ws in &mut self.workspaces {
-            ws.update_shaders();
+    pub fn update_shaders(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) {
+        for id in self.view.ids() {
+            pool.get_mut(id)
+                .expect("view id must be a key in the pool")
+                .update_shaders();
         }
 
         self.insert_hint_element.update_shaders();
     }
 
-    pub fn update_output_size(&mut self) {
+    pub fn update_output_size(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) {
         self.scale = self.output.current_scale();
         self.view_size = output_size(&self.output);
         self.working_area = compute_working_area(&self.output);
 
-        for ws in &mut self.workspaces {
-            ws.update_output_size(&self.output);
+        for id in self.view.ids() {
+            pool.get_mut(id)
+                .expect("view id must be a key in the pool")
+                .update_output_size(&self.output);
         }
     }
 
-    pub fn move_workspace_down(&mut self) {
+    pub fn move_workspace_down(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) {
         let active_idx = self.view.active_position();
-        let mut new_idx = min(active_idx + 1, self.workspaces.len() - 1);
+        let mut new_idx = min(active_idx + 1, self.view.len() - 1);
         if new_idx == active_idx {
             return;
         }
 
-        self.workspaces.swap(active_idx, new_idx);
         self.view.swap(active_idx, new_idx);
 
-        if new_idx == self.workspaces.len() - 1 {
+        if new_idx == self.view.len() - 1 {
             // Insert a new empty workspace.
-            self.add_workspace_bottom();
+            self.add_workspace_bottom(pool);
         }
 
         if self.options.layout.empty_workspace_above_first && active_idx == 0 {
-            self.add_workspace_top();
+            self.add_workspace_top(pool);
             new_idx += 1;
         }
 
@@ -1265,26 +1471,25 @@ impl<W: LayoutElement> Monitor<W> {
         self.workspace_switch = None;
         self.view.set_previous(previous_workspace_id);
 
-        self.clean_up_workspaces();
+        self.clean_up_workspaces(pool);
     }
 
-    pub fn move_workspace_up(&mut self) {
+    pub fn move_workspace_up(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) {
         let active_idx = self.view.active_position();
         let mut new_idx = active_idx.saturating_sub(1);
         if new_idx == active_idx {
             return;
         }
 
-        self.workspaces.swap(active_idx, new_idx);
         self.view.swap(active_idx, new_idx);
 
-        if active_idx == self.workspaces.len() - 1 {
+        if active_idx == self.view.len() - 1 {
             // Insert a new empty workspace.
-            self.add_workspace_bottom();
+            self.add_workspace_bottom(pool);
         }
 
         if self.options.layout.empty_workspace_above_first && new_idx == 0 {
-            self.add_workspace_top();
+            self.add_workspace_top(pool);
             new_idx += 1;
         }
 
@@ -1293,57 +1498,64 @@ impl<W: LayoutElement> Monitor<W> {
         self.workspace_switch = None;
         self.view.set_previous(previous_workspace_id);
 
-        self.clean_up_workspaces();
+        self.clean_up_workspaces(pool);
     }
 
-    pub fn move_workspace_to_idx(&mut self, old_idx: usize, new_idx: usize) {
-        if self.workspaces.len() <= old_idx {
+    pub fn move_workspace_to_idx(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        old_idx: usize,
+        new_idx: usize,
+    ) {
+        if self.view.len() <= old_idx {
             return;
         }
 
-        let new_idx = new_idx.clamp(0, self.workspaces.len() - 1);
+        let new_idx = new_idx.clamp(0, self.view.len() - 1);
         if old_idx == new_idx {
             return;
         }
 
-        let ws = self.workspaces.remove(old_idx);
-        self.workspaces.insert(new_idx, ws);
         self.view.move_within(old_idx, new_idx);
 
         if new_idx > old_idx {
-            if new_idx == self.workspaces.len() - 1 {
+            if new_idx == self.view.len() - 1 {
                 // Insert a new empty workspace.
-                self.add_workspace_bottom();
+                self.add_workspace_bottom(pool);
             }
 
             if self.options.layout.empty_workspace_above_first && old_idx == 0 {
-                self.add_workspace_top();
+                self.add_workspace_top(pool);
             }
         } else {
-            if old_idx == self.workspaces.len() - 1 {
+            if old_idx == self.view.len() - 1 {
                 // Insert a new empty workspace.
-                self.add_workspace_bottom();
+                self.add_workspace_bottom(pool);
             }
 
             if self.options.layout.empty_workspace_above_first && new_idx == 0 {
-                self.add_workspace_top();
+                self.add_workspace_top(pool);
             }
         }
 
         self.workspace_switch = None;
 
-        self.clean_up_workspaces();
+        self.clean_up_workspaces(pool);
     }
 
     /// Returns the geometry of the active window relative to and clamped to the output.
     ///
     /// During animations, assumes the final view position.
-    pub fn active_window_visual_rectangle(&self) -> Option<Rectangle<f64, Logical>> {
+    pub fn active_window_visual_rectangle(
+        &self,
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
+    ) -> Option<Rectangle<f64, Logical>> {
         if self.overview_open {
             return None;
         }
 
-        self.active_workspace_ref().active_window_visual_rectangle()
+        self.active_workspace_ref(pool)
+            .active_window_visual_rectangle()
     }
 
     fn workspace_size(&self, zoom: f64) -> Size<f64, Logical> {
@@ -1481,7 +1693,7 @@ impl<W: LayoutElement> Monitor<W> {
         let first_ws_y = round_logical_in_physical(scale, first_ws_y);
 
         // Return position for one-past-last workspace too.
-        (0..=self.workspaces.len()).map(move |idx| {
+        (0..=self.view.len()).map(move |idx| {
             let y = first_ws_y + idx as f64 * ws_height_with_gap;
             let loc = Point::from((0., y)) + static_offset;
 
@@ -1495,65 +1707,98 @@ impl<W: LayoutElement> Monitor<W> {
         })
     }
 
-    pub fn workspaces_with_render_geo(
-        &self,
-    ) -> impl Iterator<Item = (&Workspace<W>, Rectangle<f64, Logical>)> {
+    pub fn workspaces_with_render_geo<'a>(
+        &'a self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+    ) -> impl Iterator<Item = (&'a Workspace<W>, Rectangle<f64, Logical>)> + 'a {
         let output_geo = Rectangle::from_size(self.view_size);
 
         let geo = self.workspaces_render_geo();
-        zip(self.workspaces.iter(), geo)
+        let ids = self.view.ids();
+        zip(ids.iter(), geo)
+            .map(move |(id, geo)| {
+                (
+                    pool.get(id).expect("view id must be a key in the pool"),
+                    geo,
+                )
+            })
             // Cull out workspaces outside the output.
             .filter(move |(_ws, geo)| geo.intersection(output_geo).is_some())
     }
 
-    pub fn workspaces_with_render_geo_idx(
-        &self,
-    ) -> impl Iterator<Item = ((usize, &Workspace<W>), Rectangle<f64, Logical>)> {
+    pub fn workspaces_with_render_geo_idx<'a>(
+        &'a self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+    ) -> impl Iterator<Item = ((usize, &'a Workspace<W>), Rectangle<f64, Logical>)> + 'a {
         let output_geo = Rectangle::from_size(self.view_size);
 
         let geo = self.workspaces_render_geo();
-        zip(self.workspaces.iter().enumerate(), geo)
+        let ids = self.view.ids();
+        zip(ids.iter().enumerate(), geo)
+            .map(move |((idx, id), geo)| {
+                (
+                    (
+                        idx,
+                        pool.get(id).expect("view id must be a key in the pool"),
+                    ),
+                    geo,
+                )
+            })
             // Cull out workspaces outside the output.
             .filter(move |(_ws, geo)| geo.intersection(output_geo).is_some())
     }
 
-    pub fn workspaces_with_render_geo_mut(
-        &mut self,
+    /// Same shape as [`workspaces_with_render_geo`](Self::workspaces_with_render_geo) but yields
+    /// ids instead of workspace references, so the caller can keep its own `&mut pool` borrow.
+    /// The pool is unused at runtime but threaded through to keep the signature symmetric with the
+    /// `_mut` usage contract (callers always provide the pool) and to leave room for future
+    /// assertions.
+    pub fn workspaces_with_render_geo_ids<'a>(
+        &'a self,
         cull: bool,
-    ) -> impl Iterator<Item = (&mut Workspace<W>, Rectangle<f64, Logical>)> {
+    ) -> impl Iterator<Item = (WorkspaceId, Rectangle<f64, Logical>)> + 'a {
         let output_geo = Rectangle::from_size(self.view_size);
 
         let geo = self.workspaces_render_geo();
-        zip(self.workspaces.iter_mut(), geo)
+        let ids = self.view.ids();
+        zip(ids.iter().copied(), geo)
             // Cull out workspaces outside the output.
-            .filter(move |(_ws, geo)| !cull || geo.intersection(output_geo).is_some())
+            .filter(move |(_id, geo)| !cull || geo.intersection(output_geo).is_some())
     }
 
-    pub fn workspace_under(
-        &self,
+    pub fn workspace_under<'a>(
+        &'a self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
         pos_within_output: Point<f64, Logical>,
-    ) -> Option<(&Workspace<W>, Rectangle<f64, Logical>)> {
-        let (ws, geo) = self.workspaces_with_render_geo().find_map(|(ws, geo)| {
-            // Extend width to entire output.
-            let loc = Point::from((0., geo.loc.y));
-            let size = Size::from((self.view_size.w, geo.size.h));
-            let bounds = Rectangle::new(loc, size);
+    ) -> Option<(&'a Workspace<W>, Rectangle<f64, Logical>)> {
+        let (ws, geo) = self
+            .workspaces_with_render_geo(pool)
+            .find_map(|(ws, geo)| {
+                // Extend width to entire output.
+                let loc = Point::from((0., geo.loc.y));
+                let size = Size::from((self.view_size.w, geo.size.h));
+                let bounds = Rectangle::new(loc, size);
 
-            bounds.contains(pos_within_output).then_some((ws, geo))
-        })?;
+                bounds.contains(pos_within_output).then_some((ws, geo))
+            })?;
         Some((ws, geo))
     }
 
-    pub fn workspace_under_narrow(
-        &self,
+    pub fn workspace_under_narrow<'a>(
+        &'a self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
         pos_within_output: Point<f64, Logical>,
-    ) -> Option<&Workspace<W>> {
-        self.workspaces_with_render_geo()
+    ) -> Option<&'a Workspace<W>> {
+        self.workspaces_with_render_geo(pool)
             .find_map(|(ws, geo)| geo.contains(pos_within_output).then_some(ws))
     }
 
-    pub fn window_under(&self, pos_within_output: Point<f64, Logical>) -> Option<(&W, HitType)> {
-        let (ws, geo) = self.workspace_under(pos_within_output)?;
+    pub fn window_under<'a>(
+        &'a self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        pos_within_output: Point<f64, Logical>,
+    ) -> Option<(&'a W, HitType)> {
+        let (ws, geo) = self.workspace_under(pool, pos_within_output)?;
 
         if self.overview_progress.is_some() {
             let zoom = self.overview_zoom();
@@ -1568,20 +1813,25 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    pub fn resize_edges_under(&self, pos_within_output: Point<f64, Logical>) -> Option<ResizeEdge> {
+    pub fn resize_edges_under(
+        &self,
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        pos_within_output: Point<f64, Logical>,
+    ) -> Option<ResizeEdge> {
         if self.overview_progress.is_some() {
             return None;
         }
 
-        let (ws, geo) = self.workspace_under(pos_within_output)?;
+        let (ws, geo) = self.workspace_under(pool, pos_within_output)?;
         ws.resize_edges_under(pos_within_output - geo.loc)
     }
 
     pub(super) fn insert_position(
         &self,
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
         pos_within_output: Point<f64, Logical>,
     ) -> (InsertWorkspace, Rectangle<f64, Logical>) {
-        let mut iter = self.workspaces_with_render_geo_idx();
+        let mut iter = self.workspaces_with_render_geo_idx(pool);
 
         let dummy = Rectangle::default();
 
@@ -1626,14 +1876,13 @@ impl<W: LayoutElement> Monitor<W> {
         (InsertWorkspace::NewAt(last_idx + 1), dummy)
     }
 
-    pub fn render_above_top_layer(&self) -> bool {
+    pub fn render_above_top_layer(&self, pool: &HashMap<WorkspaceId, Workspace<W>>) -> bool {
         // Render above the top layer only if the view is stationary.
         if self.workspace_switch.is_some() || self.overview_progress.is_some() {
             return false;
         }
 
-        let ws = &self.workspaces[self.view.active_position()];
-        ws.render_above_top_layer()
+        self.active_workspace_ref(pool).render_above_top_layer()
     }
 
     pub fn render_insert_hint_between_workspaces<R: NiriRenderer>(
@@ -1663,6 +1912,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn render_workspaces<R: NiriRenderer>(
         &self,
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
         mut ctx: RenderCtx<R>,
         focus_ring: bool,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
@@ -1713,7 +1963,7 @@ impl<W: LayoutElement> Monitor<W> {
             )
         };
 
-        for (ws, geo) in self.workspaces_with_render_geo() {
+        for (ws, geo) in self.workspaces_with_render_geo(pool) {
             // Macro instead of closure because ws and insert hint have different elem types.
             macro_rules! push {
                 () => {{
@@ -1744,6 +1994,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn render_workspace_shadows<R: NiriRenderer>(
         &self,
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
         renderer: &mut R,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
@@ -1757,7 +2008,7 @@ impl<W: LayoutElement> Monitor<W> {
         let scale = self.scale.fractional_scale();
         let zoom = self.overview_zoom();
 
-        for (ws, geo) in self.workspaces_with_render_geo() {
+        for (ws, geo) in self.workspaces_with_render_geo(pool) {
             ws.render_shadow(renderer, &mut |elem| {
                 let elem = elem.with_alpha(alpha);
                 let elem = MonitorInnerRenderElement::Shadow(elem);
@@ -1862,7 +2113,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         let pos = gesture.tracker.pos() / total_height;
 
-        let (min, max) = gesture.min_max(self.workspaces.len());
+        let (min, max) = gesture.min_max(self.view.len());
         let new_idx = gesture.start_idx + pos;
         let new_idx = rubber_band.clamp(min, max, new_idx);
 
@@ -1949,7 +2200,7 @@ impl<W: LayoutElement> Monitor<W> {
         let pos = gesture.tracker.pos() / total_height;
         let unclamped = gesture.start_idx + pos;
 
-        let (min, max) = gesture.min_max(self.workspaces.len());
+        let (min, max) = gesture.min_max(self.view.len());
         let clamped = unclamped.clamp(min, max);
 
         // Make sure that DnD scrolling too much outside the min/max does not "build up".
@@ -1992,7 +2243,7 @@ impl<W: LayoutElement> Monitor<W> {
         let current_pos = gesture.tracker.pos() / total_height;
         let pos = gesture.tracker.projected_end_pos() / total_height;
 
-        let (min, max) = gesture.min_max(self.workspaces.len());
+        let (min, max) = gesture.min_max(self.view.len());
         let new_idx = gesture.start_idx + pos;
 
         let new_idx = new_idx.clamp(min, max);
@@ -2044,7 +2295,7 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     #[cfg(test)]
-    pub(super) fn verify_invariants(&self) {
+    pub(super) fn verify_invariants(&self, pool: &HashMap<WorkspaceId, Workspace<W>>) {
         use approx::assert_abs_diff_eq;
 
         let options =
@@ -2052,56 +2303,57 @@ impl<W: LayoutElement> Monitor<W> {
         assert_eq!(&*self.options, &options);
 
         assert!(
-            !self.workspaces.is_empty(),
+            self.view.len() >= 1,
             "monitor must have at least one workspace"
         );
-        assert_eq!(
-            self.view.len(),
-            self.workspaces.len(),
-            "view.ids length must match workspaces length"
-        );
-        for (i, ws) in self.workspaces.iter().enumerate() {
-            assert_eq!(
-                self.view.ids()[i],
-                ws.id(),
-                "view.ids must mirror workspaces order"
+        for (i, id) in self.view.ids().iter().enumerate() {
+            assert!(
+                pool.contains_key(id),
+                "view.ids[{i}] must be a key in the workspace pool",
             );
         }
-        assert!(self.view.active_position() < self.workspaces.len());
+        assert!(self.view.active_position() < self.view.len());
 
         if let Some(WorkspaceSwitch::Animation(anim)) = &self.workspace_switch {
             let before_idx = anim.from() as usize;
             let after_idx = anim.to() as usize;
 
-            assert!(before_idx < self.workspaces.len());
-            assert!(after_idx < self.workspaces.len());
+            assert!(before_idx < self.view.len());
+            assert!(after_idx < self.view.len());
         }
 
+        let ws = |id: WorkspaceId| -> &Workspace<W> {
+            pool.get(&id).expect("view id must be a key in the pool")
+        };
+
+        let last_id = *self.view.ids().last().unwrap();
+        let first_id = *self.view.ids().first().unwrap();
+
         assert!(
-            !self.workspaces.last().unwrap().has_windows(),
+            !ws(last_id).has_windows(),
             "monitor must have an empty workspace in the end"
         );
         if self.options.layout.empty_workspace_above_first {
             assert!(
-                !self.workspaces.first().unwrap().has_windows(),
+                !ws(first_id).has_windows(),
                 "first workspace must be empty when empty_workspace_above_first is set"
             )
         }
 
         assert!(
-            self.workspaces.last().unwrap().name.is_none(),
+            ws(last_id).name.is_none(),
             "monitor must have an unnamed workspace in the end"
         );
         if self.options.layout.empty_workspace_above_first {
             assert!(
-                self.workspaces.first().unwrap().name.is_none(),
+                ws(first_id).name.is_none(),
                 "first workspace must be unnamed when empty_workspace_above_first is set"
             )
         }
 
         if self.options.layout.empty_workspace_above_first {
             assert!(
-                self.workspaces.len() != 2,
+                self.view.len() != 2,
                 "if empty_workspace_above_first is set there must be just 1 or 3+ workspaces"
             )
         }
@@ -2115,8 +2367,9 @@ impl<W: LayoutElement> Monitor<W> {
             0
         };
         if self.workspace_switch.is_none() {
-            for (idx, ws) in self
-                .workspaces
+            for (idx, id) in self
+                .view
+                .ids()
                 .iter()
                 .enumerate()
                 .skip(pre_skip)
@@ -2126,14 +2379,15 @@ impl<W: LayoutElement> Monitor<W> {
             {
                 if idx != self.view.active_position() {
                     assert!(
-                        ws.has_windows_or_name(),
+                        ws(*id).has_windows_or_name(),
                         "non-active workspace can't be empty and unnamed except the last one"
                     );
                 }
             }
         }
 
-        for workspace in &self.workspaces {
+        for id in self.view.ids() {
+            let workspace = ws(*id);
             assert_eq!(self.clock, workspace.clock);
 
             assert_eq!(
@@ -2154,7 +2408,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         let scale = self.scale().fractional_scale();
-        let iter = self.workspaces_with_render_geo();
+        let iter = self.workspaces_with_render_geo(pool);
         for (_ws, ws_geo) in iter {
             let pos = ws_geo.loc;
             let rounded_pos = pos.to_physical_precise_round(scale).to_logical(scale);

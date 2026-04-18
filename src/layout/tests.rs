@@ -871,11 +871,12 @@ impl Op {
             }
             Op::UpdateOutputLayoutConfig { id, layout_config } => {
                 let name = format!("output{id}");
-                let Some(mon) = layout.monitors_mut().find(|m| m.output_name() == &name) else {
+                let (monitors, pool) = layout.monitors_and_pool_mut();
+                let Some(mon) = monitors.iter_mut().find(|m| m.output_name() == &name) else {
                     return;
                 };
 
-                mon.update_layout_config(layout_config.map(|x| *x));
+                mon.update_layout_config(pool, layout_config.map(|x| *x));
             }
             Op::AddNamedWorkspace {
                 ws_name,
@@ -956,10 +957,12 @@ impl Op {
                     }
                 }
 
-                match &mut layout.monitor_set {
+                let pool = &layout.workspaces;
+                match &layout.monitor_set {
                     MonitorSet::Normal { monitors, .. } => {
                         for mon in monitors {
-                            for ws in &mut mon.workspaces {
+                            for id in mon.view.ids() {
+                                let ws = pool.get(id).unwrap();
                                 for win in ws.windows() {
                                     if win.0.id == params.id {
                                         return;
@@ -973,7 +976,6 @@ impl Op {
                         }
                     }
                     MonitorSet::NoOutputs { workspaces, .. } => {
-                        let pool = &layout.workspaces;
                         for id in workspaces {
                             let ws = pool.get(id).unwrap();
                             for win in ws.windows() {
@@ -1024,10 +1026,12 @@ impl Op {
                     }
                 }
 
-                match &mut layout.monitor_set {
+                let pool = &layout.workspaces;
+                match &layout.monitor_set {
                     MonitorSet::Normal { monitors, .. } => {
                         for mon in monitors {
-                            for ws in &mut mon.workspaces {
+                            for id in mon.view.ids() {
+                                let ws = pool.get(id).unwrap();
                                 for win in ws.windows() {
                                     if win.0.id == params.id {
                                         return;
@@ -1045,7 +1049,6 @@ impl Op {
                         }
                     }
                     MonitorSet::NoOutputs { workspaces, .. } => {
-                        let pool = &layout.workspaces;
                         for id in workspaces {
                             let ws = pool.get(id).unwrap();
                             for win in ws.windows() {
@@ -1239,7 +1242,7 @@ impl Op {
                 let mon = layout.monitor_for_output(&output).unwrap();
 
                 let window_id = window_id.filter(|id| layout.has_window(id));
-                let target_ws_idx = target_ws_idx.filter(|idx| mon.workspaces.len() > *idx);
+                let target_ws_idx = target_ws_idx.filter(|idx| mon.view.len() > *idx);
                 layout.move_to_output(
                     window_id.as_ref(),
                     &output,
@@ -1269,12 +1272,15 @@ impl Op {
                     return;
                 };
 
+                let pool = &layout.workspaces;
                 let Some((old_idx, old_output)) = monitors.iter().find_map(|monitor| {
                     monitor
-                        .workspaces
+                        .view
+                        .ids()
                         .iter()
                         .enumerate()
-                        .find_map(|(i, ws)| {
+                        .find_map(|(i, id)| {
+                            let ws = pool.get(id).unwrap();
                             if ws.name == Some(format!("ws{ws_name}")) {
                                 Some(i)
                             } else {
@@ -1314,12 +1320,15 @@ impl Op {
                     return;
                 };
 
+                let pool = &layout.workspaces;
                 let Some((old_idx, old_output)) = monitors.iter().find_map(|monitor| {
                     monitor
-                        .workspaces
+                        .view
+                        .ids()
                         .iter()
                         .enumerate()
-                        .find_map(|(i, ws)| {
+                        .find_map(|(i, id)| {
+                            let ws = pool.get(id).unwrap();
                             if ws.name == Some(format!("ws{ws_name}")) {
                                 Some(i)
                             } else {
@@ -1420,10 +1429,12 @@ impl Op {
                     }
                 }
 
-                match &mut layout.monitor_set {
+                let pool = &layout.workspaces;
+                match &layout.monitor_set {
                     MonitorSet::Normal { monitors, .. } => {
                         'outer: for mon in monitors {
-                            for ws in &mut mon.workspaces {
+                            for id_ in mon.view.ids() {
+                                let ws = pool.get(id_).unwrap();
                                 for win in ws.windows() {
                                     if win.0.id == id {
                                         win.0.parent_id.set(new_parent_id);
@@ -1435,7 +1446,6 @@ impl Op {
                         }
                     }
                     MonitorSet::NoOutputs { workspaces, .. } => {
-                        let pool = &layout.workspaces;
                         'outer: for id_ in workspaces {
                             let ws = pool.get(id_).unwrap();
                             for win in ws.windows() {
@@ -1480,10 +1490,12 @@ impl Op {
                     }
                 }
 
-                match &mut layout.monitor_set {
+                let pool = &layout.workspaces;
+                match &layout.monitor_set {
                     MonitorSet::Normal { monitors, .. } => {
                         'outer: for mon in monitors {
-                            for ws in &mut mon.workspaces {
+                            for id_ in mon.view.ids() {
+                                let ws = pool.get(id_).unwrap();
                                 for win in ws.windows() {
                                     if win.0.id == id {
                                         if win.communicate() {
@@ -1496,7 +1508,6 @@ impl Op {
                         }
                     }
                     MonitorSet::NoOutputs { workspaces, .. } => {
-                        let pool = &layout.workspaces;
                         'outer: for id_ in workspaces {
                             let ws = pool.get(id_).unwrap();
                             for win in ws.windows() {
@@ -1678,10 +1689,12 @@ fn check_ops_on_layout(layout: &mut Layout<TestWindow>, ops: impl IntoIterator<I
 /// without unbinding, forgets to unbind on transfer, or drops the Smithay markers.
 #[track_caller]
 fn verify_output_bindings(layout: &Layout<TestWindow>) {
+    let pool = layout.workspace_pool();
     match &layout.monitor_set {
         MonitorSet::Normal { monitors, .. } => {
             for mon in monitors {
-                for ws in &mon.workspaces {
+                for id in mon.view.ids() {
+                    let ws = pool.get(id).unwrap();
                     for win in ws.windows() {
                         let bound = win.bound_outputs();
                         assert_eq!(
@@ -1698,7 +1711,6 @@ fn verify_output_bindings(layout: &Layout<TestWindow>) {
             }
         }
         MonitorSet::NoOutputs { workspaces } => {
-            let pool = &layout.workspaces;
             for id in workspaces {
                 let ws = pool.get(id).unwrap();
                 for win in ws.windows() {
@@ -2114,11 +2126,12 @@ fn move_to_workspace_by_idx_does_not_leave_empty_workspaces() {
 
     let layout = check_ops(ops);
 
-    let MonitorSet::Normal { monitors, .. } = layout.monitor_set else {
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
         unreachable!()
     };
-
-    assert!(monitors[0].workspaces[1].has_windows());
+    assert!(monitors[0]
+        .workspace_at(layout.workspace_pool(), 1)
+        .has_windows());
 }
 
 #[test]
@@ -2350,17 +2363,18 @@ fn move_workspace_to_output() {
         monitors,
         active_monitor_idx,
         ..
-    } = layout.monitor_set
+    } = &layout.monitor_set
     else {
         unreachable!()
     };
 
-    assert_eq!(active_monitor_idx, 1);
-    assert_eq!(monitors[0].workspaces.len(), 1);
-    assert!(!monitors[0].workspaces[0].has_windows());
+    let pool = layout.workspace_pool();
+    assert_eq!(*active_monitor_idx, 1);
+    assert_eq!(monitors[0].view.len(), 1);
+    assert!(!monitors[0].workspace_at(pool, 0).has_windows());
     assert_eq!(monitors[1].view.active_position(), 0);
-    assert_eq!(monitors[1].workspaces.len(), 2);
-    assert!(monitors[1].workspaces[0].has_windows());
+    assert_eq!(monitors[1].view.len(), 2);
+    assert!(monitors[1].workspace_at(pool, 0).has_windows());
 }
 
 #[test]
@@ -2382,18 +2396,19 @@ fn open_right_of_on_different_workspace() {
 
     let layout = check_ops(ops);
 
-    let MonitorSet::Normal { monitors, .. } = layout.monitor_set else {
+    let pool = layout.workspace_pool();
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
         unreachable!()
     };
 
-    let mon = monitors.into_iter().next().unwrap();
+    let mon = &monitors[0];
     assert_eq!(
         mon.view.active_position(),
         1,
         "the second workspace must remain active"
     );
     assert_eq!(
-        mon.workspaces[0].scrolling().active_column_idx(),
+        mon.workspace_at(pool, 0).scrolling().active_column_idx(),
         1,
         "the new window must become active"
     );
@@ -2426,18 +2441,19 @@ fn open_right_of_on_different_workspace_ewaf() {
     };
     let layout = check_ops_with_options(options, ops);
 
-    let MonitorSet::Normal { monitors, .. } = layout.monitor_set else {
+    let pool = layout.workspace_pool();
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
         unreachable!()
     };
 
-    let mon = monitors.into_iter().next().unwrap();
+    let mon = &monitors[0];
     assert_eq!(
         mon.view.active_position(),
         2,
         "the second workspace must remain active"
     );
     assert_eq!(
-        mon.workspaces[1].scrolling().active_column_idx(),
+        mon.workspace_at(pool, 1).scrolling().active_column_idx(),
         1,
         "the new window must become active"
     );
@@ -2967,21 +2983,19 @@ fn move_workspace_to_idx_active_at_top_empty_under_ewaf() {
     };
     let layout = check_ops_with_options(options, ops);
 
-    let MonitorSet::Normal { monitors, .. } = layout.monitor_set else {
+    let pool = layout.workspace_pool();
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
         unreachable!()
     };
     let m = &monitors[0];
     let named: Vec<bool> = m
-        .workspaces
+        .view
+        .ids()
         .iter()
-        .map(|w| w.has_windows_or_name())
+        .map(|id| pool.get(id).unwrap().has_windows_or_name())
         .collect();
 
-    assert_eq!(
-        m.workspaces.len(),
-        6,
-        "expected 6 workspaces, got {named:?}"
-    );
+    assert_eq!(m.view.len(), 6, "expected 6 workspaces, got {named:?}");
     assert_eq!(
         named,
         vec![false, true, true, false, true, false],
@@ -3642,11 +3656,14 @@ fn move_column_to_workspace_unfocused_with_multiple_monitors() {
 
     assert_eq!(layout.active_workspace().unwrap().name().unwrap(), "ws102");
 
+    let pool = layout.workspace_pool();
     for (mon, win) in layout.windows() {
         let mon = mon.unwrap();
         let ws = mon
-            .workspaces
+            .view
+            .ids()
             .iter()
+            .filter_map(|id| pool.get(id))
             .find(|w| w.has_window(win.id()))
             .unwrap();
 
@@ -3901,12 +3918,13 @@ fn workspace_render_geo_at_fractional_scale() {
 
     let layout = check_ops(ops);
 
+    let pool = layout.workspace_pool();
     let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
         unreachable!()
     };
 
     let mon = &monitors[0];
-    let mut iter = mon.workspaces_with_render_geo();
+    let mut iter = mon.workspaces_with_render_geo(pool);
     let (_ws, geo) = iter.next().unwrap();
     assert!(
         iter.next().is_none(),
