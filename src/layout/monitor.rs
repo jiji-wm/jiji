@@ -70,9 +70,7 @@ pub struct Monitor<W: LayoutElement> {
     /// Workspace values live in `Layout.workspaces`; `view.ids()` is the
     /// authoritative ordering for this monitor. `view` is never empty.
     pub(super) view: WorkspaceView,
-    /// Tie the `W` type parameter to this struct — the workspace values with `W` now live in
-    /// `Layout.workspaces`, but every `Monitor<W>` method still operates on `Workspace<W>` values
-    /// through the threaded pool. The phantom keeps `W` inferable at call sites.
+    /// Witness for `W`; workspace values live in the pool.
     _phantom: PhantomData<W>,
     /// In-progress switch between workspaces.
     pub(super) workspace_switch: Option<WorkspaceSwitch>,
@@ -317,7 +315,6 @@ impl<W: LayoutElement> Monitor<W> {
         let view_size = output_size(&output);
         let working_area = compute_working_area(&output);
 
-        // Prepare the workspaces: bind to output, empty first, empty last.
         let mut active_workspace_idx = 0;
 
         for (idx, id) in workspace_ids.iter().enumerate() {
@@ -375,11 +372,10 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    /// Drop this monitor, draining its non-empty workspaces back into the pool-held state.
-    ///
-    /// Empty unnamed workspaces (typically the bookend empty workspaces added by `Monitor::new`)
-    /// are removed from the pool since no caller needs them back. The returned ids are the ones
-    /// that remain in the pool and whose ordering the caller may want to preserve.
+    /// Drop this monitor. Non-empty workspaces stay in the pool (unbound from this monitor's
+    /// output); empty unnamed workspaces (typically the bookends added by `Monitor::new`) are
+    /// removed from the pool since no caller needs them back. Returns the retained ids in view
+    /// order.
     pub fn into_workspace_ids(
         self,
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
@@ -830,8 +826,10 @@ impl<W: LayoutElement> Monitor<W> {
 
     /// Attach an existing workspace to this monitor at position `idx`.
     ///
-    /// The workspace value must already be a key in `pool`. `Monitor::insert_workspace` only adds
-    /// `id` to the view and binds the workspace to this output.
+    /// The workspace value must already be a key in `pool`. Binds the workspace to this output,
+    /// refreshes its config, inserts `id` into the view (adding a top empty bookend first if
+    /// `empty_workspace_above_first` is on), optionally activates it, clears any in-flight
+    /// `workspace_switch`, and runs `clean_up_workspaces`.
     pub fn insert_workspace(
         &mut self,
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
@@ -2326,10 +2324,8 @@ impl<W: LayoutElement> Monitor<W> {
             Options::clone(&self.base_options).with_merged_layout(self.layout_config.as_ref());
         assert_eq!(&*self.options, &options);
 
-        assert!(
-            self.view.len() >= 1,
-            "monitor must have at least one workspace"
-        );
+        // `WorkspaceView::new` already enforces `!ids.is_empty()` and no mutator empties the
+        // view, so `view.len() >= 1` is a `WorkspaceView` invariant — not re-asserted here.
         for (i, id) in self.view.ids().iter().enumerate() {
             assert!(
                 pool.contains_key(id),

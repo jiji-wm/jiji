@@ -335,7 +335,7 @@ pub trait LayoutElement {
 
 #[derive(Debug)]
 pub struct Layout<W: LayoutElement> {
-    /// Monitors and workspaes in the layout.
+    /// Monitors and workspaces in the layout.
     monitor_set: MonitorSet<W>,
     /// Owning pool of `Workspace<W>` values keyed by id.
     ///
@@ -389,9 +389,9 @@ enum MonitorSet<W: LayoutElement> {
     },
     /// No outputs are connected, and these are the ids of the workspaces.
     ///
-    /// The owning `Workspace<W>` values live in `Layout.workspaces` (3a part 1). The `Vec`
-    /// preserves the ordering that was present on the last-disconnected monitor (or the
-    /// config-declared order at startup); `Layout.workspaces.contains_key(&id)` for every id here.
+    /// The owning `Workspace<W>` values live in `Layout.workspaces`. The `Vec` preserves the
+    /// ordering that was present on the last-disconnected monitor (or the config-declared order
+    /// at startup); `Layout.workspaces.contains_key(&id)` for every id here.
     NoOutputs {
         /// Ids of the workspaces, in display order.
         workspaces: Vec<WorkspaceId>,
@@ -868,8 +868,6 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::NoOutputs { workspaces } => {
                 let ws_id_to_activate = self.last_active_workspace_id.remove(&output.name());
 
-                // 3a part 2: ids live in the pool already; pass them to `Monitor::new` which will
-                // bind them to the output in place, plus insert fresh empty bookends.
                 let mut monitor = Monitor::new(
                     output,
                     workspaces,
@@ -1103,7 +1101,6 @@ impl<W: LayoutElement> Layout<W> {
                 Some(&mon.output)
             }
             MonitorSet::NoOutputs { workspaces } => {
-                // 3a part 1: NoOutputs holds ids; look up values in `self.workspaces`.
                 let pool = &mut self.workspaces;
                 let (ws_idx, target) = match target {
                     AddWindowTarget::Auto => {
@@ -2007,8 +2004,7 @@ impl<W: LayoutElement> Layout<W> {
         Some(&monitors[*active_monitor_idx])
     }
 
-    /// Borrow the pool of workspace values. External callers that call `Monitor` methods
-    /// threading `&HashMap<WorkspaceId, Workspace<W>>` use this accessor.
+    /// Borrow the workspace pool.
     pub fn workspace_pool(&self) -> &HashMap<WorkspaceId, Workspace<W>> {
         &self.workspaces
     }
@@ -2799,9 +2795,8 @@ impl<W: LayoutElement> Layout<W> {
 
         let pool = &self.workspaces;
 
-        // 3a part 2 invariant (a)/(c): every pool key belongs to exactly one Monitor.view.ids or
-        // to NoOutputs.workspaces, and every id in those locations is a key in the pool. Build
-        // the expected key set and compare.
+        // Pool keys equal the disjoint union of every Monitor.view.ids() and
+        // NoOutputs.workspaces. Build the expected key set and compare.
         let mut expected_keys: HashSet<WorkspaceId> = HashSet::new();
         match &self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
@@ -5523,9 +5518,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn workspaces_mut(&mut self) -> impl Iterator<Item = &mut Workspace<W>> + '_ {
-        // 3a part 2: pool owns every `Workspace<W>` (both connected-monitor workspaces and
-        // NoOutputs ones). Iterate all pool values, in no particular order — no caller currently
-        // depends on ordering here.
+        // Pool owns every `Workspace<W>`; ordering among pool values is not defined.
         self.workspaces.values_mut()
     }
 

@@ -1,9 +1,9 @@
 //! Activity / workspace-view types.
 //!
-//! `Workspace<W>` values live in `Layout.workspaces:
-//! HashMap<WorkspaceId, Workspace<W>>` and `Monitor` only holds the
-//! `view: WorkspaceView` with the ordered ids. The invariant is: every id
-//! in `Monitor.view.ids()` is a key in `Layout.workspaces`.
+//! `Workspace<W>` values live in `Layout.workspaces: HashMap<WorkspaceId,
+//! Workspace<W>>`; `Monitor` only holds a `view: WorkspaceView` of ordered
+//! ids. Invariant: every id in `Monitor.view.ids()` is a key in
+//! `Layout.workspaces`.
 
 use super::workspace::WorkspaceId;
 
