@@ -1752,10 +1752,8 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     /// Same shape as [`workspaces_with_render_geo`](Self::workspaces_with_render_geo) but yields
-    /// ids instead of workspace references, so the caller can keep its own `&mut pool` borrow.
-    /// The pool is unused at runtime but threaded through to keep the signature symmetric with the
-    /// `_mut` usage contract (callers always provide the pool) and to leave room for future
-    /// assertions.
+    /// ids instead of workspace references. Does not borrow the pool; callers thread their own
+    /// `&mut pool` borrow through each yielded id.
     pub fn workspaces_with_render_geo_ids<'a>(
         &'a self,
         cull: bool,

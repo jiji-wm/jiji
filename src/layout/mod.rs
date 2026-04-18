@@ -338,6 +338,11 @@ pub struct Layout<W: LayoutElement> {
     /// Monitors and workspaes in the layout.
     monitor_set: MonitorSet<W>,
     /// Owning pool of `Workspace<W>` values keyed by id.
+    ///
+    /// Every id appearing in any `Monitor.view.ids()` (Normal state) or in `NoOutputs.workspaces`
+    /// is a key here; the pool keys equal the disjoint union of those two sources — no orphans,
+    /// no duplicates. Pool values are never drained out during output reconnect; monitors
+    /// bind/unbind the `Smithay` output on their workspaces in place.
     pub(super) workspaces: HashMap<WorkspaceId, Workspace<W>>,
     /// Whether the layout should draw as active.
     ///
