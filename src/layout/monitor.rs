@@ -306,13 +306,13 @@ impl<W: LayoutElement> Monitor<W> {
         let view_size = output_size(&output);
         let working_area = compute_working_area(&output);
 
-        // Prepare the workspaces: set output, empty first, empty last.
+        // Prepare the workspaces: bind to output, empty first, empty last.
         let mut active_workspace_idx = 0;
 
         for (idx, ws) in workspaces.iter_mut().enumerate() {
             assert!(ws.has_windows_or_name());
 
-            ws.set_output(Some(output.clone()));
+            ws.bind_output(&output);
             ws.update_config(options.clone());
 
             if ws_id_to_activate.is_some_and(|id| ws.id() == id) {
@@ -321,12 +321,12 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         if options.layout.empty_workspace_above_first && !workspaces.is_empty() {
-            let ws = Workspace::new(output.clone(), clock.clone(), options.clone());
+            let ws = Workspace::new(&output, clock.clone(), options.clone());
             workspaces.insert(0, ws);
             active_workspace_idx += 1;
         }
 
-        let ws = Workspace::new(output.clone(), clock.clone(), options.clone());
+        let ws = Workspace::new(&output, clock.clone(), options.clone());
         workspaces.push(ws);
 
         let ids = workspaces.iter().map(|ws| ws.id()).collect();
@@ -357,7 +357,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.workspaces.retain(|ws| ws.has_windows_or_name());
 
         for ws in &mut self.workspaces {
-            ws.set_output(None);
+            ws.unbind_output(&self.output);
         }
 
         self.workspaces
@@ -409,11 +409,7 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn add_workspace_at(&mut self, idx: usize) {
-        let ws = Workspace::new(
-            self.output.clone(),
-            self.clock.clone(),
-            self.options.clone(),
-        );
+        let ws = Workspace::new(&self.output, self.clock.clone(), self.options.clone());
 
         let id = ws.id();
         self.workspaces.insert(idx, ws);
@@ -536,7 +532,7 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn add_column(&mut self, mut workspace_idx: usize, column: Column<W>, activate: bool) {
         let workspace = &mut self.workspaces[workspace_idx];
 
-        workspace.add_column(column, activate);
+        workspace.add_column(Some(&self.output), column, activate);
 
         // After adding a new window, workspace becomes this output's own.
         if workspace.name().is_none() {
@@ -572,7 +568,15 @@ impl<W: LayoutElement> Monitor<W> {
 
         let workspace = &mut self.workspaces[workspace_idx];
 
-        workspace.add_tile(tile, target, activate, width, is_full_width, is_floating);
+        workspace.add_tile(
+            Some(&self.output),
+            tile,
+            target,
+            activate,
+            width,
+            is_full_width,
+            is_floating,
+        );
 
         // After adding a new window, workspace becomes this output's own.
         if workspace.name().is_none() {
@@ -606,7 +610,7 @@ impl<W: LayoutElement> Monitor<W> {
     ) {
         let workspace = &mut self.workspaces[workspace_idx];
 
-        workspace.add_tile_to_column(column_idx, tile_idx, tile, activate);
+        workspace.add_tile_to_column(Some(&self.output), column_idx, tile_idx, tile, activate);
 
         // After adding a new window, workspace becomes this output's own.
         if workspace.name().is_none() {
@@ -674,7 +678,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         let mut ws = self.workspaces.remove(idx);
-        ws.set_output(None);
+        ws.unbind_output(&self.output);
 
         // For monitor current workspace removal, we focus previous rather than next (<= rather
         // than <). This is different from columns and tiles, but it lets move-workspace-to-monitor
@@ -688,7 +692,7 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn insert_workspace(&mut self, mut ws: Workspace<W>, mut idx: usize, activate: bool) {
-        ws.set_output(Some(self.output.clone()));
+        ws.bind_output(&self.output);
         ws.update_config(self.options.clone());
 
         // Don't insert past the last empty workspace.
@@ -720,7 +724,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         for ws in &mut workspaces {
-            ws.set_output(Some(self.output.clone()));
+            ws.bind_output(&self.output);
             ws.update_config(self.options.clone());
         }
 
@@ -791,7 +795,8 @@ impl<W: LayoutElement> Monitor<W> {
         let new_id = self.workspaces[new_idx].id();
 
         let workspace = &mut self.workspaces[source_workspace_idx];
-        let Some(removed) = workspace.remove_active_tile(Transaction::new()) else {
+        let Some(removed) = workspace.remove_active_tile(Some(&self.output), Transaction::new())
+        else {
             return;
         };
 
@@ -825,7 +830,8 @@ impl<W: LayoutElement> Monitor<W> {
         let new_id = self.workspaces[new_idx].id();
 
         let workspace = &mut self.workspaces[source_workspace_idx];
-        let Some(removed) = workspace.remove_active_tile(Transaction::new()) else {
+        let Some(removed) = workspace.remove_active_tile(Some(&self.output), Transaction::new())
+        else {
             return;
         };
 
@@ -877,8 +883,9 @@ impl<W: LayoutElement> Monitor<W> {
         let workspace = &mut self.workspaces[source_workspace_idx];
         let transaction = Transaction::new();
         let removed = if let Some(window) = window {
-            workspace.remove_tile(window, transaction)
-        } else if let Some(removed) = workspace.remove_active_tile(transaction) {
+            workspace.remove_tile(Some(&self.output), window, transaction)
+        } else if let Some(removed) = workspace.remove_active_tile(Some(&self.output), transaction)
+        {
             removed
         } else {
             return;
@@ -920,7 +927,7 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         }
 
-        let Some(column) = workspace.remove_active_column() else {
+        let Some(column) = workspace.remove_active_column(Some(&self.output)) else {
             return;
         };
 
@@ -941,7 +948,7 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         }
 
-        let Some(column) = workspace.remove_active_column() else {
+        let Some(column) = workspace.remove_active_column(Some(&self.output)) else {
             return;
         };
 
@@ -967,7 +974,7 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         }
 
-        let Some(column) = workspace.remove_active_column() else {
+        let Some(column) = workspace.remove_active_column(Some(&self.output)) else {
             return;
         };
 
@@ -1229,7 +1236,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.working_area = compute_working_area(&self.output);
 
         for ws in &mut self.workspaces {
-            ws.update_output_size();
+            ws.update_output_size(&self.output);
         }
     }
 

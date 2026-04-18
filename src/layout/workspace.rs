@@ -55,16 +55,9 @@ pub struct Workspace<W: LayoutElement> {
 
     /// The workspace's designated output, by stable identifier.
     ///
-    /// Most of the time this matches the current Smithay output; after an output disconnection,
-    /// it remains pointing at the disconnected output so reconnect can re-bind the workspace.
-    ///
-    /// `None` is reserved; no current code path produces it. In sub-step 2/3 of Phase 0b-2
-    /// (activities DD §5.2) this field will absorb the sibling `output: Option<Output>` Smithay
-    /// handle and `None` will then mean the workspace's designated output is disconnected.
+    /// After an output disconnection, this remains pointing at the disconnected output so
+    /// reconnect can re-bind the workspace. `None` is reserved; no current code path produces it.
     pub(super) output_id: Option<OutputId>,
-
-    /// Current output of this workspace.
-    output: Option<Output>,
 
     /// Latest known output scale for this workspace.
     ///
@@ -210,12 +203,12 @@ impl FloatingActive {
 }
 
 impl<W: LayoutElement> Workspace<W> {
-    pub fn new(output: Output, clock: Clock, options: Rc<Options>) -> Self {
+    pub fn new(output: &Output, clock: Clock, options: Rc<Options>) -> Self {
         Self::new_with_config(output, None, clock, options)
     }
 
     pub fn new_with_config(
-        output: Output,
+        output: &Output,
         mut config: Option<WorkspaceConfig>,
         clock: Clock,
         base_options: Rc<Options>,
@@ -225,7 +218,7 @@ impl<W: LayoutElement> Workspace<W> {
                 .as_ref()
                 .and_then(|c| c.open_on_output.clone())
                 .map(OutputId)
-                .unwrap_or(OutputId::new(&output)),
+                .unwrap_or(OutputId::new(output)),
         );
 
         let layout_config = config.as_mut().and_then(|c| c.layout.take().map(|x| x.0));
@@ -237,8 +230,8 @@ impl<W: LayoutElement> Workspace<W> {
                 .adjusted_for_scale(scale.fractional_scale()),
         );
 
-        let view_size = output_size(&output);
-        let working_area = compute_working_area(&output);
+        let view_size = output_size(output);
+        let working_area = compute_working_area(output);
 
         let scrolling = ScrollingSpace::new(
             view_size,
@@ -270,7 +263,6 @@ impl<W: LayoutElement> Workspace<W> {
             working_area,
             shadow: Shadow::new(shadow_config),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
-            output: Some(output),
             clock,
             base_options,
             options,
@@ -327,7 +319,6 @@ impl<W: LayoutElement> Workspace<W> {
             scrolling,
             floating,
             floating_is_active: FloatingActive::No,
-            output: None,
             scale,
             transform: Transform::Normal,
             output_id,
@@ -470,8 +461,8 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating.has_window(id)
     }
 
-    pub fn current_output(&self) -> Option<&Output> {
-        self.output.as_ref()
+    pub fn output_id(&self) -> Option<&OutputId> {
+        self.output_id.as_ref()
     }
 
     pub fn active_window(&self) -> Option<&W> {
@@ -494,42 +485,35 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.is_active_pending_fullscreen()
     }
 
-    pub fn set_output(&mut self, output: Option<Output>) {
-        if self.output == output {
-            return;
+    /// Binds this workspace to `output`: normalizes `output_id`, syncs cached geometry via
+    /// `update_output_size`, and fires `output_enter` + `set_preferred_scale_transform` on every
+    /// window. Must be paired with a prior `unbind_output` if the workspace was already bound to
+    /// a different output — Smithay accumulates per-output overlaps, so a bind without a matching
+    /// leave leaves windows marked as present on both outputs.
+    pub fn bind_output(&mut self, output: &Output) {
+        // Normalize designated output id: possibly replace connector with make/model/serial.
+        if self.output_id.as_ref().is_some_and(|id| id.matches(output)) {
+            self.output_id = Some(OutputId::new(output));
         }
 
-        if let Some(output) = self.output.take() {
-            for win in self.windows() {
-                win.output_leave(&output);
-            }
-        }
+        self.update_output_size(output);
 
-        self.output = output;
-
-        if let Some(output) = &self.output {
-            // Normalize designated output id: possibly replace connector with make/model/serial.
-            if self.output_id.as_ref().is_some_and(|id| id.matches(output)) {
-                self.output_id = Some(OutputId::new(output));
-            }
-
-            self.update_output_size();
-
-            for win in self.windows() {
-                self.enter_output_for_window(win);
-            }
+        for win in self.windows() {
+            win.set_preferred_scale_transform(self.scale, self.transform);
+            win.output_enter(output);
         }
     }
 
-    fn enter_output_for_window(&self, window: &W) {
-        if let Some(output) = &self.output {
-            window.set_preferred_scale_transform(self.scale, self.transform);
-            window.output_enter(output);
+    /// Fires `output_leave` on every window. Caller supplies the output the workspace is
+    /// currently bound to — `Workspace` does not track it.
+    pub fn unbind_output(&mut self, output: &Output) {
+        for win in self.windows() {
+            win.output_leave(output);
         }
     }
 
-    pub fn update_output_size(&mut self) {
-        let output = self.output.as_ref().unwrap();
+    /// Syncs cached `scale` / `transform` / `view_size` / `working_area` from `output`.
+    pub fn update_output_size(&mut self, output: &Output) {
         let scale = output.current_scale();
         let transform = output.current_transform();
         let view_size = output_size(output);
@@ -604,8 +588,10 @@ impl<W: LayoutElement> Workspace<W> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_tile(
         &mut self,
+        output: Option<&Output>,
         mut tile: Tile<W>,
         target: WorkspaceAddWindowTarget<W>,
         activate: ActivateWindow,
@@ -613,7 +599,11 @@ impl<W: LayoutElement> Workspace<W> {
         is_full_width: bool,
         is_floating: bool,
     ) {
-        self.enter_output_for_window(tile.window());
+        if let Some(output) = output {
+            tile.window()
+                .set_preferred_scale_transform(self.scale, self.transform);
+            tile.window().output_enter(output);
+        }
         tile.restore_to_floating = is_floating;
 
         match target {
@@ -700,12 +690,17 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn add_tile_to_column(
         &mut self,
+        output: Option<&Output>,
         col_idx: usize,
         tile_idx: Option<usize>,
         tile: Tile<W>,
         activate: bool,
     ) {
-        self.enter_output_for_window(tile.window());
+        if let Some(output) = output {
+            tile.window()
+                .set_preferred_scale_transform(self.scale, self.transform);
+            tile.window().output_enter(output);
+        }
         self.scrolling
             .add_tile_to_column(col_idx, tile_idx, tile, activate);
 
@@ -714,9 +709,13 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn add_column(&mut self, column: Column<W>, activate: bool) {
-        for (tile, _) in column.tiles() {
-            self.enter_output_for_window(tile.window());
+    pub fn add_column(&mut self, output: Option<&Output>, column: Column<W>, activate: bool) {
+        if let Some(output) = output {
+            for (tile, _) in column.tiles() {
+                tile.window()
+                    .set_preferred_scale_transform(self.scale, self.transform);
+                tile.window().output_enter(output);
+            }
         }
 
         self.scrolling.add_column(None, column, activate, None);
@@ -739,7 +738,12 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn remove_tile(&mut self, id: &W::Id, transaction: Transaction) -> RemovedTile<W> {
+    pub fn remove_tile(
+        &mut self,
+        output: Option<&Output>,
+        id: &W::Id,
+        transaction: Transaction,
+    ) -> RemovedTile<W> {
         let mut from_floating = false;
         let removed = if self.floating.has_window(id) {
             from_floating = true;
@@ -748,7 +752,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.scrolling.remove_tile(id, transaction)
         };
 
-        if let Some(output) = &self.output {
+        if let Some(output) = output {
             removed.tile.window().output_leave(output);
         }
 
@@ -757,7 +761,11 @@ impl<W: LayoutElement> Workspace<W> {
         removed
     }
 
-    pub fn remove_active_tile(&mut self, transaction: Transaction) -> Option<RemovedTile<W>> {
+    pub fn remove_active_tile(
+        &mut self,
+        output: Option<&Output>,
+        transaction: Transaction,
+    ) -> Option<RemovedTile<W>> {
         let from_floating = self.floating_is_active.get();
         let removed = if from_floating {
             self.floating.remove_active_tile()?
@@ -765,7 +773,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.scrolling.remove_active_tile(transaction)?
         };
 
-        if let Some(output) = &self.output {
+        if let Some(output) = output {
             removed.tile.window().output_leave(output);
         }
 
@@ -774,7 +782,7 @@ impl<W: LayoutElement> Workspace<W> {
         Some(removed)
     }
 
-    pub fn remove_active_column(&mut self) -> Option<Column<W>> {
+    pub fn remove_active_column(&mut self, output: Option<&Output>) -> Option<Column<W>> {
         let from_floating = self.floating_is_active.get();
         if from_floating {
             return None;
@@ -782,7 +790,7 @@ impl<W: LayoutElement> Workspace<W> {
 
         let column = self.scrolling.remove_active_column()?;
 
-        if let Some(output) = &self.output {
+        if let Some(output) = output {
             for (tile, _) in column.tiles() {
                 tile.window().output_leave(output);
             }

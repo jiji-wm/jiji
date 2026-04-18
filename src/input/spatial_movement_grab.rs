@@ -88,8 +88,10 @@ impl SpatialMovementGrab {
                 if c.x * c.x + c.y * c.y >= 8. * 8. {
                     if c.x.abs() > c.y.abs() {
                         self.gesture = GestureState::ViewOffset;
-                        if let Some((ws_idx, ws)) = layout.find_workspace_by_id(self.workspace_id) {
-                            if ws.current_output() == Some(&self.output) {
+                        if let Some((ws_idx, _ws)) = layout.find_workspace_by_id(self.workspace_id)
+                        {
+                            if layout.output_for_workspace(self.workspace_id) == Some(&self.output)
+                            {
                                 layout.view_offset_gesture_begin(&self.output, Some(ws_idx), false);
                                 layout.view_offset_gesture_update(-c.x, timestamp, false)
                             } else {

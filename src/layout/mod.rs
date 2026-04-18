@@ -751,7 +751,12 @@ impl<W: LayoutElement> Layout<W> {
                         .as_ref()
                         .is_some_and(|id| id.matches(&output))
                     {
-                        let ws = primary.workspaces.remove(i);
+                        let mut ws = primary.workspaces.remove(i);
+                        // Workspace was bound to primary's output while its designated output
+                        // was disconnected; unbind before handing it to the new monitor so that
+                        // subsequent bind_output doesn't leave windows marked as present on
+                        // both outputs.
+                        ws.unbind_output(&primary.output);
 
                         // FIXME: this can be coded in a way that the workspace switch won't be
                         // affected if the removed workspace is invisible. But this is good enough
@@ -1090,7 +1095,9 @@ impl<W: LayoutElement> Layout<W> {
                 let scrolling_width = ws.resolve_scrolling_width(&window, width);
 
                 let tile = ws.make_tile(window);
+                // NoOutputs branch: workspace has no bound output; skip enter/leave.
                 ws.add_tile(
+                    None,
                     tile,
                     target,
                     activate,
@@ -1157,7 +1164,7 @@ impl<W: LayoutElement> Layout<W> {
                     let active_pos = mon.view.active_position();
                     for (idx, ws) in mon.workspaces.iter_mut().enumerate() {
                         if ws.has_window(window) {
-                            let removed = ws.remove_tile(window, transaction);
+                            let removed = ws.remove_tile(Some(&mon.output), window, transaction);
 
                             // Clean up empty workspaces that are not active and not last.
                             if !ws.has_windows_or_name()
@@ -1188,7 +1195,8 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for (idx, ws) in workspaces.iter_mut().enumerate() {
                     if ws.has_window(window) {
-                        let removed = ws.remove_tile(window, transaction);
+                        // NoOutputs: no bound output; skip output_leave.
+                        let removed = ws.remove_tile(None, window, transaction);
 
                         // Clean up empty workspaces.
                         if !ws.has_windows_or_name() {
@@ -1273,6 +1281,19 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         None
+    }
+
+    /// Returns the Smithay `Output` of the `Monitor` currently owning the workspace with the
+    /// given id, or `None` if the workspace lives in `MonitorSet::NoOutputs` (no monitor
+    /// connected) or doesn't exist.
+    pub fn output_for_workspace(&self, id: WorkspaceId) -> Option<&Output> {
+        let MonitorSet::Normal { monitors, .. } = &self.monitor_set else {
+            return None;
+        };
+        monitors
+            .iter()
+            .find(|mon| mon.workspaces.iter().any(|ws| ws.id() == id))
+            .map(|mon| &mon.output)
     }
 
     pub fn find_workspace_by_name(&self, workspace_name: &str) -> Option<(usize, &Workspace<W>)> {
@@ -2939,7 +2960,7 @@ impl<W: LayoutElement> Layout<W> {
                 let mon = &mut monitors[mon_idx];
 
                 let ws = Workspace::new_with_config(
-                    mon.output.clone(),
+                    &mon.output,
                     Some(ws_config.clone()),
                     clock,
                     options,
@@ -3358,8 +3379,8 @@ impl<W: LayoutElement> Layout<W> {
             let ws = &mut mon.workspaces[ws_idx];
             let transaction = Transaction::new();
             let mut removed = if let Some(window) = window {
-                ws.remove_tile(window, transaction)
-            } else if let Some(removed) = ws.remove_active_tile(transaction) {
+                ws.remove_tile(Some(&mon.output), window, transaction)
+            } else if let Some(removed) = ws.remove_active_tile(Some(&mon.output), transaction) {
                 removed
             } else {
                 return;
@@ -3409,14 +3430,18 @@ impl<W: LayoutElement> Layout<W> {
                 .unwrap();
 
             let current = &mut monitors[*active_monitor_idx];
-            let ws = current.active_workspace();
+            let active_pos = current.view.active_position();
+            // Borrow `workspaces` and `output` as disjoint fields so the Workspace call can
+            // still see the Smithay handle for the output_leave event.
+            let current_output = &current.output;
+            let ws = &mut current.workspaces[active_pos];
 
             if ws.floating_is_active() {
                 self.move_to_output(None, output, None, ActivateWindow::Smart);
                 return;
             }
 
-            let Some(column) = ws.remove_active_column() else {
+            let Some(column) = ws.remove_active_column(Some(current_output)) else {
                 return;
             };
 
@@ -4343,6 +4368,7 @@ impl<W: LayoutElement> Layout<W> {
 
                 // No point in trying to use the pointer position without outputs.
                 ws.add_tile(
+                    None,
                     move_.tile,
                     WorkspaceAddWindowTarget::Auto,
                     ActivateWindow::Yes,
