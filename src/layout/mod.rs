@@ -746,7 +746,11 @@ impl<W: LayoutElement> Layout<W> {
 
                 let mut workspaces = vec![];
                 for i in (0..primary.workspaces.len()).rev() {
-                    if primary.workspaces[i].original_output.matches(&output) {
+                    if primary.workspaces[i]
+                        .output_id
+                        .as_ref()
+                        .is_some_and(|id| id.matches(&output))
+                    {
                         let ws = primary.workspaces.remove(i);
 
                         // FIXME: this can be coded in a way that the workspace switch won't be
@@ -2508,14 +2512,20 @@ impl<W: LayoutElement> Layout<W> {
 
             if idx == primary_idx {
                 for ws in &monitor.workspaces {
-                    if ws.original_output.matches(&monitor.output) {
+                    if ws
+                        .output_id
+                        .as_ref()
+                        .is_some_and(|id| id.matches(&monitor.output))
+                    {
                         // This is the primary monitor's own workspace.
                         continue;
                     }
 
-                    let own_monitor_exists = monitors
-                        .iter()
-                        .any(|m| ws.original_output.matches(&m.output));
+                    let own_monitor_exists = monitors.iter().any(|m| {
+                        ws.output_id
+                            .as_ref()
+                            .is_some_and(|id| id.matches(&m.output))
+                    });
                     assert!(
                         !own_monitor_exists,
                         "primary monitor cannot have workspaces for which their own monitor exists"
@@ -2523,10 +2533,12 @@ impl<W: LayoutElement> Layout<W> {
                 }
             } else {
                 assert!(
-                    monitor
-                        .workspaces
-                        .iter()
-                        .any(|workspace| workspace.original_output.matches(&monitor.output)),
+                    monitor.workspaces.iter().any(|workspace| {
+                        workspace
+                            .output_id
+                            .as_ref()
+                            .is_some_and(|id| id.matches(&monitor.output))
+                    }),
                     "secondary monitor must not have any non-own workspaces"
                 );
             }
@@ -3466,8 +3478,8 @@ impl<W: LayoutElement> Layout<W> {
 
         // Do not do anything if the output is already correct
         if current_idx == target_idx {
-            // Just update the original output since this is an explicit movement action.
-            current.workspaces[old_idx].original_output = OutputId::new(&current.output);
+            // Just update the designated output id since this is an explicit movement action.
+            current.workspaces[old_idx].output_id = Some(OutputId::new(&current.output));
 
             return false;
         }
@@ -3478,7 +3490,7 @@ impl<W: LayoutElement> Layout<W> {
             current_idx == *active_monitor_idx && old_idx == current.view.active_position();
 
         let mut ws = current.remove_workspace_by_idx(old_idx);
-        ws.original_output = OutputId::new(new_output);
+        ws.output_id = Some(OutputId::new(new_output));
 
         let target = &mut monitors[target_idx];
         let target_pos = target.view.active_position() + 1;

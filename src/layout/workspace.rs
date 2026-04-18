@@ -53,11 +53,15 @@ pub struct Workspace<W: LayoutElement> {
     /// Whether the floating layout is active instead of the scrolling layout.
     floating_is_active: FloatingActive,
 
-    /// The original output of this workspace.
+    /// The workspace's designated output, by stable identifier.
     ///
-    /// Most of the time this will be the workspace's current output, however, after an output
-    /// disconnection, it may remain pointing to the disconnected output.
-    pub(super) original_output: OutputId,
+    /// Most of the time this matches the current Smithay output; after an output disconnection,
+    /// it remains pointing at the disconnected output so reconnect can re-bind the workspace.
+    ///
+    /// `None` is reserved; no current code path produces it. In sub-step 2/3 of Phase 0b-2
+    /// (activities DD §5.2) this field will absorb the sibling `output: Option<Output>` Smithay
+    /// handle and `None` will then mean the workspace's designated output is disconnected.
+    pub(super) output_id: Option<OutputId>,
 
     /// Current output of this workspace.
     output: Option<Output>,
@@ -216,11 +220,13 @@ impl<W: LayoutElement> Workspace<W> {
         clock: Clock,
         base_options: Rc<Options>,
     ) -> Self {
-        let original_output = config
-            .as_ref()
-            .and_then(|c| c.open_on_output.clone())
-            .map(OutputId)
-            .unwrap_or(OutputId::new(&output));
+        let output_id = Some(
+            config
+                .as_ref()
+                .and_then(|c| c.open_on_output.clone())
+                .map(OutputId)
+                .unwrap_or(OutputId::new(&output)),
+        );
 
         let layout_config = config.as_mut().and_then(|c| c.layout.take().map(|x| x.0));
 
@@ -257,7 +263,7 @@ impl<W: LayoutElement> Workspace<W> {
             scrolling,
             floating,
             floating_is_active: FloatingActive::No,
-            original_output,
+            output_id,
             scale,
             transform: output.current_transform(),
             view_size,
@@ -279,12 +285,12 @@ impl<W: LayoutElement> Workspace<W> {
         clock: Clock,
         base_options: Rc<Options>,
     ) -> Self {
-        let original_output = OutputId(
+        let output_id = Some(OutputId(
             config
                 .as_ref()
                 .and_then(|c| c.open_on_output.clone())
                 .unwrap_or_default(),
-        );
+        ));
 
         let layout_config = config.as_mut().and_then(|c| c.layout.take().map(|x| x.0));
 
@@ -324,7 +330,7 @@ impl<W: LayoutElement> Workspace<W> {
             output: None,
             scale,
             transform: Transform::Normal,
-            original_output,
+            output_id,
             view_size,
             working_area,
             shadow: Shadow::new(shadow_config),
@@ -502,9 +508,9 @@ impl<W: LayoutElement> Workspace<W> {
         self.output = output;
 
         if let Some(output) = &self.output {
-            // Normalize original output: possibly replace connector with make/model/serial.
-            if self.original_output.matches(output) {
-                self.original_output = OutputId::new(output);
+            // Normalize designated output id: possibly replace connector with make/model/serial.
+            if self.output_id.as_ref().is_some_and(|id| id.matches(output)) {
+                self.output_id = Some(OutputId::new(output));
             }
 
             self.update_output_size();
