@@ -973,7 +973,9 @@ impl Op {
                         }
                     }
                     MonitorSet::NoOutputs { workspaces, .. } => {
-                        for ws in workspaces {
+                        let pool = &layout.workspaces;
+                        for id in workspaces {
+                            let ws = pool.get(id).unwrap();
                             for win in ws.windows() {
                                 if win.0.id == params.id {
                                     return;
@@ -1043,7 +1045,9 @@ impl Op {
                         }
                     }
                     MonitorSet::NoOutputs { workspaces, .. } => {
-                        for ws in workspaces {
+                        let pool = &layout.workspaces;
+                        for id in workspaces {
+                            let ws = pool.get(id).unwrap();
                             for win in ws.windows() {
                                 if win.0.id == params.id {
                                     return;
@@ -1431,7 +1435,9 @@ impl Op {
                         }
                     }
                     MonitorSet::NoOutputs { workspaces, .. } => {
-                        'outer: for ws in workspaces {
+                        let pool = &layout.workspaces;
+                        'outer: for id_ in workspaces {
+                            let ws = pool.get(id_).unwrap();
                             for win in ws.windows() {
                                 if win.0.id == id {
                                     win.0.parent_id.set(new_parent_id);
@@ -1490,7 +1496,9 @@ impl Op {
                         }
                     }
                     MonitorSet::NoOutputs { workspaces, .. } => {
-                        'outer: for ws in workspaces {
+                        let pool = &layout.workspaces;
+                        'outer: for id_ in workspaces {
+                            let ws = pool.get(id_).unwrap();
                             for win in ws.windows() {
                                 if win.0.id == id {
                                     if win.communicate() {
@@ -1690,7 +1698,9 @@ fn verify_output_bindings(layout: &Layout<TestWindow>) {
             }
         }
         MonitorSet::NoOutputs { workspaces } => {
-            for ws in workspaces {
+            let pool = &layout.workspaces;
+            for id in workspaces {
+                let ws = pool.get(id).unwrap();
                 for win in ws.windows() {
                     let bound = win.bound_outputs();
                     assert!(
