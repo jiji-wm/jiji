@@ -781,7 +781,9 @@ impl<W: LayoutElement> Layout<W> {
                         .as_ref()
                         .is_some_and(|oid| oid.matches(&output));
                     if matches {
-                        let ws = pool.get_mut(&id).unwrap();
+                        let ws = pool
+                            .get_mut(&id)
+                            .expect("workspace id must be a key in the pool");
                         // Workspace was bound to primary's output while its designated output
                         // was disconnected; unbind before handing it to the new monitor so that
                         // subsequent bind_output doesn't leave windows marked as present on
@@ -1047,7 +1049,9 @@ impl<W: LayoutElement> Layout<W> {
                                 .iter()
                                 .position(|mon| {
                                     mon.view.ids().iter().any(|id| {
-                                        pool.get(id).is_some_and(|ws| ws.has_window(next_to))
+                                        pool.get(id)
+                                            .expect("view id must be a key in the pool")
+                                            .has_window(next_to)
                                     })
                                 })
                                 .unwrap();
@@ -1083,9 +1087,15 @@ impl<W: LayoutElement> Layout<W> {
                             .ids()
                             .iter()
                             .copied()
-                            .find(|ws_id| pool.get(ws_id).is_some_and(|ws| ws.has_window(&id)))
+                            .find(|ws_id| {
+                                pool.get(ws_id)
+                                    .expect("view id must be a key in the pool")
+                                    .has_window(&id)
+                            })
                             .unwrap();
-                        let ws = pool.get_mut(&ws_id).unwrap();
+                        let ws = pool
+                            .get_mut(&ws_id)
+                            .expect("view id must be a key in the pool");
                         ws.set_window_height(Some(&id), change);
                     }
                 }
@@ -1142,13 +1152,19 @@ impl<W: LayoutElement> Layout<W> {
                         } else {
                             let ws_idx = workspaces
                                 .iter()
-                                .position(|id| pool.get(id).unwrap().has_window(next_to))
+                                .position(|id| {
+                                    pool.get(id)
+                                        .expect("NoOutputs id must be a key in the workspace pool")
+                                        .has_window(next_to)
+                                })
                                 .unwrap();
                             (ws_idx, WorkspaceAddWindowTarget::NextTo(next_to))
                         }
                     }
                 };
-                let ws = pool.get_mut(&workspaces[ws_idx]).unwrap();
+                let ws = pool
+                    .get_mut(&workspaces[ws_idx])
+                    .expect("NoOutputs id must be a key in the workspace pool");
 
                 let scrolling_width = ws.resolve_scrolling_width(&window, width);
 
@@ -1229,7 +1245,9 @@ impl<W: LayoutElement> Layout<W> {
                     let active_pos = mon.view.active_position();
                     for idx in 0..mon.view.len() {
                         let id = mon.view.ids()[idx];
-                        let ws = pool.get_mut(&id).unwrap();
+                        let ws = pool
+                            .get_mut(&id)
+                            .expect("workspace id must be a key in the pool");
                         if ws.has_window(window) {
                             let removed = ws.remove_tile(Some(&mon.output), window, transaction);
 
@@ -1272,7 +1290,9 @@ impl<W: LayoutElement> Layout<W> {
                 let pool = &mut self.workspaces;
                 for idx in 0..workspaces.len() {
                     let id = workspaces[idx];
-                    let ws = pool.get_mut(&id).unwrap();
+                    let ws = pool
+                        .get_mut(&id)
+                        .expect("workspace id must be a key in the pool");
                     if ws.has_window(window) {
                         let removed = ws.remove_tile(None, window, transaction);
 
@@ -1322,7 +1342,9 @@ impl<W: LayoutElement> Layout<W> {
                 let pool = &mut self.workspaces;
                 for mon in monitors {
                     for id in mon.view.ids() {
-                        let ws = pool.get_mut(id).unwrap();
+                        let ws = pool
+                            .get_mut(id)
+                            .expect("workspace id must be a key in the pool");
                         if ws.has_window(window) {
                             ws.update_window(window, serial);
                             return;
@@ -1333,7 +1355,9 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::NoOutputs { workspaces, .. } => {
                 let pool = &mut self.workspaces;
                 for id in workspaces {
-                    let ws = pool.get_mut(id).unwrap();
+                    let ws = pool
+                        .get_mut(id)
+                        .expect("workspace id must be a key in the pool");
                     if ws.has_window(window) {
                         ws.update_window(window, serial);
                         return;
@@ -1348,14 +1372,20 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::Normal { ref monitors, .. } => {
                 for mon in monitors {
                     if let Some(index) = mon.view.position_of(id) {
-                        let workspace = self.workspaces.get(&id).unwrap();
+                        let workspace = self
+                            .workspaces
+                            .get(&id)
+                            .expect("view id must be a key in the pool");
                         return Some((index, workspace));
                     }
                 }
             }
             MonitorSet::NoOutputs { workspaces } => {
                 if let Some(index) = workspaces.iter().position(|ws_id| *ws_id == id) {
-                    let workspace = self.workspaces.get(&id).unwrap();
+                    let workspace = self
+                        .workspaces
+                        .get(&id)
+                        .expect("NoOutputs id must be a key in the workspace pool");
                     return Some((index, workspace));
                 }
             }
@@ -1406,7 +1436,11 @@ impl<W: LayoutElement> Layout<W> {
                         .as_ref()
                         .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
                 }) {
-                    return Some((index, pool.get(id).unwrap()));
+                    return Some((
+                        index,
+                        pool.get(id)
+                            .expect("workspace id must be a key in the pool"),
+                    ));
                 }
             }
         }
@@ -1423,7 +1457,11 @@ impl<W: LayoutElement> Layout<W> {
             let id = self
                 .active_monitor()
                 .and_then(|m| m.view.ids().get(index).copied())?;
-            self.workspaces.get_mut(&id)
+            Some(
+                self.workspaces
+                    .get_mut(&id)
+                    .expect("view id must be a key in the pool"),
+            )
         } else {
             self.workspaces_mut().find(|ws| match &reference {
                 WorkspaceReference::Name(ref_name) => ws
@@ -1459,7 +1497,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces } => {
                 if let Some(idx) = workspaces.iter().position(|ws_id| *ws_id == id) {
-                    let ws = pool.get_mut(&id).unwrap();
+                    let ws = pool
+                        .get_mut(&id)
+                        .expect("workspace id must be a key in the pool");
                     ws.unname();
 
                     // Clean up empty workspaces.
@@ -1487,7 +1527,9 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
                     for id in mon.view.ids() {
-                        let ws = pool.get(id).unwrap();
+                        let ws = pool
+                            .get(id)
+                            .expect("workspace id must be a key in the pool");
                         if let Some(window) = ws.find_wl_surface(wl_surface) {
                             return Some((window, Some(&mon.output)));
                         }
@@ -1496,7 +1538,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces } => {
                 for id in workspaces {
-                    let ws = pool.get(id).unwrap();
+                    let ws = pool
+                        .get(id)
+                        .expect("workspace id must be a key in the pool");
                     if let Some(window) = ws.find_wl_surface(wl_surface) {
                         return Some((window, None));
                     }
@@ -1524,7 +1568,12 @@ impl<W: LayoutElement> Layout<W> {
                 let mut matching: Option<(usize, WorkspaceId)> = None;
                 for (mi, mon) in monitors.iter().enumerate() {
                     for id in mon.view.ids() {
-                        if pool.get(id).unwrap().find_wl_surface(wl_surface).is_some() {
+                        if pool
+                            .get(id)
+                            .expect("workspace id must be a key in the pool")
+                            .find_wl_surface(wl_surface)
+                            .is_some()
+                        {
                             matching = Some((mi, *id));
                             break;
                         }
@@ -1535,17 +1584,21 @@ impl<W: LayoutElement> Layout<W> {
                 }
                 if let Some((mi, id)) = matching {
                     let output = &monitors[mi].output;
-                    let ws = pool.get_mut(&id).unwrap();
+                    let ws = pool
+                        .get_mut(&id)
+                        .expect("workspace id must be a key in the pool");
                     return ws
                         .find_wl_surface_mut(wl_surface)
                         .map(|w| (w, Some(output)));
                 }
             }
             MonitorSet::NoOutputs { workspaces } => {
-                let matching_id = workspaces
-                    .iter()
-                    .copied()
-                    .find(|id| pool.get(id).unwrap().find_wl_surface(wl_surface).is_some());
+                let matching_id = workspaces.iter().copied().find(|id| {
+                    pool.get(id)
+                        .expect("workspace id must be a key in the pool")
+                        .find_wl_surface(wl_surface)
+                        .is_some()
+                });
                 if let Some(id) = matching_id {
                     return pool
                         .get_mut(&id)
@@ -1611,7 +1664,9 @@ impl<W: LayoutElement> Layout<W> {
         let pool = &self.workspaces;
         for mon in self.monitors() {
             for id in mon.view.ids() {
-                let ws = pool.get(id).unwrap();
+                let ws = pool
+                    .get(id)
+                    .expect("workspace id must be a key in the pool");
                 if ws.has_window(window) {
                     return ws.scroll_amount_to_activate(window);
                 }
@@ -1645,7 +1700,11 @@ impl<W: LayoutElement> Layout<W> {
                 mon.view
                     .ids()
                     .iter()
-                    .position(|id| pool.get(id).is_some_and(|ws| ws.has_window(window)))
+                    .position(|id| {
+                        pool.get(id)
+                            .expect("view id must be a key in the pool")
+                            .has_window(window)
+                    })
                     .map(|ws_idx| (mon, ws_idx))
             })
             .unwrap();
@@ -1678,7 +1737,9 @@ impl<W: LayoutElement> Layout<W> {
         for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
             for workspace_idx in 0..mon.view.len() {
                 let id = mon.view.ids()[workspace_idx];
-                let ws = pool.get_mut(&id).unwrap();
+                let ws = pool
+                    .get_mut(&id)
+                    .expect("workspace id must be a key in the pool");
                 if ws.activate_window(window) {
                     *active_monitor_idx = monitor_idx;
 
@@ -1717,7 +1778,9 @@ impl<W: LayoutElement> Layout<W> {
         for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
             for workspace_idx in 0..mon.view.len() {
                 let id = mon.view.ids()[workspace_idx];
-                let ws = pool.get_mut(&id).unwrap();
+                let ws = pool
+                    .get_mut(&id)
+                    .expect("workspace id must be a key in the pool");
                 if ws.activate_window_without_raising(window) {
                     *active_monitor_idx = monitor_idx;
 
@@ -1792,11 +1855,11 @@ impl<W: LayoutElement> Layout<W> {
 
         let mon = monitors.iter().find(|mon| &mon.output == output).unwrap();
         let pool = &self.workspaces;
-        let mon_windows = mon
-            .view
-            .ids()
-            .iter()
-            .flat_map(move |id| pool.get(id).unwrap().windows());
+        let mon_windows = mon.view.ids().iter().flat_map(move |id| {
+            pool.get(id)
+                .expect("workspace id must be a key in the pool")
+                .windows()
+        });
 
         moving_window.chain(mon_windows)
     }
@@ -1864,7 +1927,9 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
                     for id in mon.view.ids() {
-                        let ws = pool.get(id).unwrap();
+                        let ws = pool
+                            .get(id)
+                            .expect("workspace id must be a key in the pool");
                         for (tile, layout) in ws.tiles_with_ipc_layouts() {
                             f(tile.window(), Some(&mon.output), Some(*id), layout);
                         }
@@ -1873,7 +1938,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces } => {
                 for id in workspaces {
-                    let ws = pool.get(id).unwrap();
+                    let ws = pool
+                        .get(id)
+                        .expect("workspace id must be a key in the pool");
                     for (tile, layout) in ws.tiles_with_ipc_layouts() {
                         f(tile.window(), None, Some(*id), layout);
                     }
@@ -1892,7 +1959,9 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
                     for id in mon.view.ids() {
-                        let ws = pool.get_mut(id).unwrap();
+                        let ws = pool
+                            .get_mut(id)
+                            .expect("workspace id must be a key in the pool");
                         for win in ws.windows_mut() {
                             f(win, Some(&mon.output));
                         }
@@ -1901,7 +1970,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces } => {
                 for id in workspaces {
-                    let ws = pool.get_mut(id).unwrap();
+                    let ws = pool
+                        .get_mut(id)
+                        .expect("workspace id must be a key in the pool");
                     for win in ws.windows_mut() {
                         f(win, None);
                     }
@@ -2834,7 +2905,9 @@ impl<W: LayoutElement> Layout<W> {
 
             if idx == primary_idx {
                 for id in monitor.view.ids() {
-                    let ws = pool.get(id).unwrap();
+                    let ws = pool
+                        .get(id)
+                        .expect("workspace id must be a key in the pool");
                     if ws
                         .output_id
                         .as_ref()
@@ -2869,7 +2942,9 @@ impl<W: LayoutElement> Layout<W> {
             // exists.
 
             for id in monitor.view.ids() {
-                let workspace = pool.get(id).unwrap();
+                let workspace = pool
+                    .get(id)
+                    .expect("workspace id must be a key in the pool");
                 assert!(
                     seen_workspace_id.insert(workspace.id()),
                     "workspace id must be unique"
@@ -2951,7 +3026,9 @@ impl<W: LayoutElement> Layout<W> {
                             .workspace_under(pool, pos_within_output)
                             .map(|(ws, geo)| (ws.id(), geo))
                         {
-                            let ws = pool.get_mut(&ws_id).unwrap();
+                            let ws = pool
+                                .get_mut(&ws_id)
+                                .expect("workspace id must be a key in the pool");
                             // As far as the DnD scroll gesture is concerned, the workspace spans
                             // across the whole monitor horizontally.
                             let ws_pos = Point::from((0., geo.loc.y));
@@ -3005,7 +3082,9 @@ impl<W: LayoutElement> Layout<W> {
                                     DndHoldTarget::Window(id) => {
                                         let mut found = None;
                                         for (i, view_id) in mon.view.ids().iter().enumerate() {
-                                            let ws = pool.get_mut(view_id).unwrap();
+                                            let ws = pool
+                                                .get_mut(view_id)
+                                                .expect("view id must be a key in the pool");
                                             if ws.activate_window(&id) {
                                                 found = Some(i);
                                                 break;
@@ -3056,7 +3135,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for id in workspaces {
-                    pool.get_mut(id).unwrap().advance_animations();
+                    pool.get_mut(id)
+                        .expect("workspace id must be a key in the pool")
+                        .advance_animations();
                 }
             }
         }
@@ -3169,7 +3250,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for id in workspaces {
-                    pool.get_mut(id).unwrap().update_shaders();
+                    pool.get_mut(id)
+                        .expect("workspace id must be a key in the pool")
+                        .update_shaders();
                 }
             }
         }
@@ -3202,7 +3285,9 @@ impl<W: LayoutElement> Layout<W> {
                 let (insert_ws, geo) = mon.insert_position(pool, move_.pointer_pos_within_output);
                 match insert_ws {
                     InsertWorkspace::Existing(ws_id) => {
-                        let ws = pool.get_mut(&ws_id).unwrap();
+                        let ws = pool
+                            .get_mut(&ws_id)
+                            .expect("workspace id must be a key in the pool");
                         let pos_within_workspace =
                             (move_.pointer_pos_within_output - geo.loc).downscale(zoom);
                         let position = if move_.is_floating {
@@ -3323,7 +3408,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces } => {
                 for id in workspaces {
-                    pool.get_mut(id).unwrap().update_config(options.clone());
+                    pool.get_mut(id)
+                        .expect("workspace id must be a key in the pool")
+                        .update_config(options.clone());
                 }
             }
         }
@@ -3843,7 +3930,9 @@ impl<W: LayoutElement> Layout<W> {
             current_idx == *active_monitor_idx && old_idx == current.view.active_position();
 
         let ws_id = current.remove_workspace_by_idx(pool, old_idx);
-        pool.get_mut(&ws_id).unwrap().output_id = Some(OutputId::new(new_output));
+        pool.get_mut(&ws_id)
+            .expect("workspace id must be a key in the pool")
+            .output_id = Some(OutputId::new(new_output));
 
         let target = &mut monitors[target_idx];
         let target_pos = target.view.active_position() + 1;
@@ -4022,7 +4111,9 @@ impl<W: LayoutElement> Layout<W> {
         let pool = &mut self.workspaces;
         for monitor in monitors {
             for (idx, id) in monitor.view.ids().to_vec().into_iter().enumerate() {
-                let ws = pool.get_mut(&id).unwrap();
+                let ws = pool
+                    .get_mut(&id)
+                    .expect("workspace id must be a key in the pool");
                 // Cancel the gesture on other workspaces.
                 if &monitor.output != output
                     || idx != workspace_idx.unwrap_or(monitor.view.active_position())
@@ -4053,7 +4144,9 @@ impl<W: LayoutElement> Layout<W> {
 
         for monitor in monitors {
             for id in monitor.view.ids().to_vec() {
-                let ws = pool.get_mut(&id).unwrap();
+                let ws = pool
+                    .get_mut(&id)
+                    .expect("workspace id must be a key in the pool");
                 if let Some(refresh) =
                     ws.view_offset_gesture_update(delta_x, timestamp, is_touchpad)
                 {
@@ -4078,7 +4171,9 @@ impl<W: LayoutElement> Layout<W> {
 
         for monitor in monitors {
             for id in monitor.view.ids().to_vec() {
-                let ws = pool.get_mut(&id).unwrap();
+                let ws = pool
+                    .get_mut(&id)
+                    .expect("workspace id must be a key in the pool");
                 if ws.view_offset_gesture_end(is_touchpad) {
                     return Some(monitor.output.clone());
                 }
@@ -4694,13 +4789,19 @@ impl<W: LayoutElement> Layout<W> {
                 let geo_pairs: Vec<_> = mon.workspaces_with_render_geo_ids(false).collect();
                 let mut found_ws_geo = None;
                 for (id, geo) in geo_pairs {
-                    if pool.get(&id).unwrap().has_window(&win_id) {
+                    if pool
+                        .get(&id)
+                        .expect("workspace id must be a key in the pool")
+                        .has_window(&win_id)
+                    {
                         found_ws_geo = Some((id, geo));
                         break;
                     }
                 }
                 let (found_id, ws_geo) = found_ws_geo.unwrap();
-                let ws = pool.get_mut(&found_id).unwrap();
+                let ws = pool
+                    .get_mut(&found_id)
+                    .expect("workspace id must be a key in the pool");
                 let (tile, tile_offset) = ws
                     .tiles_with_render_positions_mut(false)
                     .find(|(tile, _)| tile.window().id() == &win_id)
@@ -4716,7 +4817,9 @@ impl<W: LayoutElement> Layout<W> {
                     assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
                     workspaces.push(id);
                 }
-                let ws = pool.get_mut(&workspaces[0]).unwrap();
+                let ws = pool
+                    .get_mut(&workspaces[0])
+                    .expect("NoOutputs id must be a key in the workspace pool");
 
                 // No point in trying to use the pointer position without outputs.
                 ws.add_tile(
@@ -4782,7 +4885,9 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
                     for id in mon.view.ids() {
-                        let ws = pool.get_mut(id).unwrap();
+                        let ws = pool
+                            .get_mut(id)
+                            .expect("workspace id must be a key in the pool");
                         if ws.has_window(&window) {
                             return ws.interactive_resize_begin(window, edges);
                         }
@@ -4791,7 +4896,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for id in workspaces {
-                    let ws = pool.get_mut(id).unwrap();
+                    let ws = pool
+                        .get_mut(id)
+                        .expect("workspace id must be a key in the pool");
                     if ws.has_window(&window) {
                         return ws.interactive_resize_begin(window, edges);
                     }
@@ -4818,7 +4925,9 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
                     for id in mon.view.ids() {
-                        let ws = pool.get_mut(id).unwrap();
+                        let ws = pool
+                            .get_mut(id)
+                            .expect("workspace id must be a key in the pool");
                         if ws.has_window(window) {
                             return ws.interactive_resize_update(window, delta);
                         }
@@ -4827,7 +4936,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for id in workspaces {
-                    let ws = pool.get_mut(id).unwrap();
+                    let ws = pool
+                        .get_mut(id)
+                        .expect("workspace id must be a key in the pool");
                     if ws.has_window(window) {
                         return ws.interactive_resize_update(window, delta);
                     }
@@ -4850,7 +4961,9 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
                     for id in mon.view.ids() {
-                        let ws = pool.get_mut(id).unwrap();
+                        let ws = pool
+                            .get_mut(id)
+                            .expect("workspace id must be a key in the pool");
                         if ws.has_window(window) {
                             ws.interactive_resize_end(Some(window));
                             return;
@@ -4861,7 +4974,9 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::NoOutputs { workspaces, .. } => {
                 let pool = &mut self.workspaces;
                 for id in workspaces {
-                    let ws = pool.get_mut(id).unwrap();
+                    let ws = pool
+                        .get_mut(id)
+                        .expect("workspace id must be a key in the pool");
                     if ws.has_window(window) {
                         ws.interactive_resize_end(Some(window));
                         return;
@@ -5096,7 +5211,9 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
                     for (id, geo) in mon.workspaces_with_render_geo_ids(false) {
-                        let ws = pool.get_mut(&id).unwrap();
+                        let ws = pool
+                            .get_mut(&id)
+                            .expect("workspace id must be a key in the pool");
                         if ws.has_window(window) {
                             ws.store_unmap_snapshot_if_empty(
                                 renderer,
@@ -5112,7 +5229,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for id in workspaces {
-                    let ws = pool.get_mut(id).unwrap();
+                    let ws = pool
+                        .get_mut(id)
+                        .expect("workspace id must be a key in the pool");
                     if ws.has_window(window) {
                         ws.store_unmap_snapshot_if_empty(
                             renderer,
@@ -5141,7 +5260,9 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
                     for id in mon.view.ids() {
-                        let ws = pool.get_mut(id).unwrap();
+                        let ws = pool
+                            .get_mut(id)
+                            .expect("workspace id must be a key in the pool");
                         if ws.has_window(window) {
                             ws.clear_unmap_snapshot(window);
                             return;
@@ -5151,7 +5272,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for id in workspaces {
-                    let ws = pool.get_mut(id).unwrap();
+                    let ws = pool
+                        .get_mut(id)
+                        .expect("workspace id must be a key in the pool");
                     if ws.has_window(window) {
                         ws.clear_unmap_snapshot(window);
                         return;
@@ -5194,7 +5317,9 @@ impl<W: LayoutElement> Layout<W> {
                 else {
                     return;
                 };
-                let ws = pool.get_mut(&ws_id).unwrap();
+                let ws = pool
+                    .get_mut(&ws_id)
+                    .expect("workspace id must be a key in the pool");
 
                 let tile_pos = tile_pos - ws_geo.loc;
                 ws.start_close_animation_for_tile(renderer, snapshot, tile_size, tile_pos, blocker);
@@ -5207,7 +5332,9 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
                     for id in mon.view.ids() {
-                        let ws = pool.get_mut(id).unwrap();
+                        let ws = pool
+                            .get_mut(id)
+                            .expect("workspace id must be a key in the pool");
                         if ws.has_window(window) {
                             ws.start_close_animation_for_window(renderer, window, blocker);
                             return;
@@ -5217,7 +5344,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for id in workspaces {
-                    let ws = pool.get_mut(id).unwrap();
+                    let ws = pool
+                        .get_mut(id)
+                        .expect("workspace id must be a key in the pool");
                     if ws.has_window(window) {
                         ws.start_close_animation_for_window(renderer, window, blocker);
                         return;
@@ -5316,7 +5445,9 @@ impl<W: LayoutElement> Layout<W> {
 
                     let active_pos = mon.view.active_position();
                     for (ws_idx, id) in mon.view.ids().to_vec().into_iter().enumerate() {
-                        let ws = pool.get_mut(&id).unwrap();
+                        let ws = pool
+                            .get_mut(&id)
+                            .expect("workspace id must be a key in the pool");
                         let is_focused = is_active && ws_idx == active_pos;
                         ws.refresh(is_active, is_focused);
 
@@ -5338,7 +5469,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for id in workspaces {
-                    let ws = pool.get_mut(id).unwrap();
+                    let ws = pool
+                        .get_mut(id)
+                        .expect("workspace id must be a key in the pool");
                     ws.refresh(false, false);
                     ws.view_offset_gesture_end(None);
                 }
@@ -5356,21 +5489,28 @@ impl<W: LayoutElement> Layout<W> {
         match &self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 let it = monitors.iter().flat_map(move |mon| {
-                    mon.view
-                        .ids()
-                        .iter()
-                        .enumerate()
-                        .map(move |(idx, id)| (Some(mon), idx, pool.get(id).unwrap()))
+                    mon.view.ids().iter().enumerate().map(move |(idx, id)| {
+                        (
+                            Some(mon),
+                            idx,
+                            pool.get(id)
+                                .expect("workspace id must be a key in the pool"),
+                        )
+                    })
                 });
 
                 iter_normal = Some(it);
                 iter_no_outputs = None;
             }
             MonitorSet::NoOutputs { workspaces } => {
-                let it = workspaces
-                    .iter()
-                    .enumerate()
-                    .map(move |(idx, id)| (None, idx, pool.get(id).unwrap()));
+                let it = workspaces.iter().enumerate().map(move |(idx, id)| {
+                    (
+                        None,
+                        idx,
+                        pool.get(id)
+                            .expect("workspace id must be a key in the pool"),
+                    )
+                });
 
                 iter_normal = None;
                 iter_no_outputs = Some(it);

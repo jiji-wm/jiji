@@ -582,7 +582,10 @@ impl<W: LayoutElement> Monitor<W> {
                 (self.view.active_position(), WorkspaceAddWindowTarget::Auto)
             }
             MonitorAddWindowTarget::Workspace { id, column_idx } => {
-                let idx = self.view.position_of(id).unwrap();
+                let idx = self
+                    .view
+                    .position_of(id)
+                    .expect("workspace id must be on this monitor");
                 let target = if let Some(column_idx) = column_idx {
                     WorkspaceAddWindowTarget::NewColumnAt(column_idx)
                 } else {
@@ -595,7 +598,11 @@ impl<W: LayoutElement> Monitor<W> {
                     .view
                     .ids()
                     .iter()
-                    .position(|id| pool.get(id).is_some_and(|ws| ws.has_window(win_id)))
+                    .position(|id| {
+                        pool.get(id)
+                            .expect("view id must be a key in the pool")
+                            .has_window(win_id)
+                    })
                     .unwrap();
                 (idx, WorkspaceAddWindowTarget::NextTo(win_id))
             }
@@ -1032,7 +1039,11 @@ impl<W: LayoutElement> Monitor<W> {
             self.view
                 .ids()
                 .iter()
-                .position(|id| pool.get(id).is_some_and(|ws| ws.has_window(window)))
+                .position(|id| {
+                    pool.get(id)
+                        .expect("view id must be a key in the pool")
+                        .has_window(window)
+                })
                 .unwrap()
         } else {
             self.view.active_position()
