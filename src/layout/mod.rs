@@ -1201,6 +1201,13 @@ impl<W: LayoutElement> Layout<W> {
                             ws.dnd_scroll_gesture_end();
                         }
 
+                        // Pair the `output_enter` fired on the tile during drag start /
+                        // cross-output update (in `interactive_move_update`). The tile is
+                        // returned to the caller here; firing `output_leave` first ensures
+                        // the drag-tracked marker is not carried outside the compositor's
+                        // view of this window's output bindings.
+                        move_.tile.window().output_leave(&move_.output);
+
                         return Some(RemovedTile {
                             tile: move_.tile,
                             width: move_.width,
