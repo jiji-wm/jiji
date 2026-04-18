@@ -1294,17 +1294,10 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         }
 
-        let mut new_idx = new_idx.clamp(0, self.workspaces.len() - 1);
+        let new_idx = new_idx.clamp(0, self.workspaces.len() - 1);
         if old_idx == new_idx {
             return;
         }
-
-        // Replicate pre-refactor index arithmetic for the active cursor. We
-        // overwrite the view's active at the end via `set_active_at` rather
-        // than rely on `move_within`'s id-tracking, because that changes the
-        // focus semantics under EWAF top-edge cases (see the test
-        // `move_workspace_to_idx_active_at_top_empty_under_ewaf`).
-        let mut active = self.view.active_position();
 
         let ws = self.workspaces.remove(old_idx);
         self.workspaces.insert(new_idx, ws);
@@ -1318,8 +1311,6 @@ impl<W: LayoutElement> Monitor<W> {
 
             if self.options.layout.empty_workspace_above_first && old_idx == 0 {
                 self.add_workspace_top();
-                active += 1;
-                new_idx += 1;
             }
         } else {
             if old_idx == self.workspaces.len() - 1 {
@@ -1329,20 +1320,8 @@ impl<W: LayoutElement> Monitor<W> {
 
             if self.options.layout.empty_workspace_above_first && new_idx == 0 {
                 self.add_workspace_top();
-                active += 1;
-                new_idx += 1;
             }
         }
-
-        // Only refocus the workspace if it was already focused.
-        if active == old_idx {
-            active = new_idx;
-        } else if new_idx <= active && old_idx > active {
-            active += 1;
-        } else if new_idx >= active && old_idx < active {
-            active = active.saturating_sub(1);
-        }
-        self.view.set_active_at(active);
 
         self.workspace_switch = None;
 

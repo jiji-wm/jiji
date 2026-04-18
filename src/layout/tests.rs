@@ -2847,15 +2847,10 @@ fn add_and_remove_output() {
 }
 
 // Move the currently-focused forced-top-empty workspace under
-// `empty_workspace_above_first`. Pre-`WorkspaceView` behaviour: a fresh
-// forced-top-empty is created, focus lands on it, and the moved empty is
-// removed by the immediate `clean_up_workspaces` (because focus moved away
-// from it). Final layout is [E, W, W, W, E] with active at position 0.
-//
-// Pinning this here because the code-review of Phase 0b-1 flagged a possible
-// drift: `WorkspaceView::move_within` keeps focus tracking the moved id, which
-// would leave the moved empty in place at position 3 and the active cursor
-// pinned there, preventing cleanup from removing it.
+// `empty_workspace_above_first`. Focus follows the moved workspace — the
+// same way the trailing bottom-empty case always behaved — so
+// `clean_up_workspaces` skips the active cursor's position and the moved
+// empty stays at position 3.
 #[test]
 fn move_workspace_to_idx_active_at_top_empty_under_ewaf() {
     let ops = [
@@ -2898,18 +2893,18 @@ fn move_workspace_to_idx_active_at_top_empty_under_ewaf() {
 
     assert_eq!(
         m.workspaces.len(),
-        5,
-        "expected 5 workspaces, got {named:?}"
+        6,
+        "expected 6 workspaces, got {named:?}"
     );
     assert_eq!(
         named,
-        vec![false, true, true, true, false],
-        "expected [E, W, W, W, E]"
+        vec![false, true, true, false, true, false],
+        "expected [E, W, W, E, W, E]"
     );
     assert_eq!(
         m.active_workspace_idx(),
-        0,
-        "focus should land on the new forced-top-empty"
+        3,
+        "focus should follow the moved empty"
     );
 }
 
