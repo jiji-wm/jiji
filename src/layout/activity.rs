@@ -5,7 +5,12 @@
 //! ids. Invariant: every id in `Monitor.view.ids()` is a key in
 //! `Layout.workspaces`.
 
-use super::workspace::WorkspaceId;
+use std::collections::HashMap;
+
+use indexmap::IndexMap;
+
+use super::workspace::{OutputId, WorkspaceId};
+use crate::utils::id::IdCounter;
 
 /// An ordered list of workspace IDs with an active / previous cursor.
 ///
@@ -174,6 +179,161 @@ impl WorkspaceView {
             self.ids.len()
         );
         self.ids.insert(new_pos, id);
+    }
+}
+
+static ACTIVITY_ID_COUNTER: IdCounter = IdCounter::new();
+
+/// Stable, process-unique identifier for an [`Activity`]. Will be exposed to
+/// IPC as its `u64` when the IPC types land (mirrors [`WorkspaceId`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ActivityId(u64);
+
+impl ActivityId {
+    fn next() -> ActivityId {
+        ActivityId(ACTIVITY_ID_COUNTER.next())
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub fn specific(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+/// A named collection of per-output [`WorkspaceView`]s — the grouping
+/// dimension above `Workspace`.
+///
+/// `is_config_declared` distinguishes activities the user named in config
+/// (stable across reload) from runtime-created ones. The promotion rules
+/// (rename / config reload) land with the action handlers that need them.
+#[derive(Debug)]
+pub struct Activity {
+    id: ActivityId,
+    name: String,
+    is_config_declared: bool,
+    views: HashMap<OutputId, WorkspaceView>,
+}
+
+impl Activity {
+    pub fn new_runtime(name: String) -> Self {
+        Self {
+            id: ActivityId::next(),
+            name,
+            is_config_declared: false,
+            views: HashMap::new(),
+        }
+    }
+
+    pub fn new_config_declared(name: String) -> Self {
+        Self {
+            id: ActivityId::next(),
+            name,
+            is_config_declared: true,
+            views: HashMap::new(),
+        }
+    }
+
+    pub fn id(&self) -> ActivityId {
+        self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn is_config_declared(&self) -> bool {
+        self.is_config_declared
+    }
+
+    pub fn views(&self) -> &HashMap<OutputId, WorkspaceView> {
+        &self.views
+    }
+
+    pub fn views_mut(&mut self) -> &mut HashMap<OutputId, WorkspaceView> {
+        &mut self.views
+    }
+
+    pub fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+}
+
+/// Ordered pool of [`Activity`]s plus active / previous cursors.
+///
+/// Invariants:
+/// - `map` is non-empty — guaranteed by [`Activities::new`] taking a seed
+///   `Activity`; no `Default`, no push-to-empty API.
+/// - `active` is always a key in `map`.
+/// - `previous`, if `Some`, is always a key in `map`.
+/// - Each stored `Activity`'s `id` equals its key in `map` (enforced by
+///   private `Activity.id` + construction-only id minting; inserts go through
+///   `map.insert(activity.id, activity)` exclusively).
+#[derive(Debug)]
+// No `is_empty` — `Activities` is never empty by construction.
+#[allow(clippy::len_without_is_empty)]
+pub struct Activities {
+    map: IndexMap<ActivityId, Activity>,
+    active: ActivityId,
+    previous: Option<ActivityId>,
+}
+
+impl Activities {
+    /// Seed with the first (default) activity. After construction,
+    /// `active_id() == seed.id` and `previous_id() == None`. Mirrors
+    /// [`WorkspaceView::new`]'s non-empty-by-construction discipline.
+    pub fn new(seed: Activity) -> Self {
+        let active = seed.id;
+        let mut map = IndexMap::new();
+        map.insert(seed.id, seed);
+        Self {
+            map,
+            active,
+            previous: None,
+        }
+    }
+
+    pub fn active(&self) -> &Activity {
+        self.map
+            .get(&self.active)
+            .expect("active id must be a key in the map")
+    }
+
+    pub fn active_mut(&mut self) -> &mut Activity {
+        self.map
+            .get_mut(&self.active)
+            .expect("active id must be a key in the map")
+    }
+
+    pub fn active_id(&self) -> ActivityId {
+        self.active
+    }
+
+    pub fn previous_id(&self) -> Option<ActivityId> {
+        self.previous
+    }
+
+    pub fn get(&self, id: ActivityId) -> Option<&Activity> {
+        self.map.get(&id)
+    }
+
+    pub fn get_mut(&mut self, id: ActivityId) -> Option<&mut Activity> {
+        self.map.get_mut(&id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Activity> {
+        self.map.values()
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn contains(&self, id: ActivityId) -> bool {
+        self.map.contains_key(&id)
     }
 }
 
@@ -378,5 +538,82 @@ mod tests {
         let mut v = WorkspaceView::new(vec![ws(1), ws(2)], 0);
         v.move_within(0, 0);
         assert_eq!(v.ids(), &[ws(1), ws(2)]);
+    }
+
+    #[test]
+    fn new_seeds_with_active_in_map() {
+        let seed = Activity::new_runtime("work".into());
+        let seed_id = seed.id();
+        let acts = Activities::new(seed);
+        assert_eq!(acts.active_id(), seed_id);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts.previous_id(), None);
+        assert!(acts.contains(seed_id));
+        assert_eq!(acts.active().name(), "work");
+        assert!(acts.active().views().is_empty());
+    }
+
+    #[test]
+    fn active_returns_seed_by_ref() {
+        let seed = Activity::new_runtime("work".into());
+        let seed_id = seed.id();
+        let mut acts = Activities::new(seed);
+        assert_eq!(acts.active().id(), seed_id);
+        acts.active_mut().set_name("play".into());
+        assert_eq!(acts.active().name(), "play");
+    }
+
+    #[test]
+    fn get_behavior() {
+        let seed = Activity::new_runtime("work".into());
+        let seed_id = seed.id();
+        let mut acts = Activities::new(seed);
+        assert_eq!(acts.get(seed_id).map(|a| a.id()), Some(seed_id));
+        assert!(acts.get(ActivityId::specific(99_999)).is_none());
+        // get_mut: mutate through known id, confirm None for unknown.
+        acts.get_mut(seed_id)
+            .expect("seed id must be present")
+            .set_name("mutated".into());
+        assert_eq!(acts.active().name(), "mutated");
+        assert!(acts.get_mut(ActivityId::specific(99_999)).is_none());
+    }
+
+    #[test]
+    fn iter_yields_single_seed() {
+        let seed = Activity::new_runtime("work".into());
+        let seed_id = seed.id();
+        let acts = Activities::new(seed);
+        let collected: Vec<_> = acts.iter().map(|a| a.id()).collect();
+        assert_eq!(collected, vec![seed_id]);
+        assert_eq!(acts.iter().count(), 1);
+    }
+
+    #[test]
+    fn contains_tracks_seed() {
+        let seed = Activity::new_runtime("work".into());
+        let seed_id = seed.id();
+        let acts = Activities::new(seed);
+        assert!(acts.contains(seed_id));
+        assert!(!acts.contains(ActivityId::specific(u64::MAX)));
+    }
+
+    #[test]
+    fn config_declared_flag_preserved() {
+        let runtime = Activity::new_runtime("a".into());
+        let declared = Activity::new_config_declared("b".into());
+        assert!(!runtime.is_config_declared());
+        assert!(declared.is_config_declared());
+    }
+
+    #[test]
+    fn runtime_and_config_ids_are_unique() {
+        let a = Activity::new_runtime("a".into());
+        let b = Activity::new_config_declared("b".into());
+        assert_ne!(a.id(), b.id());
+    }
+
+    #[test]
+    fn activity_id_specific_roundtrips() {
+        assert_eq!(ActivityId::specific(7).get(), 7);
     }
 }
