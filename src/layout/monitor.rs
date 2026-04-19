@@ -1,5 +1,5 @@
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::iter::zip;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -12,7 +12,7 @@ use smithay::backend::renderer::element::utils::{
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-use super::activity::WorkspaceView;
+use super::activity::{ActivityId, WorkspaceView};
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::workspace::{
     compute_working_area, Workspace, WorkspaceAddWindowTarget, WorkspaceId, WorkspaceRenderElement,
@@ -295,6 +295,11 @@ impl<W: LayoutElement> Monitor<W> {
     /// `output`, syncs config, then inserts empty bookend workspace(s) into the pool (top and/or
     /// bottom per `options.layout.empty_workspace_above_first`). The resulting `view.ids()` is
     /// `[optional_top_empty, ...workspace_ids_in_order..., bottom_empty]`.
+    // Hits clippy::too_many_arguments (8/7). Every argument is load-bearing — splitting into
+    // helper structs would obscure the call-site contract with `Layout::add_output`; the only
+    // call site passes them all in from `Layout` fields. `seed_activity` is required by the
+    // DD §3.2 ctor contract on `Workspace::new*`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         output: Output,
         workspace_ids: Vec<WorkspaceId>,
@@ -303,6 +308,7 @@ impl<W: LayoutElement> Monitor<W> {
         clock: Clock,
         base_options: Rc<Options>,
         layout_config: Option<LayoutPart>,
+        seed_activity: ActivityId,
     ) -> Self {
         let options =
             Rc::new(Options::clone(&base_options).with_merged_layout(layout_config.as_ref()));
@@ -330,14 +336,24 @@ impl<W: LayoutElement> Monitor<W> {
         let mut ids = workspace_ids;
 
         if options.layout.empty_workspace_above_first && !ids.is_empty() {
-            let ws = Workspace::new(&output, clock.clone(), options.clone());
+            let ws = Workspace::new(
+                &output,
+                HashSet::from([seed_activity]),
+                clock.clone(),
+                options.clone(),
+            );
             let id = ws.id();
             assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
             ids.insert(0, id);
             active_workspace_idx += 1;
         }
 
-        let bottom = Workspace::new(&output, clock.clone(), options.clone());
+        let bottom = Workspace::new(
+            &output,
+            HashSet::from([seed_activity]),
+            clock.clone(),
+            options.clone(),
+        );
         let bottom_id = bottom.id();
         assert!(
             pool.insert(bottom_id, bottom).is_none(),
@@ -793,6 +809,7 @@ impl<W: LayoutElement> Monitor<W> {
         &mut self,
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         base_options: Rc<Options>,
+        seed_activity: ActivityId,
     ) {
         let options =
             Rc::new(Options::clone(&base_options).with_merged_layout(self.layout_config.as_ref()));
@@ -806,7 +823,12 @@ impl<W: LayoutElement> Monitor<W> {
                 // structural methods live on `Layout`, but `update_config` still runs on
                 // `&mut Monitor` and only needs a fresh top bookend here, so we build it
                 // directly.
-                let ws = Workspace::new(&self.output, self.clock.clone(), self.options.clone());
+                let ws = Workspace::new(
+                    &self.output,
+                    HashSet::from([seed_activity]),
+                    self.clock.clone(),
+                    self.options.clone(),
+                );
                 let id = ws.id();
                 assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
                 self.view.insert(0, id);
@@ -842,13 +864,14 @@ impl<W: LayoutElement> Monitor<W> {
         &mut self,
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         layout_config: Option<niri_config::LayoutPart>,
+        seed_activity: ActivityId,
     ) -> bool {
         if self.layout_config == layout_config {
             return false;
         }
 
         self.layout_config = layout_config;
-        self.update_config(pool, self.base_options.clone());
+        self.update_config(pool, self.base_options.clone(), seed_activity);
 
         true
     }

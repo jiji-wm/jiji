@@ -120,11 +120,10 @@ pub struct Workspace<W: LayoutElement> {
 
     /// Activities this workspace is a member of.
     ///
-    /// The DD's §3.2 invariant says this set is non-empty for every workspace once
-    /// Phase 1a fully lands. This commit initializes it empty as a bounded relaxation: the
-    /// next checklist box (`Layout.activities` seed) backfills `{seed_id}` for all existing
-    /// workspaces. Until that commit lands, the §3.2 "always non-empty" invariant is
-    /// suspended; mutators / cross-field assertions are deferred per the Phase 1a spec.
+    /// Per DD §3.2, this set is always non-empty for every workspace; every ctor takes an
+    /// `activities: HashSet<ActivityId>` seed parameter and panics if it is empty. Every id
+    /// stored here is also a key in the enclosing `Layout.activities` map (cross-field
+    /// invariant asserted in `Layout::verify_invariants`).
     pub(super) activities: HashSet<ActivityId>,
 }
 
@@ -221,16 +220,36 @@ impl FloatingActive {
 }
 
 impl<W: LayoutElement> Workspace<W> {
-    pub fn new(output: &Output, clock: Clock, options: Rc<Options>) -> Self {
-        Self::new_with_config(output, None, clock, options)
+    /// Construct a freshly-id'd workspace bound to `output`.
+    ///
+    /// `activities` seeds the workspace's activity membership; must be non-empty per DD §3.2.
+    pub fn new(
+        output: &Output,
+        activities: HashSet<ActivityId>,
+        clock: Clock,
+        options: Rc<Options>,
+    ) -> Self {
+        assert!(
+            !activities.is_empty(),
+            "Workspace::new*: activities must be non-empty (DD §3.2)",
+        );
+        Self::new_with_config(output, None, activities, clock, options)
     }
 
+    /// Construct a freshly-id'd workspace bound to `output`, optionally merging `config`.
+    ///
+    /// `activities` seeds the workspace's activity membership; must be non-empty per DD §3.2.
     pub fn new_with_config(
         output: &Output,
         mut config: Option<WorkspaceConfig>,
+        activities: HashSet<ActivityId>,
         clock: Clock,
         base_options: Rc<Options>,
     ) -> Self {
+        assert!(
+            !activities.is_empty(),
+            "Workspace::new*: activities must be non-empty (DD §3.2)",
+        );
         let output_id = Some(
             config
                 .as_ref()
@@ -288,15 +307,24 @@ impl<W: LayoutElement> Workspace<W> {
             layout_config,
             id: WorkspaceId::next(),
             is_sticky: false,
-            activities: HashSet::new(),
+            activities,
         }
     }
 
+    /// Construct a freshly-id'd workspace that does not yet hold an output, optionally merging
+    /// `config`.
+    ///
+    /// `activities` seeds the workspace's activity membership; must be non-empty per DD §3.2.
     pub fn new_with_config_no_outputs(
         mut config: Option<WorkspaceConfig>,
+        activities: HashSet<ActivityId>,
         clock: Clock,
         base_options: Rc<Options>,
     ) -> Self {
+        assert!(
+            !activities.is_empty(),
+            "Workspace::new*: activities must be non-empty (DD §3.2)",
+        );
         let output_id = Some(OutputId(
             config
                 .as_ref()
@@ -353,12 +381,23 @@ impl<W: LayoutElement> Workspace<W> {
             layout_config,
             id: WorkspaceId::next(),
             is_sticky: false,
-            activities: HashSet::new(),
+            activities,
         }
     }
 
-    pub fn new_no_outputs(clock: Clock, options: Rc<Options>) -> Self {
-        Self::new_with_config_no_outputs(None, clock, options)
+    /// Construct a freshly-id'd workspace that does not yet hold an output.
+    ///
+    /// `activities` seeds the workspace's activity membership; must be non-empty per DD §3.2.
+    pub fn new_no_outputs(
+        activities: HashSet<ActivityId>,
+        clock: Clock,
+        options: Rc<Options>,
+    ) -> Self {
+        assert!(
+            !activities.is_empty(),
+            "Workspace::new*: activities must be non-empty (DD §3.2)",
+        );
+        Self::new_with_config_no_outputs(None, activities, clock, options)
     }
 
     pub fn id(&self) -> WorkspaceId {
@@ -375,8 +414,7 @@ impl<W: LayoutElement> Workspace<W> {
         self.is_sticky
     }
 
-    /// Activities this workspace is a member of. See the field docs for the bounded-relaxation
-    /// note that applies between this commit and the `Layout.activities` seed commit.
+    /// Activities this workspace is a member of. Non-empty by construction (DD §3.2).
     pub fn activities(&self) -> &HashSet<ActivityId> {
         &self.activities
     }
@@ -2048,6 +2086,12 @@ impl<W: LayoutElement> Workspace<W> {
     #[cfg(debug_assertions)]
     pub fn verify_invariants(&self, move_win_id: Option<&W::Id>) {
         use approx::assert_abs_diff_eq;
+
+        assert!(
+            !self.activities.is_empty(),
+            "workspace {:?} activities must be non-empty (DD §3.2)",
+            self.id(),
+        );
 
         let scale = self.scale.fractional_scale();
         assert!(scale > 0.);

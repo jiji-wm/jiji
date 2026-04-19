@@ -1775,6 +1775,7 @@ impl State {
                 }
             }
 
+            let seed_activity = self.niri.layout.active_activity_id();
             let (monitors, pool) = self.niri.layout.monitors_and_pool_mut();
             for mon in monitors {
                 if mon.output() != output {
@@ -1789,7 +1790,7 @@ impl State {
                     }
                 }
 
-                if mon.update_layout_config(pool, layout_config) {
+                if mon.update_layout_config(pool, layout_config, seed_activity) {
                     // Also redraw these; if anything, the background color could've changed.
                     recolored_outputs.push(output.clone());
                 }

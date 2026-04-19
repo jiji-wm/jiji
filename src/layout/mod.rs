@@ -32,7 +32,7 @@
 //! don't want an unassuming workspace to end up on it.
 
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::rc::Rc;
 use std::time::Duration;
@@ -53,7 +53,7 @@ use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size, Transform};
 use tile::{Tile, TileRenderElement};
 use workspace::{WorkspaceAddWindowTarget, WorkspaceId};
 
-use self::activity::WorkspaceView;
+use self::activity::{Activities, Activity, ActivityId, WorkspaceView};
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{Monitor, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
@@ -411,6 +411,14 @@ pub struct Layout<W: LayoutElement> {
     /// duplicates. Pool values are never drained out during output reconnect; monitors bind/unbind
     /// the `Smithay` output on their workspaces in place.
     pub(super) workspaces: HashMap<WorkspaceId, Workspace<W>>,
+    /// Ordered pool of activities plus active / previous cursors.
+    ///
+    /// DD §3.2 cross-field invariant: every `Workspace.activities` entry (in every value of
+    /// `self.workspaces`) is a key in this `Activities` map, and each workspace's set is
+    /// non-empty. Checked in `Layout::verify_invariants`. New workspaces created at runtime
+    /// are stamped with `self.activities.active_id()` at construction; this field owns the
+    /// seed that makes the ctor contract realizable.
+    activities: Activities,
     /// Whether the layout should draw as active.
     ///
     /// This normally indicates that the layout has keyboard focus, but not always. E.g. when the
@@ -744,6 +752,11 @@ impl OverviewProgress {
     }
 }
 
+/// Name of the runtime "Default" activity seeded at startup. Referenced in
+/// `with_options` and `with_options_and_workspaces`; extracted as a constant
+/// so a single grep finds all uses.
+const DEFAULT_ACTIVITY_NAME: &str = "Default";
+
 impl<W: LayoutElement> Layout<W> {
     pub fn new(clock: Clock, config: &Config) -> Self {
         Self::with_options_and_workspaces(clock, config, Options::from_config(config))
@@ -756,6 +769,7 @@ impl<W: LayoutElement> Layout<W> {
             active_monitor_idx: 0,
             disconnected_workspace_ids: Vec::new(),
             workspaces: HashMap::new(),
+            activities: Activities::new(Activity::new_runtime(DEFAULT_ACTIVITY_NAME.to_owned())),
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,
@@ -771,6 +785,9 @@ impl<W: LayoutElement> Layout<W> {
     fn with_options_and_workspaces(clock: Clock, config: &Config, options: Options) -> Self {
         let opts = Rc::new(options);
 
+        let seed = Activity::new_runtime(DEFAULT_ACTIVITY_NAME.to_owned());
+        let seed_id = seed.id();
+
         let mut workspaces: HashMap<WorkspaceId, Workspace<W>> = HashMap::new();
         let workspace_ids = config
             .workspaces
@@ -778,6 +795,7 @@ impl<W: LayoutElement> Layout<W> {
             .map(|ws| {
                 let workspace = Workspace::new_with_config_no_outputs(
                     Some(ws.clone()),
+                    HashSet::from([seed_id]),
                     clock.clone(),
                     opts.clone(),
                 );
@@ -796,6 +814,7 @@ impl<W: LayoutElement> Layout<W> {
             active_monitor_idx: 0,
             disconnected_workspace_ids: workspace_ids,
             workspaces,
+            activities: Activities::new(seed),
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,
@@ -809,6 +828,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn add_output(&mut self, output: Output, layout_config: Option<LayoutPart>) {
+        let seed_activity = self.activities.active_id();
         if self.monitors.is_empty() {
             // Reconnecting from a fully-disconnected state: the first monitor takes over all
             // workspaces that were parked in `disconnected_workspace_ids` in their saved order.
@@ -823,6 +843,7 @@ impl<W: LayoutElement> Layout<W> {
                 self.clock.clone(),
                 self.options.clone(),
                 layout_config,
+                seed_activity,
             );
             monitor.overview_open = self.overview_open;
             monitor.set_overview_progress(self.overview_progress.as_ref());
@@ -921,6 +942,7 @@ impl<W: LayoutElement> Layout<W> {
             self.clock.clone(),
             self.options.clone(),
             layout_config,
+            seed_activity,
         );
         monitor.overview_open = self.overview_open;
         monitor.set_overview_progress(self.overview_progress.as_ref());
@@ -987,6 +1009,7 @@ impl<W: LayoutElement> Layout<W> {
             !self.monitors.is_empty(),
             "add_column_by_idx requires at least one connected monitor",
         );
+        let seed_activity = self.activities.active_id();
         Self::add_column_on(
             &mut self.monitors,
             &mut self.workspaces,
@@ -994,6 +1017,7 @@ impl<W: LayoutElement> Layout<W> {
             workspace_idx,
             column,
             activate,
+            seed_activity,
         );
 
         if activate {
@@ -1022,8 +1046,11 @@ impl<W: LayoutElement> Layout<W> {
             let (ws_idx, target) = match target {
                 AddWindowTarget::Auto => {
                     if self.disconnected_workspace_ids.is_empty() {
-                        let ws =
-                            Workspace::new_no_outputs(self.clock.clone(), self.options.clone());
+                        let ws = Workspace::new_no_outputs(
+                            HashSet::from([self.activities.active_id()]),
+                            self.clock.clone(),
+                            self.options.clone(),
+                        );
                         let ws_id = ws.id();
                         assert!(
                             self.workspaces.insert(ws_id, ws).is_none(),
@@ -1060,8 +1087,11 @@ impl<W: LayoutElement> Layout<W> {
                         // The next_to window is being interactively moved. If there are no
                         // other windows, we may have no workspaces at all.
                         if self.disconnected_workspace_ids.is_empty() {
-                            let ws =
-                                Workspace::new_no_outputs(self.clock.clone(), self.options.clone());
+                            let ws = Workspace::new_no_outputs(
+                                HashSet::from([self.activities.active_id()]),
+                                self.clock.clone(),
+                                self.options.clone(),
+                            );
                             let ws_id = ws.id();
                             assert!(
                                 self.workspaces.insert(ws_id, ws).is_none(),
@@ -1115,6 +1145,7 @@ impl<W: LayoutElement> Layout<W> {
             return None;
         }
 
+        let seed_activity = self.activities.active_id();
         let pool = &mut self.workspaces;
         let monitors = &mut self.monitors[..];
         let active_monitor_idx = &mut self.active_monitor_idx;
@@ -1195,6 +1226,7 @@ impl<W: LayoutElement> Layout<W> {
             scrolling_width,
             is_full_width,
             is_floating,
+            seed_activity,
         );
 
         if activate.map_smart(|| false) {
@@ -1974,6 +2006,14 @@ impl<W: LayoutElement> Layout<W> {
         &self.workspaces
     }
 
+    /// Id of the currently-active [`Activity`]. Callers that need to stamp a freshly-built
+    /// workspace with the active activity (e.g. reloading output config via
+    /// [`Monitor::update_layout_config`]) capture this before taking a split-borrow of the
+    /// workspace pool.
+    pub(crate) fn active_activity_id(&self) -> ActivityId {
+        self.activities.active_id()
+    }
+
     /// Split-borrow helper: return `(&mut monitors, &mut pool)` for external callers that iterate
     /// monitors and call mutating `Monitor` methods threading `&mut pool`. Returns `(&mut [], ...)`
     /// if no outputs are connected.
@@ -1991,13 +2031,14 @@ impl<W: LayoutElement> Layout<W> {
         mon_idx: usize,
         mut view_idx: usize,
     ) -> WorkspaceId {
+        let seed_activity = self.activities.active_id();
         let (monitors, pool) = self.monitors_and_pool_mut();
 
         if view_idx == monitors[mon_idx].view.len() - 1 {
-            Self::add_workspace_bottom_on(monitors, pool, mon_idx);
+            Self::add_workspace_bottom_on(monitors, pool, mon_idx, seed_activity);
         }
         if monitors[mon_idx].options.layout.empty_workspace_above_first && view_idx == 0 {
-            Self::add_workspace_top_on(monitors, pool, mon_idx);
+            Self::add_workspace_top_on(monitors, pool, mon_idx, seed_activity);
             view_idx += 1;
         }
 
@@ -2031,6 +2072,7 @@ impl<W: LayoutElement> Layout<W> {
         mut view_idx: usize,
         activate: bool,
     ) {
+        let seed_activity = self.activities.active_id();
         let (monitors, pool) = self.monitors_and_pool_mut();
 
         {
@@ -2048,7 +2090,7 @@ impl<W: LayoutElement> Layout<W> {
         }
         if view_idx == 0 && monitors[mon_idx].options.layout.empty_workspace_above_first {
             // Insert a new empty workspace on top to prepare for insertion of new workspace.
-            Self::add_workspace_top_on(monitors, pool, mon_idx);
+            Self::add_workspace_top_on(monitors, pool, mon_idx, seed_activity);
             view_idx += 1;
         }
 
@@ -2073,6 +2115,7 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
 
+        let seed_activity = self.activities.active_id();
         let (monitors, pool) = self.monitors_and_pool_mut();
 
         {
@@ -2102,7 +2145,7 @@ impl<W: LayoutElement> Layout<W> {
         if mon.options.layout.empty_workspace_above_first
             && mon.workspace_at(pool, 0).has_windows_or_name()
         {
-            Self::add_workspace_top_on(monitors, pool, mon_idx);
+            Self::add_workspace_top_on(monitors, pool, mon_idx, seed_activity);
         }
 
         let mon = &mut monitors[mon_idx];
@@ -2158,9 +2201,15 @@ impl<W: LayoutElement> Layout<W> {
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         mon_idx: usize,
         idx: usize,
+        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
-        let ws = Workspace::new(&mon.output, mon.clock.clone(), mon.options.clone());
+        let ws = Workspace::new(
+            &mon.output,
+            HashSet::from([seed_activity]),
+            mon.clock.clone(),
+            mon.options.clone(),
+        );
 
         let id = ws.id();
         assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
@@ -2177,17 +2226,19 @@ impl<W: LayoutElement> Layout<W> {
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         mon_idx: usize,
+        seed_activity: ActivityId,
     ) {
-        Self::add_workspace_at_on(monitors, pool, mon_idx, 0);
+        Self::add_workspace_at_on(monitors, pool, mon_idx, 0, seed_activity);
     }
 
     fn add_workspace_bottom_on(
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         mon_idx: usize,
+        seed_activity: ActivityId,
     ) {
         let len = monitors[mon_idx].view.len();
-        Self::add_workspace_at_on(monitors, pool, mon_idx, len);
+        Self::add_workspace_at_on(monitors, pool, mon_idx, len, seed_activity);
     }
 
     fn clean_up_workspaces_on(
@@ -2249,6 +2300,7 @@ impl<W: LayoutElement> Layout<W> {
         width: ColumnWidth,
         is_full_width: bool,
         is_floating: bool,
+        seed_activity: ActivityId,
     ) {
         let mon = &monitors[mon_idx];
         let (workspace_idx, target) = mon.resolve_add_window_target(pool, target);
@@ -2266,6 +2318,7 @@ impl<W: LayoutElement> Layout<W> {
             width,
             is_full_width,
             is_floating,
+            seed_activity,
         );
     }
 
@@ -2276,6 +2329,7 @@ impl<W: LayoutElement> Layout<W> {
         mut workspace_idx: usize,
         column: Column<W>,
         activate: bool,
+        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
         let workspace = mon.workspace_at_mut(pool, workspace_idx);
@@ -2288,10 +2342,10 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         if workspace_idx == mon.view.len() - 1 {
-            Self::add_workspace_bottom_on(monitors, pool, mon_idx);
+            Self::add_workspace_bottom_on(monitors, pool, mon_idx, seed_activity);
         }
         if monitors[mon_idx].options.layout.empty_workspace_above_first && workspace_idx == 0 {
-            Self::add_workspace_top_on(monitors, pool, mon_idx);
+            Self::add_workspace_top_on(monitors, pool, mon_idx, seed_activity);
             workspace_idx += 1;
         }
 
@@ -2313,6 +2367,7 @@ impl<W: LayoutElement> Layout<W> {
         width: ColumnWidth,
         is_full_width: bool,
         is_floating: bool,
+        seed_activity: ActivityId,
     ) {
         let (workspace_idx, target) = monitors[mon_idx].resolve_add_window_target(pool, target);
         Self::add_resolved_tile_on(
@@ -2327,6 +2382,7 @@ impl<W: LayoutElement> Layout<W> {
             width,
             is_full_width,
             is_floating,
+            seed_activity,
         );
     }
 
@@ -2344,6 +2400,7 @@ impl<W: LayoutElement> Layout<W> {
         width: ColumnWidth,
         is_full_width: bool,
         is_floating: bool,
+        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
         let workspace = mon.workspace_at_mut(pool, workspace_idx);
@@ -2365,11 +2422,11 @@ impl<W: LayoutElement> Layout<W> {
 
         if workspace_idx == mon.view.len() - 1 {
             // Insert a new empty workspace.
-            Self::add_workspace_bottom_on(monitors, pool, mon_idx);
+            Self::add_workspace_bottom_on(monitors, pool, mon_idx, seed_activity);
         }
 
         if monitors[mon_idx].options.layout.empty_workspace_above_first && workspace_idx == 0 {
-            Self::add_workspace_top_on(monitors, pool, mon_idx);
+            Self::add_workspace_top_on(monitors, pool, mon_idx, seed_activity);
             workspace_idx += 1;
         }
 
@@ -2413,9 +2470,10 @@ impl<W: LayoutElement> Layout<W> {
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         mon_idx: usize,
+        seed_activity: ActivityId,
     ) {
         if !monitors[mon_idx].active_workspace(pool).move_down() {
-            Self::move_to_workspace_down_on(monitors, pool, mon_idx, true);
+            Self::move_to_workspace_down_on(monitors, pool, mon_idx, true, seed_activity);
         }
     }
 
@@ -2423,9 +2481,10 @@ impl<W: LayoutElement> Layout<W> {
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         mon_idx: usize,
+        seed_activity: ActivityId,
     ) {
         if !monitors[mon_idx].active_workspace(pool).move_up() {
-            Self::move_to_workspace_up_on(monitors, pool, mon_idx, true);
+            Self::move_to_workspace_up_on(monitors, pool, mon_idx, true, seed_activity);
         }
     }
 
@@ -2454,6 +2513,7 @@ impl<W: LayoutElement> Layout<W> {
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         mon_idx: usize,
         focus: bool,
+        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
         let source_workspace_idx = mon.view.active_position();
@@ -2490,6 +2550,7 @@ impl<W: LayoutElement> Layout<W> {
             removed.width,
             removed.is_full_width,
             removed.is_floating,
+            seed_activity,
         );
     }
 
@@ -2498,6 +2559,7 @@ impl<W: LayoutElement> Layout<W> {
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         mon_idx: usize,
         focus: bool,
+        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
         let source_workspace_idx = mon.view.active_position();
@@ -2534,6 +2596,7 @@ impl<W: LayoutElement> Layout<W> {
             removed.width,
             removed.is_full_width,
             removed.is_floating,
+            seed_activity,
         );
     }
 
@@ -2544,6 +2607,7 @@ impl<W: LayoutElement> Layout<W> {
         window: Option<&W::Id>,
         idx: usize,
         activate: ActivateWindow,
+        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
         let source_workspace_idx = if let Some(window) = window {
@@ -2598,6 +2662,7 @@ impl<W: LayoutElement> Layout<W> {
             removed.width,
             removed.is_full_width,
             removed.is_floating,
+            seed_activity,
         );
 
         if monitors[mon_idx].workspace_switch.is_none() {
@@ -2610,6 +2675,7 @@ impl<W: LayoutElement> Layout<W> {
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         mon_idx: usize,
         activate: bool,
+        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
         let source_workspace_idx = mon.view.active_position();
@@ -2625,7 +2691,7 @@ impl<W: LayoutElement> Layout<W> {
             .workspace_at(pool, source_workspace_idx)
             .floating_is_active()
         {
-            Self::move_to_workspace_up_on(monitors, pool, mon_idx, activate);
+            Self::move_to_workspace_up_on(monitors, pool, mon_idx, activate, seed_activity);
             return;
         }
 
@@ -2634,7 +2700,15 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
 
-        Self::add_column_on(monitors, pool, mon_idx, new_idx, column, activate);
+        Self::add_column_on(
+            monitors,
+            pool,
+            mon_idx,
+            new_idx,
+            column,
+            activate,
+            seed_activity,
+        );
     }
 
     fn move_column_to_workspace_down_on(
@@ -2642,6 +2716,7 @@ impl<W: LayoutElement> Layout<W> {
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         mon_idx: usize,
         activate: bool,
+        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
         let source_workspace_idx = mon.view.active_position();
@@ -2655,7 +2730,7 @@ impl<W: LayoutElement> Layout<W> {
             .workspace_at(pool, source_workspace_idx)
             .floating_is_active()
         {
-            Self::move_to_workspace_down_on(monitors, pool, mon_idx, activate);
+            Self::move_to_workspace_down_on(monitors, pool, mon_idx, activate, seed_activity);
             return;
         }
 
@@ -2664,7 +2739,15 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
 
-        Self::add_column_on(monitors, pool, mon_idx, new_idx, column, activate);
+        Self::add_column_on(
+            monitors,
+            pool,
+            mon_idx,
+            new_idx,
+            column,
+            activate,
+            seed_activity,
+        );
     }
 
     fn move_column_to_workspace_on(
@@ -2673,6 +2756,7 @@ impl<W: LayoutElement> Layout<W> {
         mon_idx: usize,
         idx: usize,
         activate: bool,
+        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
         let source_workspace_idx = mon.view.active_position();
@@ -2691,7 +2775,7 @@ impl<W: LayoutElement> Layout<W> {
             } else {
                 ActivateWindow::No
             };
-            Self::move_to_workspace_on(monitors, pool, mon_idx, None, idx, activate);
+            Self::move_to_workspace_on(monitors, pool, mon_idx, None, idx, activate, seed_activity);
             return;
         }
 
@@ -2700,13 +2784,22 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
 
-        Self::add_column_on(monitors, pool, mon_idx, new_idx, column, activate);
+        Self::add_column_on(
+            monitors,
+            pool,
+            mon_idx,
+            new_idx,
+            column,
+            activate,
+            seed_activity,
+        );
     }
 
     fn move_workspace_down_on(
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         mon_idx: usize,
+        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
         let active_idx = mon.view.active_position();
@@ -2719,11 +2812,11 @@ impl<W: LayoutElement> Layout<W> {
 
         if new_idx == mon.view.len() - 1 {
             // Insert a new empty workspace.
-            Self::add_workspace_bottom_on(monitors, pool, mon_idx);
+            Self::add_workspace_bottom_on(monitors, pool, mon_idx, seed_activity);
         }
 
         if monitors[mon_idx].options.layout.empty_workspace_above_first && active_idx == 0 {
-            Self::add_workspace_top_on(monitors, pool, mon_idx);
+            Self::add_workspace_top_on(monitors, pool, mon_idx, seed_activity);
             new_idx += 1;
         }
 
@@ -2740,6 +2833,7 @@ impl<W: LayoutElement> Layout<W> {
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         mon_idx: usize,
+        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
         let active_idx = mon.view.active_position();
@@ -2752,11 +2846,11 @@ impl<W: LayoutElement> Layout<W> {
 
         if active_idx == mon.view.len() - 1 {
             // Insert a new empty workspace.
-            Self::add_workspace_bottom_on(monitors, pool, mon_idx);
+            Self::add_workspace_bottom_on(monitors, pool, mon_idx, seed_activity);
         }
 
         if monitors[mon_idx].options.layout.empty_workspace_above_first && new_idx == 0 {
-            Self::add_workspace_top_on(monitors, pool, mon_idx);
+            Self::add_workspace_top_on(monitors, pool, mon_idx, seed_activity);
             new_idx += 1;
         }
 
@@ -2775,6 +2869,7 @@ impl<W: LayoutElement> Layout<W> {
         mon_idx: usize,
         old_idx: usize,
         new_idx: usize,
+        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
         if mon.view.len() <= old_idx {
@@ -2791,20 +2886,20 @@ impl<W: LayoutElement> Layout<W> {
         if new_idx > old_idx {
             if new_idx == mon.view.len() - 1 {
                 // Insert a new empty workspace.
-                Self::add_workspace_bottom_on(monitors, pool, mon_idx);
+                Self::add_workspace_bottom_on(monitors, pool, mon_idx, seed_activity);
             }
 
             if monitors[mon_idx].options.layout.empty_workspace_above_first && old_idx == 0 {
-                Self::add_workspace_top_on(monitors, pool, mon_idx);
+                Self::add_workspace_top_on(monitors, pool, mon_idx, seed_activity);
             }
         } else {
             if old_idx == monitors[mon_idx].view.len() - 1 {
                 // Insert a new empty workspace.
-                Self::add_workspace_bottom_on(monitors, pool, mon_idx);
+                Self::add_workspace_bottom_on(monitors, pool, mon_idx, seed_activity);
             }
 
             if monitors[mon_idx].options.layout.empty_workspace_above_first && new_idx == 0 {
-                Self::add_workspace_top_on(monitors, pool, mon_idx);
+                Self::add_workspace_top_on(monitors, pool, mon_idx, seed_activity);
             }
         }
 
@@ -2922,10 +3017,12 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let active_monitor_idx = self.active_monitor_idx;
+        let seed_activity = self.activities.active_id();
         Self::move_down_or_to_workspace_down_on(
             &mut self.monitors,
             &mut self.workspaces,
             active_monitor_idx,
+            seed_activity,
         );
     }
 
@@ -2934,10 +3031,12 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let active_monitor_idx = self.active_monitor_idx;
+        let seed_activity = self.activities.active_id();
         Self::move_up_or_to_workspace_up_on(
             &mut self.monitors,
             &mut self.workspaces,
             active_monitor_idx,
+            seed_activity,
         );
     }
 
@@ -3186,11 +3285,13 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let active_monitor_idx = self.active_monitor_idx;
+        let seed_activity = self.activities.active_id();
         Self::move_to_workspace_up_on(
             &mut self.monitors,
             &mut self.workspaces,
             active_monitor_idx,
             focus,
+            seed_activity,
         );
     }
 
@@ -3199,11 +3300,13 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let active_monitor_idx = self.active_monitor_idx;
+        let seed_activity = self.activities.active_id();
         Self::move_to_workspace_down_on(
             &mut self.monitors,
             &mut self.workspaces,
             active_monitor_idx,
             focus,
+            seed_activity,
         );
     }
 
@@ -3233,6 +3336,7 @@ impl<W: LayoutElement> Layout<W> {
             self.active_monitor_idx
         };
 
+        let seed_activity = self.activities.active_id();
         Self::move_to_workspace_on(
             &mut self.monitors,
             &mut self.workspaces,
@@ -3240,6 +3344,7 @@ impl<W: LayoutElement> Layout<W> {
             window,
             idx,
             activate,
+            seed_activity,
         );
     }
 
@@ -3248,11 +3353,13 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let active_monitor_idx = self.active_monitor_idx;
+        let seed_activity = self.activities.active_id();
         Self::move_column_to_workspace_up_on(
             &mut self.monitors,
             &mut self.workspaces,
             active_monitor_idx,
             activate,
+            seed_activity,
         );
     }
 
@@ -3261,11 +3368,13 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let active_monitor_idx = self.active_monitor_idx;
+        let seed_activity = self.activities.active_id();
         Self::move_column_to_workspace_down_on(
             &mut self.monitors,
             &mut self.workspaces,
             active_monitor_idx,
             activate,
+            seed_activity,
         );
     }
 
@@ -3274,12 +3383,14 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let active_monitor_idx = self.active_monitor_idx;
+        let seed_activity = self.activities.active_id();
         Self::move_column_to_workspace_on(
             &mut self.monitors,
             &mut self.workspaces,
             active_monitor_idx,
             idx,
             activate,
+            seed_activity,
         );
     }
 
@@ -3483,8 +3594,6 @@ impl<W: LayoutElement> Layout<W> {
 
     #[cfg(debug_assertions)]
     fn verify_invariants(&self) {
-        use std::collections::HashSet;
-
         use approx::assert_abs_diff_eq;
 
         let zoom = self.overview_zoom();
@@ -3555,6 +3664,25 @@ impl<W: LayoutElement> Layout<W> {
                         }
                     }
                 }
+            }
+        }
+
+        // DD §3.2: every Workspace.activities is a non-empty subset of the Activities keyset.
+        // Walks the full pool unconditionally (before the zero-monitor / any-monitor split below);
+        // the pool walk is cheap (HashSet::contains per workspace activity entry; typical set
+        // size is small).
+        for (ws_id, workspace) in &self.workspaces {
+            assert!(
+                !workspace.activities.is_empty(),
+                "workspace {ws_id:?} activities set must be non-empty (DD §3.2)",
+            );
+            for activity_id in workspace.activities.iter() {
+                assert!(
+                    self.activities.contains(*activity_id),
+                    "workspace {ws_id:?} references activity {activity_id:?}, not a live key in \
+                     Layout.activities (live: {:?})",
+                    self.activities.iter().map(|a| a.id()).collect::<Vec<_>>(),
+                );
             }
         }
 
@@ -4088,9 +4216,19 @@ impl<W: LayoutElement> Layout<W> {
 
         let clock = self.clock.clone();
         let options = self.options.clone();
+        let seed_activity = self.activities.active_id();
 
         if self.monitors.is_empty() {
-            let ws = Workspace::new_with_config_no_outputs(Some(ws_config.clone()), clock, options);
+            // Stamped with the active activity. When the `workspace { activity "..." }`
+            // checklist box lands, that parser will *replace* this stamp at config-load
+            // time (DD §6.2 semantics: declared `activity` blocks define the set, not
+            // additions to a default).
+            let ws = Workspace::new_with_config_no_outputs(
+                Some(ws_config.clone()),
+                HashSet::from([seed_activity]),
+                clock,
+                options,
+            );
             let id = ws.id();
             assert!(
                 self.workspaces.insert(id, ws).is_none(),
@@ -4114,7 +4252,17 @@ impl<W: LayoutElement> Layout<W> {
             .unwrap_or(active_monitor_idx);
         let mon = &self.monitors[mon_idx];
 
-        let ws = Workspace::new_with_config(&mon.output, Some(ws_config.clone()), clock, options);
+        // Stamped with the active activity. When the `workspace { activity "..." }`
+        // checklist box lands, that parser will *replace* this stamp at config-load
+        // time (DD §6.2 semantics: declared `activity` blocks define the set, not
+        // additions to a default).
+        let ws = Workspace::new_with_config(
+            &mon.output,
+            Some(ws_config.clone()),
+            HashSet::from([seed_activity]),
+            clock,
+            options,
+        );
         let id = ws.id();
         assert!(
             self.workspaces.insert(id, ws).is_none(),
@@ -4148,9 +4296,10 @@ impl<W: LayoutElement> Layout<W> {
             move_.tile.update_config(view_size, scale, Rc::new(options));
         }
 
+        let seed_activity = self.activities.active_id();
         let pool = &mut self.workspaces;
         for mon in &mut self.monitors {
-            mon.update_config(pool, options.clone());
+            mon.update_config(pool, options.clone(), seed_activity);
         }
         for id in &self.disconnected_workspace_ids {
             self.workspaces
@@ -4506,6 +4655,7 @@ impl<W: LayoutElement> Layout<W> {
 
         let ws_id = mon.view.ids()[workspace_idx];
 
+        let seed_activity = self.activities.active_id();
         let pool = &mut self.workspaces;
         let monitors = &mut self.monitors[..];
         let active_monitor_idx = &mut self.active_monitor_idx;
@@ -4548,6 +4698,7 @@ impl<W: LayoutElement> Layout<W> {
             removed.width,
             removed.is_full_width,
             removed.is_floating,
+            seed_activity,
         );
         if activate.map_smart(|| false) {
             *active_monitor_idx = new_idx;
@@ -5374,11 +5525,16 @@ impl<W: LayoutElement> Layout<W> {
         // output differs (including the case where `move_.output` has just been disconnected).
         move_.tile.window().output_leave(&move_.output);
 
+        let seed_activity = self.activities.active_id();
         let pool = &mut self.workspaces;
         if self.monitors.is_empty() {
             let workspaces = &mut self.disconnected_workspace_ids;
             if workspaces.is_empty() {
-                let ws = Workspace::new_no_outputs(self.clock.clone(), self.options.clone());
+                let ws = Workspace::new_no_outputs(
+                    HashSet::from([seed_activity]),
+                    self.clock.clone(),
+                    self.options.clone(),
+                );
                 let id = ws.id();
                 assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
                 workspaces.push(id);
@@ -5470,7 +5626,7 @@ impl<W: LayoutElement> Layout<W> {
                     // Reuse the bottom empty workspace.
                     mon.view.len() - 1
                 } else {
-                    Self::add_workspace_at_on(monitors, pool, mon_idx, ws_idx);
+                    Self::add_workspace_at_on(monitors, pool, mon_idx, ws_idx, seed_activity);
                     ws_idx
                 }
             }
@@ -5493,6 +5649,7 @@ impl<W: LayoutElement> Layout<W> {
                     move_.width,
                     move_.is_full_width,
                     false,
+                    seed_activity,
                 );
             }
             InsertPosition::InColumn(column_idx, tile_idx) => {
@@ -5556,6 +5713,7 @@ impl<W: LayoutElement> Layout<W> {
                     move_.width,
                     move_.is_full_width,
                     true,
+                    seed_activity,
                 );
             }
         }
@@ -5730,7 +5888,13 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let active_monitor_idx = self.active_monitor_idx;
-        Self::move_workspace_down_on(&mut self.monitors, &mut self.workspaces, active_monitor_idx);
+        let seed_activity = self.activities.active_id();
+        Self::move_workspace_down_on(
+            &mut self.monitors,
+            &mut self.workspaces,
+            active_monitor_idx,
+            seed_activity,
+        );
     }
 
     pub fn move_workspace_up(&mut self) {
@@ -5738,7 +5902,13 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let active_monitor_idx = self.active_monitor_idx;
-        Self::move_workspace_up_on(&mut self.monitors, &mut self.workspaces, active_monitor_idx);
+        let seed_activity = self.activities.active_id();
+        Self::move_workspace_up_on(
+            &mut self.monitors,
+            &mut self.workspaces,
+            active_monitor_idx,
+            seed_activity,
+        );
     }
 
     pub fn move_workspace_to_idx(
@@ -5764,12 +5934,14 @@ impl<W: LayoutElement> Layout<W> {
             (mon_idx, self.monitors[mon_idx].view.active_position())
         };
 
+        let seed_activity = self.activities.active_id();
         Self::move_workspace_to_idx_on(
             &mut self.monitors,
             &mut self.workspaces,
             mon_idx,
             old_idx,
             new_idx,
+            seed_activity,
         );
     }
 
@@ -5804,12 +5976,13 @@ impl<W: LayoutElement> Layout<W> {
             let add_top = monitor.options.layout.empty_workspace_above_first
                 && monitor.view.ids().first().is_some_and(|id| *id == wsid);
             let add_bottom = monitor.view.ids().last().is_some_and(|id| *id == wsid);
+            let seed_activity = self.activities.active_id();
             let (monitors, pool) = (&mut self.monitors[..], &mut self.workspaces);
             if add_top {
-                Self::add_workspace_top_on(monitors, pool, mon_idx);
+                Self::add_workspace_top_on(monitors, pool, mon_idx, seed_activity);
             }
             if add_bottom {
-                Self::add_workspace_bottom_on(monitors, pool, mon_idx);
+                Self::add_workspace_bottom_on(monitors, pool, mon_idx, seed_activity);
             }
         }
     }

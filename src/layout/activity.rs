@@ -265,13 +265,13 @@ impl Activity {
 /// Ordered pool of [`Activity`]s plus active / previous cursors.
 ///
 /// Invariants:
-/// - `map` is non-empty — guaranteed by [`Activities::new`] taking a seed
-///   `Activity`; no `Default`, no push-to-empty API.
+/// - `map` is non-empty — guaranteed by [`Activities::new`] taking a seed `Activity`; no `Default`,
+///   no push-to-empty API.
 /// - `active` is always a key in `map`.
 /// - `previous`, if `Some`, is always a key in `map`.
-/// - Each stored `Activity`'s `id` equals its key in `map` (enforced by
-///   private `Activity.id` + construction-only id minting; inserts go through
-///   `map.insert(activity.id, activity)` exclusively).
+/// - Each stored `Activity`'s `id` equals its key in `map` (enforced by private `Activity.id` +
+///   construction-only id minting; inserts go through `map.insert(activity.id, activity)`
+///   exclusively).
 #[derive(Debug)]
 // No `is_empty` — `Activities` is never empty by construction.
 #[allow(clippy::len_without_is_empty)]

@@ -1,5 +1,5 @@
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use niri_config::utils::{Flag, MergeWith as _};
 use niri_config::workspace::WorkspaceName;
@@ -12,6 +12,7 @@ use proptest_derive::Arbitrary;
 use smithay::output::{Mode, PhysicalProperties, Subpixel};
 use smithay::utils::Rectangle;
 
+use super::activity::ActivityId;
 use super::*;
 
 mod animations;
@@ -871,12 +872,13 @@ impl Op {
             }
             Op::UpdateOutputLayoutConfig { id, layout_config } => {
                 let name = format!("output{id}");
+                let seed_activity = layout.active_activity_id();
                 let (monitors, pool) = layout.monitors_and_pool_mut();
                 let Some(mon) = monitors.iter_mut().find(|m| m.output_name() == &name) else {
                     return;
                 };
 
-                mon.update_layout_config(pool, layout_config.map(|x| *x));
+                mon.update_layout_config(pool, layout_config.map(|x| *x), seed_activity);
             }
             Op::AddNamedWorkspace {
                 ws_name,
@@ -4186,16 +4188,13 @@ proptest! {
 #[test]
 fn workspace_is_sticky_defaults_false() {
     let ws = Workspace::<TestWindow>::new_no_outputs(
+        HashSet::from([ActivityId::specific(1)]),
         Clock::with_time(Duration::ZERO),
         Default::default(),
     );
     assert!(
         !ws.is_sticky(),
         "is_sticky must default to false on a freshly-constructed workspace",
-    );
-    assert!(
-        ws.activities().is_empty(),
-        "activities must default to empty on Workspace::new_no_outputs",
     );
 }
 
@@ -4229,21 +4228,24 @@ fn make_test_output(name: &str) -> Output {
 }
 
 #[test]
-fn workspace_activities_default_empty() {
-    // Pin the bounded-relaxation default: every Workspace ctor leaves `activities` empty
-    // until the Layout.activities seed commit backfills `{seed_id}` for all workspaces.
-    // See `Workspace::activities` field doc.
+fn workspace_activities_initializes_from_ctor_param() {
+    // Pin the DD §3.2 ctor contract: `activities` seeds the workspace's activity
+    // membership verbatim. Both the with-output and no-outputs flavors must honor it.
     let output = make_test_output("output1");
+    let seed: HashSet<ActivityId> =
+        HashSet::from([ActivityId::specific(7), ActivityId::specific(42)]);
 
     let via_new_with_config = Workspace::<TestWindow>::new_with_config(
         &output,
         None,
+        seed.clone(),
         Clock::with_time(Duration::ZERO),
         Default::default(),
     );
-    assert!(
-        via_new_with_config.activities().is_empty(),
-        "activities must default to empty on Workspace::new_with_config",
+    assert_eq!(
+        via_new_with_config.activities(),
+        &seed,
+        "activities must equal the ctor-seed on Workspace::new_with_config",
     );
     assert!(
         !via_new_with_config.is_sticky(),
@@ -4252,15 +4254,81 @@ fn workspace_activities_default_empty() {
 
     let via_no_outputs = Workspace::<TestWindow>::new_with_config_no_outputs(
         None,
+        seed.clone(),
         Clock::with_time(Duration::ZERO),
         Default::default(),
     );
-    assert!(
-        via_no_outputs.activities().is_empty(),
-        "activities must default to empty on Workspace::new_with_config_no_outputs",
+    assert_eq!(
+        via_no_outputs.activities(),
+        &seed,
+        "activities must equal the ctor-seed on Workspace::new_with_config_no_outputs",
     );
     assert!(
         !via_no_outputs.is_sticky(),
         "is_sticky must default to false on Workspace::new_with_config_no_outputs",
     );
+}
+
+#[test]
+#[should_panic(expected = "activities must be non-empty")]
+fn workspace_new_panics_on_empty_activities() {
+    // DD §3.2: ctors reject an empty activity set.
+    let _ = Workspace::<TestWindow>::new_no_outputs(
+        HashSet::new(),
+        Clock::with_time(Duration::ZERO),
+        Default::default(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "activities must be non-empty")]
+fn workspace_new_with_config_panics_on_empty_activities() {
+    // DD §3.2: the caller-facing `new_with_config` ctor also rejects an empty
+    // activity set. Distinct from the `new_no_outputs` path so a deletion of
+    // the assert in either caller-facing ctor is caught independently.
+    let output = make_test_output("output1");
+    let _ = Workspace::<TestWindow>::new_with_config(
+        &output,
+        None,
+        HashSet::new(),
+        Clock::with_time(Duration::ZERO),
+        Default::default(),
+    );
+}
+
+#[test]
+fn layout_new_with_workspaces_stamps_active_activity() {
+    // Pin the `with_options_and_workspaces` seed-stamping loop (mod.rs:744-761).
+    // Every workspace built from `config.workspaces` must carry exactly the
+    // seed activity id (the active activity at construction time), and
+    // `verify_invariants` must pass.
+    let config = Config {
+        workspaces: vec![
+            WorkspaceConfig {
+                name: WorkspaceName("main".to_owned()),
+                open_on_output: None,
+                layout: None,
+            },
+            WorkspaceConfig {
+                name: WorkspaceName("side".to_owned()),
+                open_on_output: None,
+                layout: None,
+            },
+        ],
+        ..Config::default()
+    };
+
+    let layout = Layout::<TestWindow>::new(Clock::with_time(Duration::ZERO), &config);
+    let seed_id = layout.active_activity_id();
+
+    for ws in layout.workspaces.values() {
+        assert_eq!(
+            ws.activities(),
+            &HashSet::from([seed_id]),
+            "workspace {:?} must be stamped with exactly the seed activity",
+            ws.id(),
+        );
+    }
+
+    layout.verify_invariants();
 }
