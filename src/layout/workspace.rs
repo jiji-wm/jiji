@@ -108,6 +108,13 @@ pub struct Workspace<W: LayoutElement> {
 
     /// Unique ID of this workspace.
     id: WorkspaceId,
+
+    /// Whether this workspace is "sticky": present on every activity rather than only those in
+    /// `activities`.
+    ///
+    /// Sticky flag per DD §3.2. Mutators land in Phase 2; auto-expansion (into
+    /// `Workspace.activities`) in Phase 1b. This field is the storage that drives that behaviour.
+    pub(super) is_sticky: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -269,6 +276,7 @@ impl<W: LayoutElement> Workspace<W> {
             name: config.map(|c| c.name.0),
             layout_config,
             id: WorkspaceId::next(),
+            is_sticky: false,
         }
     }
 
@@ -332,6 +340,7 @@ impl<W: LayoutElement> Workspace<W> {
             name: config.map(|c| c.name.0),
             layout_config,
             id: WorkspaceId::next(),
+            is_sticky: false,
         }
     }
 
@@ -345,6 +354,12 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn name(&self) -> Option<&String> {
         self.name.as_ref()
+    }
+
+    /// Whether this workspace is "sticky" — present on every activity. Default is `false`.
+    /// Mutators land in Phase 2; auto-expansion in Phase 1b (DD §3.2).
+    pub fn is_sticky(&self) -> bool {
+        self.is_sticky
     }
 
     pub fn unname(&mut self) {

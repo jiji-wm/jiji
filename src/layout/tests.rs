@@ -4182,3 +4182,15 @@ proptest! {
         check_ops_with_options(options, ops);
     }
 }
+
+#[test]
+fn workspace_is_sticky_defaults_false() {
+    let ws = Workspace::<TestWindow>::new_no_outputs(
+        Clock::with_time(Duration::ZERO),
+        Default::default(),
+    );
+    assert!(
+        !ws.is_sticky(),
+        "is_sticky must default to false on a freshly-constructed workspace",
+    );
+}
