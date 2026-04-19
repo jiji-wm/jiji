@@ -1,4 +1,5 @@
 use std::cmp::max;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -17,6 +18,7 @@ use smithay::utils::{Logical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
+use super::activity::ActivityId;
 use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
 use super::scrolling::{
     Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
@@ -115,6 +117,15 @@ pub struct Workspace<W: LayoutElement> {
     /// Sticky flag per DD §3.2. Mutators land in Phase 2; auto-expansion (into
     /// `Workspace.activities`) in Phase 1b. This field is the storage that drives that behaviour.
     pub(super) is_sticky: bool,
+
+    /// Activities this workspace is a member of.
+    ///
+    /// The DD's §3.2 invariant says this set is non-empty for every workspace once
+    /// Phase 1a fully lands. This commit initializes it empty as a bounded relaxation: the
+    /// next checklist box (`Layout.activities` seed) backfills `{seed_id}` for all existing
+    /// workspaces. Until that commit lands, the §3.2 "always non-empty" invariant is
+    /// suspended; mutators / cross-field assertions are deferred per the Phase 1a spec.
+    pub(super) activities: HashSet<ActivityId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -277,6 +288,7 @@ impl<W: LayoutElement> Workspace<W> {
             layout_config,
             id: WorkspaceId::next(),
             is_sticky: false,
+            activities: HashSet::new(),
         }
     }
 
@@ -341,6 +353,7 @@ impl<W: LayoutElement> Workspace<W> {
             layout_config,
             id: WorkspaceId::next(),
             is_sticky: false,
+            activities: HashSet::new(),
         }
     }
 
@@ -360,6 +373,12 @@ impl<W: LayoutElement> Workspace<W> {
     /// Mutators land in Phase 2; auto-expansion in Phase 1b (DD §3.2).
     pub fn is_sticky(&self) -> bool {
         self.is_sticky
+    }
+
+    /// Activities this workspace is a member of. See the field docs for the bounded-relaxation
+    /// note that applies between this commit and the `Layout.activities` seed commit.
+    pub fn activities(&self) -> &HashSet<ActivityId> {
+        &self.activities
     }
 
     pub fn unname(&mut self) {

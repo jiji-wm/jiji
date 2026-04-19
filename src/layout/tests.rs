@@ -4193,4 +4193,74 @@ fn workspace_is_sticky_defaults_false() {
         !ws.is_sticky(),
         "is_sticky must default to false on a freshly-constructed workspace",
     );
+    assert!(
+        ws.activities().is_empty(),
+        "activities must default to empty on Workspace::new_no_outputs",
+    );
+}
+
+fn make_test_output(name: &str) -> Output {
+    let output = Output::new(
+        name.to_owned(),
+        PhysicalProperties {
+            size: Size::from((1280, 720)),
+            subpixel: Subpixel::Unknown,
+            make: String::new(),
+            model: String::new(),
+            serial_number: String::new(),
+        },
+    );
+    output.change_current_state(
+        Some(Mode {
+            size: Size::from((1280, 720)),
+            refresh: 60000,
+        }),
+        None,
+        None,
+        None,
+    );
+    output.user_data().insert_if_missing(|| OutputName {
+        connector: name.to_owned(),
+        make: None,
+        model: None,
+        serial: None,
+    });
+    output
+}
+
+#[test]
+fn workspace_activities_default_empty() {
+    // Pin the bounded-relaxation default: every Workspace ctor leaves `activities` empty
+    // until the Layout.activities seed commit backfills `{seed_id}` for all workspaces.
+    // See `Workspace::activities` field doc.
+    let output = make_test_output("output1");
+
+    let via_new_with_config = Workspace::<TestWindow>::new_with_config(
+        &output,
+        None,
+        Clock::with_time(Duration::ZERO),
+        Default::default(),
+    );
+    assert!(
+        via_new_with_config.activities().is_empty(),
+        "activities must default to empty on Workspace::new_with_config",
+    );
+    assert!(
+        !via_new_with_config.is_sticky(),
+        "is_sticky must default to false on Workspace::new_with_config",
+    );
+
+    let via_no_outputs = Workspace::<TestWindow>::new_with_config_no_outputs(
+        None,
+        Clock::with_time(Duration::ZERO),
+        Default::default(),
+    );
+    assert!(
+        via_no_outputs.activities().is_empty(),
+        "activities must default to empty on Workspace::new_with_config_no_outputs",
+    );
+    assert!(
+        !via_no_outputs.is_sticky(),
+        "is_sticky must default to false on Workspace::new_with_config_no_outputs",
+    );
 }
