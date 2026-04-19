@@ -110,7 +110,7 @@ pub struct Workspace<W: LayoutElement> {
     id: WorkspaceId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OutputId(String);
 
 impl OutputId {
