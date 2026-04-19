@@ -2250,16 +2250,15 @@ impl<W: LayoutElement> Layout<W> {
         is_full_width: bool,
         is_floating: bool,
     ) {
-        // Currently, everything a workspace sets on a Tile is the same across all workspaces of a
-        // monitor. So we can use any workspace, not necessarily the exact target workspace.
-        let tile = monitors[mon_idx]
-            .workspace_at_mut(pool, 0)
-            .make_tile(window);
+        let mon = &monitors[mon_idx];
+        let (workspace_idx, target) = mon.resolve_add_window_target(pool, target);
+        let tile = mon.workspace_at(pool, workspace_idx).make_tile(window);
 
-        Self::add_tile_on(
+        Self::add_resolved_tile_on(
             monitors,
             pool,
             mon_idx,
+            workspace_idx,
             tile,
             target,
             activate,
@@ -2315,9 +2314,38 @@ impl<W: LayoutElement> Layout<W> {
         is_full_width: bool,
         is_floating: bool,
     ) {
-        let mon = &mut monitors[mon_idx];
-        let (mut workspace_idx, target) = mon.resolve_add_window_target(pool, target);
+        let (workspace_idx, target) = monitors[mon_idx].resolve_add_window_target(pool, target);
+        Self::add_resolved_tile_on(
+            monitors,
+            pool,
+            mon_idx,
+            workspace_idx,
+            tile,
+            target,
+            activate,
+            allow_to_activate_workspace,
+            width,
+            is_full_width,
+            is_floating,
+        );
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn add_resolved_tile_on(
+        monitors: &mut [Monitor<W>],
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        mon_idx: usize,
+        mut workspace_idx: usize,
+        tile: Tile<W>,
+        target: WorkspaceAddWindowTarget<W>,
+        activate: ActivateWindow,
+        // FIXME: Refactor ActivateWindow enum to make this better.
+        allow_to_activate_workspace: bool,
+        width: ColumnWidth,
+        is_full_width: bool,
+        is_floating: bool,
+    ) {
+        let mon = &mut monitors[mon_idx];
         let workspace = mon.workspace_at_mut(pool, workspace_idx);
 
         workspace.add_tile(
