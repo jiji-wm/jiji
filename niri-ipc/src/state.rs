@@ -121,8 +121,8 @@ impl EventStreamStatePart for WorkspacesState {
         let workspaces: Vec<_> = self.workspaces.values().cloned().collect();
 
         // Emit per-workspace deltas first, then the full-list event for
-        // backwards-compatible consumers. Per `docs/activities-design.md` §4.6,
-        // consumers that handle the delta events should ignore `WorkspacesChanged`.
+        // backwards-compatible consumers. Consumers that handle the delta events should
+        // ignore `WorkspacesChanged`.
         let mut events: Vec<Event> = workspaces
             .iter()
             .cloned()
@@ -432,9 +432,9 @@ mod tests {
 
     #[test]
     fn delta_events_alone_reconstruct_full_state() {
-        // Phase 0a promise: consumers that ignore WorkspacesChanged and only
-        // process WorkspaceOpenedOrChanged / WorkspaceClosed still get the
-        // correct view of the world.
+        // Consumers that ignore WorkspacesChanged and only process
+        // WorkspaceOpenedOrChanged / WorkspaceClosed still get the correct view
+        // of the world.
         let mut source = WorkspacesState::default();
         source.apply(Event::WorkspaceOpenedOrChanged {
             workspace: ws(1, 1, "HDMI-1"),

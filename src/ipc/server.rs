@@ -891,8 +891,6 @@ impl State {
 /// `WorkspaceActivated`). Then `WorkspaceClosed` for each id in `previous` not
 /// present in `current`. Finally, a single backwards-compatible
 /// `WorkspacesChanged` if any structural change happened in this frame.
-///
-/// See `docs/activities-design.md` §4.5 / §4.6 / §9 (Phase 0a).
 fn diff_workspaces(previous: &HashMap<u64, Workspace>, current: &[Workspace]) -> Vec<Event> {
     let mut events = Vec::new();
     let mut seen = HashSet::with_capacity(current.len());
