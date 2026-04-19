@@ -928,7 +928,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub(super) fn overview_progress_value(&self) -> Option<f64> {
         self.overview_progress.as_ref().map(|p| p.value())
     }
@@ -1608,7 +1608,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.layout_config.as_ref()
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub(super) fn verify_invariants(&self, pool: &HashMap<WorkspaceId, Workspace<W>>) {
         use approx::assert_abs_diff_eq;
 

@@ -2001,17 +2001,17 @@ impl<W: LayoutElement> Workspace<W> {
         self.layout_config.as_ref()
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn scrolling(&self) -> &ScrollingSpace<W> {
         &self.scrolling
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn floating(&self) -> &FloatingSpace<W> {
         &self.floating
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn verify_invariants(&self, move_win_id: Option<&W::Id>) {
         use approx::assert_abs_diff_eq;
 

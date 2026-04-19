@@ -3481,7 +3481,7 @@ impl<W: LayoutElement> Layout<W> {
         compute_overview_zoom(&self.options, progress)
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     fn verify_invariants(&self) {
         use std::collections::HashSet;
 
@@ -6169,6 +6169,17 @@ impl<W: LayoutElement> Layout<W> {
             ws.refresh(false, false);
             ws.view_offset_gesture_end(None);
         }
+
+        // Cross-field invariants (pool ↔ view ids ↔ monitor indices, plus every
+        // per-workspace/column/tile invariant) are only encoded as runtime
+        // convention, not in the type system. Run the full chain once per
+        // refresh tick so drift from any mutation path — activity switches and
+        // other Phase 1a additions included — trips an assert in debug builds
+        // immediately, rather than surfacing later as a corrupt render or a
+        // mysterious panic deep inside a read path. Release builds (which
+        // disable `debug_assertions`) skip this entirely.
+        #[cfg(debug_assertions)]
+        self.verify_invariants();
     }
 
     pub fn workspaces(

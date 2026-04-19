@@ -188,7 +188,7 @@ impl Data {
         self.logical_pos + self.size.downscale(2.)
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     fn verify_invariants(&self) {
         let mut temp = *self;
         temp.recompute_logical_pos();
@@ -1306,7 +1306,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn view_size(&self) -> Size<f64, Logical> {
         self.view_size
     }
@@ -1315,22 +1315,22 @@ impl<W: LayoutElement> FloatingSpace<W> {
         self.working_area
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn scale(&self) -> f64 {
         self.scale
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn clock(&self) -> &Clock {
         &self.clock
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn options(&self) -> &Rc<Options> {
         &self.options
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn verify_invariants(&self) {
         assert!(self.scale > 0.);
         assert!(self.scale.is_finite());

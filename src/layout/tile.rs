@@ -1538,12 +1538,12 @@ impl<W: LayoutElement> Tile<W> {
         &self.options
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn view_size(&self) -> Size<f64, Logical> {
         self.view_size
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn verify_invariants(&self) {
         use approx::assert_abs_diff_eq;
 

@@ -3713,37 +3713,37 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn view_size(&self) -> Size<f64, Logical> {
         self.view_size
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn parent_area(&self) -> Rectangle<f64, Logical> {
         self.parent_area
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn clock(&self) -> &Clock {
         &self.clock
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn options(&self) -> &Rc<Options> {
         &self.options
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn active_column_idx(&self) -> usize {
         self.active_column_idx
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub(super) fn view_offset(&self) -> &ViewOffset {
         &self.view_offset
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn verify_invariants(&self) {
         assert!(self.view_size.w > 0.);
         assert!(self.view_size.h > 0.);
@@ -5351,7 +5351,7 @@ impl<W: LayoutElement> Column<W> {
         false
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     fn verify_invariants(&self) {
         assert!(!self.tiles.is_empty(), "columns can't be empty");
         assert!(self.active_tile_idx < self.tiles.len());
