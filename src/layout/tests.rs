@@ -3231,6 +3231,65 @@ fn interactive_move_from_workspace_with_layout_config() {
 }
 
 #[test]
+fn add_window_to_named_workspace_with_distinct_layout_config() {
+    // Regression guard for the pre-fix `monitors[mon_idx].workspace_at_mut(pool, 0).make_tile(_)`
+    // proxy in `Layout::add_window_on`. The proxy built the new `Tile` against workspace[0]'s
+    // `Rc<Options>`, so `Column::new_with_tile` baked `options.layout.default_column_display`
+    // from workspace[0] into `column.display_mode`. `ScrollingSpace::add_column` then
+    // re-stamps `column.options` and every tile's options with the target's `Rc<Options>`
+    // via `Column::update_config` — which makes `verify_invariants`'s
+    // `Rc::ptr_eq(&self.options, &column.options)` guard at `scrolling.rs` trivially hold —
+    // but `display_mode` is one of the fields `update_config` never recomputes, so it
+    // survives as the only observable footprint of the bug.
+    //
+    // Setup: the target named workspace has `default_column_display: Tabbed`; the pre-existing
+    // trailing empty (workspace[0] from the proxy's perspective) keeps the default `Normal`.
+    // A second named workspace is prepended so the target lands at view position 1 — the
+    // targeted-`AddWindow` path that the proxy would have short-circuited through
+    // workspace[0]. After the add, the column on the target must report `Tabbed`; with the
+    // proxy in place it would report `Normal`.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: Some(1),
+            layout_config: Some(Box::new(niri_config::LayoutPart {
+                default_column_display: Some(ColumnDisplay::Tabbed),
+                ..Default::default()
+            })),
+        },
+        Op::AddNamedWorkspace {
+            ws_name: 2,
+            output_name: Some(1),
+            layout_config: None,
+        },
+        Op::AddWindowToNamedWorkspace {
+            params: TestWindowParams::new(1),
+            ws_name: 1,
+        },
+    ];
+
+    let layout = check_ops(ops);
+
+    let pool = layout.workspace_pool();
+    let mon = &layout.monitors[0];
+    // View after the two `AddNamedWorkspace` ops: [ws2 @ 0, ws1 @ 1, default_empty @ 2].
+    // `ws1` is the `Tabbed` target, at a non-zero position — the proxy would have read
+    // `default_column_display` from `ws2` (position 0) instead.
+    let col = mon
+        .workspace_at(pool, 1)
+        .scrolling()
+        .columns()
+        .next()
+        .expect("a column was just added to ws1");
+    assert_eq!(
+        col.display_mode(),
+        ColumnDisplay::Tabbed,
+        "column must be stamped from the target workspace's options, not workspace[0]'s",
+    );
+}
+
+#[test]
 fn set_width_fixed_negative() {
     let ops = [
         Op::AddOutput(3),

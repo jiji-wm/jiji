@@ -4143,6 +4143,10 @@ impl<W: LayoutElement> Column<W> {
         self.is_pending_maximized
     }
 
+    pub fn display_mode(&self) -> ColumnDisplay {
+        self.display_mode
+    }
+
     pub fn pending_sizing_mode(&self) -> SizingMode {
         if self.is_pending_fullscreen {
             SizingMode::Fullscreen
