@@ -961,7 +961,7 @@ impl Op {
 
                 let pool = &layout.workspaces;
                 for mon in &layout.monitors {
-                    for id in mon.view.ids() {
+                    for id in mon.view().ids() {
                         let ws = pool.get(id).unwrap();
                         for win in ws.windows() {
                             if win.0.id == params.id {
@@ -1024,7 +1024,7 @@ impl Op {
 
                 let pool = &layout.workspaces;
                 for mon in &layout.monitors {
-                    for id in mon.view.ids() {
+                    for id in mon.view().ids() {
                         let ws = pool.get(id).unwrap();
                         for win in ws.windows() {
                             if win.0.id == params.id {
@@ -1232,7 +1232,7 @@ impl Op {
                 let mon = layout.monitor_for_output(&output).unwrap();
 
                 let window_id = window_id.filter(|id| layout.has_window(id));
-                let target_ws_idx = target_ws_idx.filter(|idx| mon.view.len() > *idx);
+                let target_ws_idx = target_ws_idx.filter(|idx| mon.view().len() > *idx);
                 layout.move_to_output(
                     window_id.as_ref(),
                     &output,
@@ -1424,7 +1424,7 @@ impl Op {
                 let pool = &layout.workspaces;
                 'outer: {
                     for mon in &layout.monitors {
-                        for id_ in mon.view.ids() {
+                        for id_ in mon.view().ids() {
                             let ws = pool.get(id_).unwrap();
                             for win in ws.windows() {
                                 if win.0.id == id {
@@ -1481,7 +1481,7 @@ impl Op {
                 let pool = &layout.workspaces;
                 'outer: {
                     for mon in &layout.monitors {
-                        for id_ in mon.view.ids() {
+                        for id_ in mon.view().ids() {
                             let ws = pool.get(id_).unwrap();
                             for win in ws.windows() {
                                 if win.0.id == id {
@@ -1675,7 +1675,7 @@ fn check_ops_on_layout(layout: &mut Layout<TestWindow>, ops: impl IntoIterator<I
 fn verify_output_bindings(layout: &Layout<TestWindow>) {
     let pool = layout.workspace_pool();
     for mon in &layout.monitors {
-        for id in mon.view.ids() {
+        for id in mon.view().ids() {
             let ws = pool.get(id).unwrap();
             for win in ws.windows() {
                 let bound = win.bound_outputs();
@@ -2118,7 +2118,7 @@ fn removing_output_must_keep_empty_focus_on_primary() {
 
     // The workspace from the removed output was inserted at position 0, so the active workspace
     // must change to 1 to keep the focus on the empty workspace.
-    assert_eq!(monitors[0].view.active_position(), 1);
+    assert_eq!(monitors[0].view().active_position(), 1);
 }
 
 #[test]
@@ -2378,10 +2378,10 @@ fn move_workspace_to_output() {
 
     let pool = layout.workspace_pool();
     assert_eq!(active_monitor_idx, 1);
-    assert_eq!(monitors[0].view.len(), 1);
+    assert_eq!(monitors[0].view().len(), 1);
     assert!(!monitors[0].workspace_at(pool, 0).has_windows());
-    assert_eq!(monitors[1].view.active_position(), 0);
-    assert_eq!(monitors[1].view.len(), 2);
+    assert_eq!(monitors[1].view().active_position(), 0);
+    assert_eq!(monitors[1].view().len(), 2);
     assert!(monitors[1].workspace_at(pool, 0).has_windows());
 }
 
@@ -2409,7 +2409,7 @@ fn open_right_of_on_different_workspace() {
 
     let mon = &monitors[0];
     assert_eq!(
-        mon.view.active_position(),
+        mon.view().active_position(),
         1,
         "the second workspace must remain active"
     );
@@ -2452,7 +2452,7 @@ fn open_right_of_on_different_workspace_ewaf() {
 
     let mon = &monitors[0];
     assert_eq!(
-        mon.view.active_position(),
+        mon.view().active_position(),
         2,
         "the second workspace must remain active"
     );
@@ -2804,7 +2804,7 @@ fn output_active_workspace_is_preserved() {
 
     let monitors = layout.monitors;
 
-    assert_eq!(monitors[0].view.active_position(), 1);
+    assert_eq!(monitors[0].view().active_position(), 1);
 }
 
 #[test]
@@ -2827,7 +2827,7 @@ fn output_active_workspace_is_preserved_with_other_outputs() {
 
     let monitors = layout.monitors;
 
-    assert_eq!(monitors[1].view.active_position(), 1);
+    assert_eq!(monitors[1].view().active_position(), 1);
 }
 
 #[test]
@@ -2987,13 +2987,13 @@ fn move_workspace_to_idx_active_at_top_empty_under_ewaf() {
     let monitors = &layout.monitors;
     let m = &monitors[0];
     let named: Vec<bool> = m
-        .view
+        .view()
         .ids()
         .iter()
         .map(|id| pool.get(id).unwrap().has_windows_or_name())
         .collect();
 
-    assert_eq!(m.view.len(), 6, "expected 6 workspaces, got {named:?}");
+    assert_eq!(m.view().len(), 6, "expected 6 workspaces, got {named:?}");
     assert_eq!(
         named,
         vec![false, true, true, false, true, false],
@@ -3036,7 +3036,7 @@ fn add_output_consolidation_preserves_ewaf_pin() {
     let layout = check_ops_with_options(options, ops);
 
     let monitors = layout.monitors;
-    assert_eq!(monitors[0].view.active_position(), 1);
+    assert_eq!(monitors[0].view().active_position(), 1);
 }
 
 #[test]
@@ -3752,7 +3752,7 @@ fn move_column_to_workspace_down_focus_false_on_floating_window() {
 
     let monitors = layout.monitors;
 
-    assert_eq!(monitors[0].view.active_position(), 0);
+    assert_eq!(monitors[0].view().active_position(), 0);
 }
 
 #[test]
@@ -3773,7 +3773,7 @@ fn move_column_to_workspace_focus_false_on_floating_window() {
 
     let monitors = layout.monitors;
 
-    assert_eq!(monitors[0].view.active_position(), 0);
+    assert_eq!(monitors[0].view().active_position(), 0);
 }
 
 #[test]

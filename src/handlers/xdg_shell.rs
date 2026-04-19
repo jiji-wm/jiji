@@ -41,7 +41,7 @@ use crate::input::move_grab::MoveGrab;
 use crate::input::resize_grab::ResizeGrab;
 use crate::input::touch_resize_grab::TouchResizeGrab;
 use crate::input::{PointerOrTouchStartData, DOUBLE_CLICK_TIME};
-use crate::layout::{ActivateWindow, LayoutCtx};
+use crate::layout::ActivateWindow;
 use crate::niri::{CastTarget, PopupGrabState, State};
 use crate::utils::transaction::Transaction;
 use crate::utils::{
@@ -321,9 +321,8 @@ impl XdgShellHandler for State {
                     return;
                 }
 
-                let pool = self.niri.layout.workspace_pool();
                 let mon = self.niri.layout.monitor_for_output(output).unwrap();
-                let ctx = LayoutCtx::new(pool, mon.view());
+                let ctx = self.niri.layout.ctx_for(mon);
                 if !mon.render_above_top_layer(ctx)
                     && layers.layers_on(Layer::Top).any(|l| {
                         (l.cached_state().keyboard_interactivity

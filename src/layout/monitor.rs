@@ -15,7 +15,8 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 use super::activity::{ActivityId, WorkspaceView};
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::workspace::{
-    compute_working_area, Workspace, WorkspaceAddWindowTarget, WorkspaceId, WorkspaceRenderElement,
+    compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
+    WorkspaceRenderElement,
 };
 use super::{compute_overview_zoom, HitType, LayoutCtx, LayoutElement, Options};
 use crate::animation::{Animation, Clock};
@@ -423,10 +424,31 @@ impl<W: LayoutElement> Monitor<W> {
         &self.output_name
     }
 
-    /// Access the per-monitor workspace view. Use with [`LayoutCtx::new`] to
-    /// build the render/hit-test context for this monitor.
+    /// Stable identifier of this monitor's output.
+    ///
+    /// Equivalent to `OutputId::new(self.output())`, exposed as a shortcut for
+    /// callers that need to key lookups (e.g. `Layout::active_view`) by
+    /// monitor identity without reaching through `output()` themselves.
+    pub fn output_id(&self) -> OutputId {
+        OutputId::new(&self.output)
+    }
+
+    /// Access the per-monitor workspace view. When [`Layout`] is reachable,
+    /// prefer [`Layout::active_view`] for view-only reads or [`Layout::ctx_for`]
+    /// for render/hit-test contexts; this accessor exists for fallback call sites
+    /// that can't reach those seams (detached monitors post-`remove`, or
+    /// split-borrow contexts post-[`Layout::monitors_and_pool_mut`]).
     pub fn view(&self) -> &WorkspaceView {
         &self.view
+    }
+
+    /// Writer counterpart to [`Self::view`] used by call sites that have
+    /// already split `self` into disjoint field borrows (e.g. via
+    /// `Layout::monitors_and_pool_mut`) and therefore cannot reach the
+    /// `Layout::active_view_mut` seam. Direct field access is reserved to
+    /// `monitor.rs` internals.
+    pub(super) fn view_mut(&mut self) -> &mut WorkspaceView {
+        &mut self.view
     }
 
     pub fn active_workspace_idx(&self) -> usize {

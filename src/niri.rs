@@ -141,7 +141,7 @@ use crate::layer::MappedLayer;
 use crate::layout::tile::TileRenderElement;
 use crate::layout::workspace::{Workspace, WorkspaceId};
 use crate::layout::{
-    HitType, Layout, LayoutCtx, LayoutElement as _, LayoutElementRenderElement,
+    HitType, Layout, LayoutElement as _, LayoutElementRenderElement,
     MonitorRenderElement,
 };
 use crate::niri_render_elements;
@@ -1148,9 +1148,8 @@ impl State {
         } else if self.niri.window_mru_ui.is_open() {
             KeyboardFocus::Mru
         } else if let Some(output) = self.niri.layout.active_output() {
-            let pool_ = self.niri.layout.workspace_pool();
             let mon = self.niri.layout.monitor_for_output(output).unwrap();
-            let ctx_ = LayoutCtx::new(pool_, mon.view());
+            let ctx_ = self.niri.layout.ctx_for(mon);
             let layers = layer_map_for_output(output);
 
             // Explicitly check for layer-shell popup grabs here, our keyboard focus will stay on
@@ -3142,9 +3141,8 @@ impl Niri {
             return true;
         }
 
-        let pool = self.layout.workspace_pool();
         let mon = self.layout.monitor_for_output(output).unwrap();
-        let ctx = LayoutCtx::new(pool, mon.view());
+        let ctx = self.layout.ctx_for(mon);
         if mon.render_above_top_layer(ctx) {
             return false;
         }
@@ -3186,9 +3184,8 @@ impl Niri {
                     layer_pos_within_output += mapped.bob_offset();
 
                     // Background and bottom layers move together with the workspaces.
-                    let pool = self.layout.workspace_pool();
                     let mon = self.layout.monitor_for_output(output)?;
-                    let ctx = LayoutCtx::new(pool, mon.view());
+                    let ctx = self.layout.ctx_for(mon);
                     let (_, geo) = mon.workspace_under(ctx, pos_within_output)?;
                     layer_pos_within_output += geo.loc;
 
@@ -3351,9 +3348,8 @@ impl Niri {
 
                     // Background and bottom layers move together with the workspaces.
                     if matches!(layer, Layer::Background | Layer::Bottom) {
-                        let pool = self.layout.workspace_pool();
                         let mon = self.layout.monitor_for_output(output)?;
-                        let ctx = LayoutCtx::new(pool, mon.view());
+                        let ctx = self.layout.ctx_for(mon);
                         let (_, geo) = mon.workspace_under(ctx, pos_within_output)?;
                         layer_pos_within_output += geo.loc;
                         // Don't need to deal with zoom here because in the overview background and
@@ -3410,9 +3406,8 @@ impl Niri {
                 .map(mapped_hit_data)
         };
 
-        let pool = self.layout.workspace_pool();
         let mon = self.layout.monitor_for_output(output).unwrap();
-        let ctx = LayoutCtx::new(pool, mon.view());
+        let ctx = self.layout.ctx_for(mon);
 
         let mut under =
             layer_popup_under(Layer::Overlay).or_else(|| layer_toplevel_under(Layer::Overlay));
@@ -4124,9 +4119,8 @@ impl Niri {
                 let size = transform.transform_size(mode.size);
 
                 state.xray.workspaces.clear();
-                let pool = self.layout.workspace_pool();
                 let mon = self.layout.monitor_for_output(out).unwrap();
-                let lctx = LayoutCtx::new(pool, mon.view());
+                let lctx = self.layout.ctx_for(mon);
                 for (ws, geo) in mon.workspaces_with_render_geo(lctx) {
                     let bg_color = ws.render_background().color();
                     state.xray.workspaces.push((geo, bg_color));
@@ -4312,9 +4306,8 @@ impl Niri {
         let focus_ring = !self.layout.interactive_move_is_moving_above_output(output);
 
         // Get monitor elements.
-        let pool = self.layout.workspace_pool();
         let mon = self.layout.monitor_for_output(output).unwrap();
-        let lctx = LayoutCtx::new(pool, mon.view());
+        let lctx = self.layout.ctx_for(mon);
         let zoom = mon.overview_zoom();
 
         // Get layer-shell elements.

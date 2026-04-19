@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use niri::animation::Clock;
 use niri::layout::{
-    ActivateWindow, AddWindowTarget, LayoutCtx, LayoutElement as _, Options, SizingMode,
+    ActivateWindow, AddWindowTarget, LayoutElement as _, Options, SizingMode,
 };
 use niri::render_helpers::{RenderCtx, RenderTarget};
 use niri_config::{Color, OutputName, PresetSize};
@@ -272,9 +272,8 @@ impl TestCase for Layout {
         self.layout.update_render_elements(Some(&self.output));
 
         let mut rv = Vec::new();
-        let pool = self.layout.workspace_pool();
         let mon = self.layout.monitor_for_output(&self.output).unwrap();
-        let lctx = LayoutCtx::new(pool, mon.view());
+        let lctx = self.layout.ctx_for(mon);
         let ctx = RenderCtx {
             renderer,
             target: RenderTarget::Output,
