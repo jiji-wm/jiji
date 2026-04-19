@@ -6170,16 +6170,21 @@ impl<W: LayoutElement> Layout<W> {
             ws.view_offset_gesture_end(None);
         }
 
-        // Cross-field invariants (pool ↔ view ids ↔ monitor indices, plus every
-        // per-workspace/column/tile invariant) are only encoded as runtime
-        // convention, not in the type system. Run the full chain once per
-        // refresh tick so drift from any mutation path — activity switches and
-        // other Phase 1a additions included — trips an assert in debug builds
-        // immediately, rather than surfacing later as a corrupt render or a
-        // mysterious panic deep inside a read path. Release builds (which
-        // disable `debug_assertions`) skip this entirely.
+        // Cross-field invariants (pool keys ↔ per-view ordered ids, plus
+        // monitor-level index bounds and every per-workspace/column/tile
+        // invariant) are only encoded as runtime convention, not in the type
+        // system. Run the full chain once per refresh tick so drift from any
+        // mutation path trips an assert in debug builds immediately, rather
+        // than surfacing later as a corrupt render or a mysterious panic deep
+        // inside a read path. This fires on every input event, surface commit,
+        // and frame callback in debug builds; the Tracy span below lets a
+        // future session decide whether per-Nth gating is worth it. Release
+        // builds (which disable `debug_assertions`) skip this entirely.
         #[cfg(debug_assertions)]
-        self.verify_invariants();
+        {
+            let _span = tracy_client::span!("Layout::verify_invariants");
+            self.verify_invariants();
+        }
     }
 
     pub fn workspaces(
