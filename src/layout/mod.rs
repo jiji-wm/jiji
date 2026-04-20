@@ -6929,6 +6929,49 @@ impl<W: LayoutElement> Layout<W> {
         self.workspaces.values_mut()
     }
 
+    /// Every workspace in the pool, crossing activity boundaries.
+    /// Order is not guaranteed (iterates the HashMap). Intended for callers
+    /// that intentionally need the full cross-activity view, e.g. IPC
+    /// responses that expose `idx = 0` rows for hidden workspaces (DD §3.5,
+    /// §5.7), `FocusWindow { id }` lookup against hidden workspaces
+    /// (DD §5.18), and config-reload / urgency paths.
+    ///
+    /// Each item pairs the workspace with its bound output id (via
+    /// [`Workspace::output_id`]); `None` indicates a pool workspace that is
+    /// not currently bound to any monitor. No interactive-move prepend —
+    /// callers that need the interactive-move tile should inspect
+    /// `self.interactive_move` directly.
+    ///
+    /// For monitor-ordered iteration of the active activity's workspaces
+    /// (connected outputs) followed by disconnected entries, use
+    /// [`Self::workspaces`].
+    pub fn workspaces_all(&self) -> impl Iterator<Item = (Option<&OutputId>, &Workspace<W>)> + '_ {
+        self.workspaces.values().map(|ws| (ws.output_id(), ws))
+    }
+
+    /// Workspaces that (a) are members of `activity_id` and (b) are bound
+    /// to `output_id`. Order is pool order (unsorted). Callers that need a
+    /// stable user-facing order ("config-declared first, then creation
+    /// order") must sort the result themselves.
+    ///
+    /// Sticky workspaces are included naturally: the filter is pure
+    /// activity-set membership, so any sticky workspace whose `activities`
+    /// set contains `activity_id` is returned.
+    ///
+    /// Precondition: `activity_id` should be a live key in
+    /// `self.activities`. An unknown id yields an empty iterator silently;
+    /// callers that want a hard gate should check [`Activities::contains`]
+    /// before calling.
+    pub fn workspaces_with_activity<'a>(
+        &'a self,
+        activity_id: ActivityId,
+        output_id: &'a OutputId,
+    ) -> impl Iterator<Item = &'a Workspace<W>> + 'a {
+        self.workspaces.values().filter(move |ws| {
+            ws.output_id() == Some(output_id) && ws.activities().contains(&activity_id)
+        })
+    }
+
     pub fn windows(&self) -> impl Iterator<Item = (Option<&Monitor<W>>, &W)> {
         let moving_window = self
             .interactive_move

@@ -4453,3 +4453,203 @@ fn layout_switch_activity_no_op_preserves_verify_invariants() {
     assert_eq!(layout.active_activity_id(), seed_id);
     layout.verify_invariants();
 }
+
+#[test]
+fn workspaces_all_covers_pool_including_disconnected() {
+    // Remove the only output so both named workspaces land in
+    // `disconnected_workspace_ids`. `workspaces_all` must still yield them,
+    // since it is pool-driven and ignores monitor/view structure.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+        Op::AddNamedWorkspace {
+            ws_name: 2,
+            output_name: None,
+            layout_config: None,
+        },
+        Op::RemoveOutput(1),
+    ];
+    let layout = check_ops(ops);
+
+    assert!(layout.monitors.is_empty());
+    assert_eq!(layout.disconnected_workspace_ids.len(), 2);
+
+    let pool_count = layout.workspaces.len();
+    let walked: Vec<_> = layout.workspaces_all().collect();
+    assert_eq!(
+        walked.len(),
+        pool_count,
+        "workspaces_all must yield every pool entry exactly once",
+    );
+
+    // The disconnected_workspace_ids set must be fully covered, regardless
+    // of what affinity `output_id` each disconnected workspace still
+    // carries (unbind_output does not clear the id — it is preserved as a
+    // reconnect hint).
+    let seen_ids: HashSet<WorkspaceId> = walked.iter().map(|(_, ws)| ws.id()).collect();
+    for id in &layout.disconnected_workspace_ids {
+        assert!(
+            seen_ids.contains(id),
+            "workspaces_all missed disconnected workspace {id:?}",
+        );
+    }
+
+    // Every tuple's output_id must equal the workspace's own output_id —
+    // `workspaces_all` is a faithful mirror of `Workspace::output_id`.
+    for (output_id, ws) in &walked {
+        assert_eq!(*output_id, ws.output_id());
+    }
+}
+
+#[test]
+fn workspaces_all_output_id_matches_workspace() {
+    // Two connected outputs + no manual removal: every workspace is bound.
+    // `workspaces_all`'s first tuple element must exactly mirror
+    // `Workspace::output_id` for every yielded entry.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let layout = check_ops(ops);
+
+    assert!(!layout.monitors.is_empty());
+    let pool_count = layout.workspaces.len();
+    let mut yielded = 0;
+    for (output_id, ws) in layout.workspaces_all() {
+        assert_eq!(
+            output_id,
+            ws.output_id(),
+            "workspaces_all output_id must mirror Workspace::output_id for id={:?}",
+            ws.id(),
+        );
+        yielded += 1;
+    }
+    assert_eq!(yielded, pool_count);
+}
+
+#[test]
+fn workspaces_with_activity_filters_by_membership() {
+    // Seed activity alpha: on-output workspace stamped with alpha.
+    // Insert a second activity beta and stamp one pool workspace with beta
+    // only. `workspaces_with_activity(alpha, …)` must not see the
+    // beta-only workspace; `workspaces_with_activity(beta, …)` must see it
+    // and only it (on that output).
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    // Mint a distinct activity and install it in the pool (test-only
+    // path). `Activity::new_runtime` mints a fresh id; capture it so we
+    // can stamp a workspace with that id and query it via the filter.
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta = beta_activity.id();
+    layout.activities.test_insert(beta_activity);
+
+    // Pick one pool workspace and re-stamp its activity set to beta-only.
+    // Direct field mutation is legal here: tests live in the `super` module
+    // and `Workspace::activities` is `pub(super)`.
+    let beta_ws_id = {
+        let ws = layout
+            .workspaces
+            .values_mut()
+            .find(|ws| ws.output_id() == Some(&mon_out))
+            .expect("at least one workspace must be bound to the connected output");
+        ws.activities.clear();
+        ws.activities.insert(beta);
+        ws.id()
+    };
+
+    let alpha_ids: HashSet<WorkspaceId> = layout
+        .workspaces_with_activity(alpha, &mon_out)
+        .map(|ws| ws.id())
+        .collect();
+    assert!(
+        !alpha_ids.contains(&beta_ws_id),
+        "alpha filter must exclude the beta-only workspace",
+    );
+
+    let beta_ids: HashSet<WorkspaceId> = layout
+        .workspaces_with_activity(beta, &mon_out)
+        .map(|ws| ws.id())
+        .collect();
+    assert_eq!(
+        beta_ids,
+        HashSet::from([beta_ws_id]),
+        "beta filter on this output must yield exactly the beta-stamped workspace",
+    );
+}
+
+#[test]
+fn workspaces_with_activity_respects_output_filter() {
+    // Two outputs; every pool workspace carries the seed activity. The
+    // filter must partition strictly by `output_id` — a workspace bound to
+    // output1 must not surface under the output2 query and vice versa.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let layout = check_ops(ops);
+    let seed = layout.active_activity_id();
+    let out1 = layout.monitors[0].output_id();
+    let out2 = layout.monitors[1].output_id();
+    assert_ne!(out1, out2);
+
+    let on_out1: HashSet<WorkspaceId> = layout
+        .workspaces_with_activity(seed, &out1)
+        .map(|ws| ws.id())
+        .collect();
+    let on_out2: HashSet<WorkspaceId> = layout
+        .workspaces_with_activity(seed, &out2)
+        .map(|ws| ws.id())
+        .collect();
+
+    assert!(!on_out1.is_empty(), "out1 filter must yield at least one");
+    assert!(!on_out2.is_empty(), "out2 filter must yield at least one");
+    assert!(
+        on_out1.is_disjoint(&on_out2),
+        "a workspace cannot be bound to two outputs simultaneously",
+    );
+
+    for (_, ws) in layout.workspaces_all() {
+        if let Some(bound) = ws.output_id() {
+            if *bound == out1 {
+                assert!(on_out1.contains(&ws.id()));
+                assert!(!on_out2.contains(&ws.id()));
+            } else if *bound == out2 {
+                assert!(on_out2.contains(&ws.id()));
+                assert!(!on_out1.contains(&ws.id()));
+            }
+        }
+    }
+}
+
+#[test]
+fn workspaces_with_activity_includes_sticky() {
+    // A sticky workspace whose `activities` set contains the query id must
+    // surface through the filter — `is_sticky` is not a separate code path
+    // in the helper, it is pure membership. The auto-expansion that keeps
+    // sticky workspaces in every activity's set is tested elsewhere; here
+    // we only pin the filter's behavior given a sticky+member workspace.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let sticky_id = {
+        let ws = layout
+            .workspaces
+            .values_mut()
+            .find(|ws| ws.output_id() == Some(&mon_out))
+            .expect("at least one workspace must be bound to the connected output");
+        ws.is_sticky = true;
+        ws.id()
+    };
+
+    let ids: HashSet<WorkspaceId> = layout
+        .workspaces_with_activity(seed, &mon_out)
+        .map(|ws| ws.id())
+        .collect();
+    assert!(
+        ids.contains(&sticky_id),
+        "sticky workspace with seed in its activity set must appear in the filter",
+    );
+}
