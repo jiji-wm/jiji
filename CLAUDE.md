@@ -72,7 +72,7 @@ Fork-specific structural additions the upstream doc doesn't cover:
 
 - **`Layout<W>.workspaces: HashMap<WorkspaceId, Workspace<W>>`** — canonical workspace pool (Phase 0b-2 sub-step 3a Part 1, `ddba4bf8`).
 - **`Layout.monitors` / `primary_idx` / `active_monitor_idx` / `disconnected_workspace_ids`** as flat fields on `Layout` (previously wrapped in `MonitorSet::Normal` / `::NoOutputs`; flattened in sub-step 3d, `027ce682`).
-- **`Monitor.view: WorkspaceView`** — ordered `Vec<WorkspaceId>` + navigation methods; `view.ids[i]` is the monitor's canonical ordering.
+- **`Activity.views: HashMap<OutputId, WorkspaceView>`** — per-output ordered `Vec<WorkspaceId>` + navigation methods; for the active activity this is the authoritative storage read via `Layout::active_view(&output_id)` (Phase 1a Part 2, `41df7cbc`).
 - **`LayoutCtx<'_, W>`** — borrow-bundle (`&pool`, `&view`) for read-path methods that need both (sub-step 3b, `d7d1402b` / `faef2fe1`).
 - **`Workspace::bind_output` / `unbind_output`** split — previously a single `set_output`; split in sub-step 2 to keep `output_enter` / `output_leave` firing disciplines distinct.
 
