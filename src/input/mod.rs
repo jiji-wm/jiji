@@ -8,7 +8,7 @@ use input::event::gesture::GestureEventCoordinates as _;
 use niri_config::{
     Action, Bind, Binds, Config, Key, ModKey, Modifiers, MruDirection, SwitchBinds, Trigger,
 };
-use niri_ipc::LayoutSwitchTarget;
+use niri_ipc::{ActivityReferenceArg, LayoutSwitchTarget};
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
     GestureBeginEvent, GestureEndEvent, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
@@ -1540,6 +1540,32 @@ impl State {
                 self.niri.layer_shell_on_demand_focus = None;
                 // FIXME: granular
                 self.niri.queue_redraw_all();
+            }
+            Action::SwitchActivity(reference) => {
+                // niri-config holds its own ActivityReference to keep config
+                // types independent of niri-ipc's wire enums; layout's API
+                // speaks the IPC type, so map variants at the boundary.
+                let arg: ActivityReferenceArg = reference.into();
+                if let Some(id) = self.niri.layout.resolve_activity_ref(&arg) {
+                    self.niri.layout.switch_activity(id);
+                    self.maybe_warp_cursor_to_focus();
+                    self.niri.layer_shell_on_demand_focus = None;
+                    self.niri.queue_redraw_all();
+                } else {
+                    warn!("switch_activity: activity not found: {arg:?}");
+                }
+            }
+            Action::SwitchActivityPrevious => {
+                self.niri.layout.switch_activity_previous();
+                self.maybe_warp_cursor_to_focus();
+                self.niri.layer_shell_on_demand_focus = None;
+                self.niri.queue_redraw_all();
+            }
+            Action::CreateActivity(_name) => {
+                warn!("CreateActivity: not yet implemented (Phase 1a, DD line 1818)");
+            }
+            Action::RemoveActivity(_reference) => {
+                warn!("RemoveActivity: not yet implemented (Phase 1a, DD line 1818)");
             }
             Action::MoveWorkspaceDown => {
                 self.niri.layout.move_workspace_down();

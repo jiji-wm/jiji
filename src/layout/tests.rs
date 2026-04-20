@@ -4455,6 +4455,46 @@ fn layout_switch_activity_no_op_preserves_verify_invariants() {
 }
 
 #[test]
+fn layout_switch_activity_previous_no_op_when_no_previous() {
+    // Fresh pool: no previous activity has ever been recorded, so the call
+    // must be a pure no-op — neither the active cursor nor `previous` moves.
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+    assert_eq!(layout.activities.previous_id(), None);
+
+    layout.switch_activity_previous();
+
+    assert_eq!(layout.active_activity_id(), seed_id);
+    assert_eq!(layout.activities.previous_id(), None);
+    layout.verify_invariants();
+}
+
+#[test]
+fn resolve_activity_ref_by_id_and_name() {
+    let layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+    let seed_name = layout.activities.active().name().to_owned();
+
+    assert_eq!(
+        layout.resolve_activity_ref(&ActivityReferenceArg::Id(seed_id.get())),
+        Some(seed_id),
+    );
+    assert_eq!(
+        layout.resolve_activity_ref(&ActivityReferenceArg::Name(seed_name)),
+        Some(seed_id),
+    );
+
+    assert_eq!(
+        layout.resolve_activity_ref(&ActivityReferenceArg::Id(u64::MAX)),
+        None,
+    );
+    assert_eq!(
+        layout.resolve_activity_ref(&ActivityReferenceArg::Name("does-not-exist".into())),
+        None,
+    );
+}
+
+#[test]
 fn workspaces_all_covers_pool_including_disconnected() {
     // Remove the only output so both named workspaces land in
     // `disconnected_workspace_ids`. `workspaces_all` must still yield them,

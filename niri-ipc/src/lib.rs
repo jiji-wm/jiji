@@ -946,6 +946,53 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(long))]
         path: Option<String>,
     },
+    /// Create a runtime (ephemeral) activity.
+    ///
+    /// The new activity exists only for the current session — it is not
+    /// persisted anywhere. External tools can promote it to config-declared
+    /// by appending `activity "Name"` to the config file and triggering a
+    /// reload. On next reload, the runtime activity's name matches the new
+    /// config entry and it is promoted.
+    ///
+    /// Returns `Response::Handled`. To obtain the new activity's ID, use the
+    /// event stream: `ActivityCreated` is emitted immediately after creation
+    /// with the full `Activity` struct.
+    ///
+    /// **Phase 1a stub:** not yet implemented — currently logs and returns
+    /// `Response::Handled` without creating an activity or emitting an event.
+    /// The full implementation lands with the lifecycle box in Phase 1a.
+    CreateActivity {
+        /// Name for the new activity.
+        name: String,
+    },
+    /// Remove a runtime activity. Errors for config-declared activities —
+    /// to remove those, edit the config file and trigger a reload.
+    ///
+    /// Errors if any workspace exclusively belonging to this activity has
+    /// windows. The caller must close/move those windows first. Empty
+    /// exclusive workspaces are destroyed; shared workspaces simply have the
+    /// removed activity pruned from their set.
+    ///
+    /// Errors if this is the last remaining activity (at least one must exist).
+    ///
+    /// **Phase 1a stub:** not yet implemented — currently logs and returns
+    /// `Response::Handled` without removing an activity or emitting an event.
+    /// The full implementation lands with the lifecycle box in Phase 1a.
+    RemoveActivity {
+        /// Activity to remove.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
+        activity: ActivityReferenceArg,
+    },
+    /// Switch to an activity.
+    SwitchActivity {
+        /// Activity to switch to.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
+        activity: ActivityReferenceArg,
+    },
+    /// Switch to the previously active activity (toggle between last two).
+    /// This is history-based, not sequential — activities represent named
+    /// contexts, not a linear sequence.
+    SwitchActivityPrevious {},
 }
 
 /// Change in window or column size.
@@ -985,6 +1032,19 @@ pub enum WorkspaceReferenceArg {
     /// Index of the workspace.
     Index(u8),
     /// Name of the workspace.
+    Name(String),
+}
+
+/// Reference to an activity by id or name.
+///
+/// Activities have no stable positional index — unlike workspaces they are
+/// referenced by name or id only (see the activities design doc §4.4).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub enum ActivityReferenceArg {
+    /// Activity id.
+    Id(u64),
+    /// Activity name.
     Name(String),
 }
 
@@ -1764,6 +1824,20 @@ impl FromStr for WorkspaceReferenceArg {
             Self::Name(s.to_string())
         };
 
+        Ok(reference)
+    }
+}
+
+impl FromStr for ActivityReferenceArg {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Activities have no positional index: integer → Id, anything else → Name.
+        let reference = if let Ok(id) = s.parse::<u64>() {
+            Self::Id(id)
+        } else {
+            Self::Name(s.to_string())
+        };
         Ok(reference)
     }
 }

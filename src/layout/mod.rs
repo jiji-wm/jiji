@@ -42,7 +42,9 @@ use niri_config::utils::MergeWith as _;
 use niri_config::{
     Config, CornerRadius, LayoutPart, PresetSize, Workspace as WorkspaceConfig, WorkspaceReference,
 };
-use niri_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
+use niri_ipc::{
+    ActivityReferenceArg, ColumnDisplay, PositionChange, SizeChange, WindowLayout,
+};
 use scrolling::{Column, ColumnWidth};
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
@@ -3724,6 +3726,41 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         self.activities.set_active(target);
+    }
+
+    /// Switch to the previously-active activity (history-based toggle).
+    ///
+    /// Early-returns when no previous activity has been recorded. Otherwise
+    /// delegates to [`Self::switch_activity`], which supplies the no-op
+    /// fast-path and live-id validation. History-based, not sequential — see
+    /// the activities design doc §5.13.
+    pub(crate) fn switch_activity_previous(&mut self) {
+        let Some(prev) = self.activities.previous_id() else {
+            return;
+        };
+        self.switch_activity(prev);
+    }
+
+    /// Resolve an [`ActivityReferenceArg`] to an [`ActivityId`] if the pool
+    /// contains a matching activity, `None` otherwise.
+    ///
+    /// Names are unique across the activity pool (design doc §5.14), so the
+    /// first-match walk is deterministic. `ActivityId` is opaque: the `Id`
+    /// variant scans `iter()` comparing raw `u64` values rather than hashing
+    /// into the underlying `IndexMap`.
+    pub(crate) fn resolve_activity_ref(&self, r: &ActivityReferenceArg) -> Option<ActivityId> {
+        match r {
+            ActivityReferenceArg::Id(raw) => self
+                .activities
+                .iter()
+                .find(|a| a.id().get() == *raw)
+                .map(|a| a.id()),
+            ActivityReferenceArg::Name(s) => self
+                .activities
+                .iter()
+                .find(|a| a.name() == s)
+                .map(|a| a.id()),
+        }
     }
 
     pub fn consume_into_column(&mut self) {

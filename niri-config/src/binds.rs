@@ -7,7 +7,8 @@ use bitflags::bitflags;
 use knuffel::errors::DecodeError;
 use miette::miette;
 use niri_ipc::{
-    ColumnDisplay, LayoutSwitchTarget, PositionChange, SizeChange, WorkspaceReferenceArg,
+    ActivityReferenceArg, ColumnDisplay, LayoutSwitchTarget, PositionChange, SizeChange,
+    WorkspaceReferenceArg,
 };
 use smithay::input::keyboard::keysyms::KEY_NoSymbol;
 use smithay::input::keyboard::xkb::{keysym_from_name, KEYSYM_CASE_INSENSITIVE, KEYSYM_NO_FLAGS};
@@ -390,6 +391,13 @@ pub enum Action {
     MruSetScope(MruScope),
     #[knuffel(skip)]
     MruCycleScope,
+    #[knuffel(skip)]
+    CreateActivity(String),
+    #[knuffel(skip)]
+    RemoveActivity(ActivityReference),
+    #[knuffel(skip)]
+    SwitchActivity(ActivityReference),
+    SwitchActivityPrevious,
 }
 
 impl From<niri_ipc::Action> for Action {
@@ -701,6 +709,10 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::SetWindowUrgent { id } => Self::SetWindowUrgent(id),
             niri_ipc::Action::UnsetWindowUrgent { id } => Self::UnsetWindowUrgent(id),
             niri_ipc::Action::LoadConfigFile { path } => Self::LoadConfigFile(path),
+            niri_ipc::Action::CreateActivity { name } => Self::CreateActivity(name),
+            niri_ipc::Action::RemoveActivity { activity } => Self::RemoveActivity(activity.into()),
+            niri_ipc::Action::SwitchActivity { activity } => Self::SwitchActivity(activity.into()),
+            niri_ipc::Action::SwitchActivityPrevious {} => Self::SwitchActivityPrevious,
             // niri_ipc::Action is #[non_exhaustive]: any new variant added to
             // niri_ipc without a matching arm here is a coding error that
             // surfaces as a panic when the unmapped action is dispatched.
@@ -722,6 +734,68 @@ impl From<WorkspaceReferenceArg> for WorkspaceReference {
             WorkspaceReferenceArg::Id(id) => Self::Id(id),
             WorkspaceReferenceArg::Index(i) => Self::Index(i),
             WorkspaceReferenceArg::Name(n) => Self::Name(n),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ActivityReference {
+    Id(u64),
+    Name(String),
+}
+
+impl From<ActivityReferenceArg> for ActivityReference {
+    fn from(reference: ActivityReferenceArg) -> ActivityReference {
+        match reference {
+            ActivityReferenceArg::Id(id) => Self::Id(id),
+            ActivityReferenceArg::Name(n) => Self::Name(n),
+        }
+    }
+}
+
+impl From<ActivityReference> for ActivityReferenceArg {
+    fn from(r: ActivityReference) -> Self {
+        match r {
+            ActivityReference::Id(id) => Self::Id(id),
+            ActivityReference::Name(n) => Self::Name(n),
+        }
+    }
+}
+
+impl<S: knuffel::traits::ErrorSpan> knuffel::DecodeScalar<S> for ActivityReference {
+    fn type_check(
+        type_name: &Option<knuffel::span::Spanned<knuffel::ast::TypeName, S>>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) {
+        if let Some(type_name) = &type_name {
+            ctx.emit_error(DecodeError::unexpected(
+                type_name,
+                "type name",
+                "no type name expected for this node",
+            ));
+        }
+    }
+
+    fn raw_decode(
+        val: &knuffel::span::Spanned<knuffel::ast::Literal, S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<ActivityReference, DecodeError<S>> {
+        match &**val {
+            knuffel::ast::Literal::String(ref s) => Ok(ActivityReference::Name(s.clone().into())),
+            knuffel::ast::Literal::Int(ref value) => match value.try_into() {
+                Ok(v) => Ok(ActivityReference::Id(v)),
+                Err(e) => {
+                    ctx.emit_error(DecodeError::conversion(val, e));
+                    Ok(ActivityReference::Id(0))
+                }
+            },
+            _ => {
+                ctx.emit_error(DecodeError::unsupported(
+                    val,
+                    "Unsupported value, only numbers and strings are recognized",
+                ));
+                Ok(ActivityReference::Id(0))
+            }
         }
     }
 }
