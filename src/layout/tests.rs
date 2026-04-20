@@ -4645,6 +4645,108 @@ fn switch_activity_with_tagged_workspace_builds_view_from_pool() {
 }
 
 #[test]
+fn switch_activity_creates_views_for_all_connected_monitors() {
+    // ensure_active_views loops over every connected monitor. With two outputs,
+    // switching to a brand-new activity must populate a view entry for *each*
+    // output — not just the first one the loop visits.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let out1 = layout.monitors[0].output_id();
+    let out2 = layout.monitors[1].output_id();
+    assert_ne!(out1, out2);
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.test_insert(beta);
+
+    layout.switch_activity(beta_id);
+
+    assert_eq!(layout.active_activity_id(), beta_id);
+    let beta_views = layout.activities.active().views();
+    assert_eq!(
+        beta_views.len(),
+        2,
+        "ensure_active_views must cover both connected outputs",
+    );
+    assert!(
+        beta_views.contains_key(&out1),
+        "beta must have a view for out1",
+    );
+    assert!(
+        beta_views.contains_key(&out2),
+        "beta must have a view for out2",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn switch_activity_tagged_workspace_output_affinity() {
+    // Two outputs: output1 has no pre-tagged candidate for beta (forces the
+    // fresh-allocation branch in ensure_active_views), while output2 has one
+    // pre-tagged workspace (forces the lift-from-pool branch).
+    // Assertions:
+    //   - output2's view contains the pre-tagged id (no fresh allocation there)
+    //   - output1's view holds one freshly-minted id (not in pool_ids_before)
+    //   - pool grows by exactly 1 (the one fresh workspace for output1)
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let out1 = layout.monitors[0].output_id();
+    let out2 = layout.monitors[1].output_id();
+    assert_ne!(out1, out2);
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.test_insert(beta);
+
+    // Tag a workspace bound to out2 (only) with beta.
+    let pick = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.output_id() == Some(&out2))
+        .map(|ws| ws.id())
+        .expect("at least one workspace must be bound to out2");
+    layout
+        .workspaces
+        .get_mut(&pick)
+        .expect("pick must be a pool key")
+        .activities
+        .insert(beta_id);
+
+    let pool_ids_before: HashSet<WorkspaceId> = layout.workspaces.keys().copied().collect();
+    let pool_size_before = pool_ids_before.len();
+
+    layout.switch_activity(beta_id);
+
+    let beta_views = layout.activities.active().views();
+
+    // output2: must contain the pre-tagged id — lift-from-pool, no allocation.
+    let out2_view = beta_views.get(&out2).expect("beta must have a view for out2");
+    assert!(
+        out2_view.ids().contains(&pick),
+        "beta's out2 view must include the pre-tagged workspace",
+    );
+
+    // output1: must contain exactly one freshly-minted id — allocation branch.
+    let out1_view = beta_views.get(&out1).expect("beta must have a view for out1");
+    assert_eq!(out1_view.len(), 1, "fresh out1 view holds exactly one id");
+    let fresh_id = out1_view.ids()[0];
+    assert!(
+        !pool_ids_before.contains(&fresh_id),
+        "out1's bootstrap id must be freshly allocated",
+    );
+
+    // Pool grows by exactly one: the fresh workspace for output1.
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_before + 1,
+        "exactly one new pool entry for the fresh out1 workspace",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
 fn resolve_activity_ref_by_id_and_name() {
     let layout = Layout::<TestWindow>::default();
     let seed_id = layout.active_activity_id();
