@@ -4470,6 +4470,31 @@ fn layout_switch_activity_previous_no_op_when_no_previous() {
 }
 
 #[test]
+fn layout_switch_activity_previous_toggles_active() {
+    // Two activities: seed (alpha) and beta. Switch to beta, which records
+    // previous = seed_id. Then switch_activity_previous must flip back to
+    // seed_id and record previous = beta_id.
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta_activity.id();
+    layout.activities.test_insert(beta_activity);
+
+    // Switch to beta — this populates previous = seed_id.
+    layout.switch_activity(beta_id);
+    assert_eq!(layout.active_activity_id(), beta_id);
+    assert_eq!(layout.activities.previous_id(), Some(seed_id));
+
+    // Toggle back — must land on seed_id with previous = Some(beta_id).
+    layout.switch_activity_previous();
+
+    assert_eq!(layout.active_activity_id(), seed_id);
+    assert_eq!(layout.activities.previous_id(), Some(beta_id));
+    layout.verify_invariants();
+}
+
+#[test]
 fn resolve_activity_ref_by_id_and_name() {
     let layout = Layout::<TestWindow>::default();
     let seed_id = layout.active_activity_id();
