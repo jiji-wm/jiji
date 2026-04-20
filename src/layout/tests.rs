@@ -4499,6 +4499,56 @@ fn layout_seed_sticky_stamps_all_activity_ids() {
 }
 
 #[test]
+fn layout_seed_unknown_activity_name_falls_back_to_default() {
+    // Pin the all-unknown fallback arm in `resolve_workspace_activities_for`:
+    // when every name in a workspace's `activity` list is unrecognised, the
+    // resolver must fall back to the currently-active (first-declared) activity
+    // id so the non-empty-activities invariant on `Workspace::new*` is
+    // preserved.
+    let config = Config {
+        activities: vec![
+            niri_config::Activity {
+                name: niri_config::ActivityName("Work".to_owned()),
+            },
+            niri_config::Activity {
+                name: niri_config::ActivityName("Personal".to_owned()),
+            },
+        ],
+        workspaces: vec![WorkspaceConfig {
+            name: WorkspaceName("chat".to_owned()),
+            open_on_output: None,
+            layout: None,
+            activities: vec!["Bogus1".to_owned(), "Bogus2".to_owned()],
+            sticky: None,
+        }],
+        ..Config::default()
+    };
+
+    let layout = Layout::<TestWindow>::new(Clock::with_time(Duration::ZERO), &config);
+    let work_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Work")
+        .expect("Work activity must be seeded from config")
+        .id();
+
+    let chat = layout
+        .workspaces
+        .values()
+        .find(|w| w.name() == Some(&"chat".to_owned()))
+        .expect("chat workspace must be present");
+
+    assert_eq!(
+        chat.activities(),
+        &HashSet::from([work_id]),
+        "all-unknown activity names must fall back to the currently-active id",
+    );
+    assert!(!chat.is_sticky());
+
+    layout.verify_invariants();
+}
+
+#[test]
 fn build_activities_ipc_mirrors_seed_state() {
     // A fresh layout has exactly one seed activity. Pin the IPC-projection
     // helpers against accidental drift in field wiring (active-id comparison,
