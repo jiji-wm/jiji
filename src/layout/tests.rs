@@ -4339,10 +4339,11 @@ fn workspace_new_with_config_panics_on_empty_activities() {
 
 #[test]
 fn layout_new_with_workspaces_stamps_active_activity() {
-    // Pin the `with_options_and_workspaces` seed-stamping loop (mod.rs:744-761).
-    // Every workspace built from `config.workspaces` must carry exactly the
-    // seed activity id (the active activity at construction time), and
-    // `verify_invariants` must pass.
+    // Pin the empty-activities fallback in `resolve_workspace_activities_for`
+    // via the `with_options_and_workspaces` startup loop: when no `activity`
+    // entries are declared on a workspace config and no activities are in the
+    // config, the resolver falls back to the currently-active (seed) activity
+    // id.
     let config = Config {
         workspaces: vec![
             WorkspaceConfig {
@@ -4374,6 +4375,125 @@ fn layout_new_with_workspaces_stamps_active_activity() {
             ws.id(),
         );
     }
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn layout_seed_stamps_workspace_with_declared_activities() {
+    // A workspace that names one or more declared activities must be stamped
+    // with exactly those ids; a workspace that names none must fall back to
+    // the currently-active (first-declared) activity. `is_sticky` stays false
+    // on both because neither config block sets it.
+    let config = Config {
+        activities: vec![
+            niri_config::Activity {
+                name: niri_config::ActivityName("Work".to_owned()),
+            },
+            niri_config::Activity {
+                name: niri_config::ActivityName("Personal".to_owned()),
+            },
+        ],
+        workspaces: vec![
+            WorkspaceConfig {
+                name: WorkspaceName("chat".to_owned()),
+                open_on_output: None,
+                layout: None,
+                activities: vec!["Work".to_owned(), "Personal".to_owned()],
+                sticky: None,
+            },
+            WorkspaceConfig {
+                name: WorkspaceName("music".to_owned()),
+                open_on_output: None,
+                layout: None,
+                activities: Vec::new(),
+                sticky: None,
+            },
+        ],
+        ..Config::default()
+    };
+
+    let layout = Layout::<TestWindow>::new(Clock::with_time(Duration::ZERO), &config);
+    let work_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Work")
+        .expect("Work activity must be seeded from config")
+        .id();
+    let personal_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Personal")
+        .expect("Personal activity must be seeded from config")
+        .id();
+
+    let chat = layout
+        .workspaces
+        .values()
+        .find(|w| w.name() == Some(&"chat".to_owned()))
+        .expect("chat workspace must be present");
+    assert_eq!(chat.activities(), &HashSet::from([work_id, personal_id]));
+    assert!(!chat.is_sticky());
+
+    let music = layout
+        .workspaces
+        .values()
+        .find(|w| w.name() == Some(&"music".to_owned()))
+        .expect("music workspace must be present");
+    assert_eq!(
+        music.activities(),
+        &HashSet::from([work_id]),
+        "empty config.activities must fall back to the currently-active (first-declared) id",
+    );
+    assert!(!music.is_sticky());
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn layout_seed_sticky_stamps_all_activity_ids() {
+    // Sticky beats an explicit `activity "..."` list (DD §3.2): the workspace
+    // must be auto-tagged with every activity id in the pool.
+    let config = Config {
+        activities: vec![
+            niri_config::Activity {
+                name: niri_config::ActivityName("Work".to_owned()),
+            },
+            niri_config::Activity {
+                name: niri_config::ActivityName("Personal".to_owned()),
+            },
+        ],
+        workspaces: vec![WorkspaceConfig {
+            name: WorkspaceName("utils".to_owned()),
+            open_on_output: None,
+            layout: None,
+            activities: vec!["Work".to_owned()],
+            sticky: Some(true),
+        }],
+        ..Config::default()
+    };
+
+    let layout = Layout::<TestWindow>::new(Clock::with_time(Duration::ZERO), &config);
+    let work_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Work")
+        .expect("Work activity must be seeded from config")
+        .id();
+    let personal_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Personal")
+        .expect("Personal activity must be seeded from config")
+        .id();
+
+    let utils = layout
+        .workspaces
+        .values()
+        .find(|w| w.name() == Some(&"utils".to_owned()))
+        .expect("utils workspace must be present");
+    assert_eq!(utils.activities(), &HashSet::from([work_id, personal_id]));
+    assert!(utils.is_sticky());
 
     layout.verify_invariants();
 }

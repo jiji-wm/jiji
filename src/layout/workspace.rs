@@ -258,6 +258,8 @@ impl<W: LayoutElement> Workspace<W> {
                 .unwrap_or(OutputId::new(output)),
         );
 
+        let is_sticky = config.as_ref().and_then(|c| c.sticky).unwrap_or(false);
+
         let layout_config = config.as_mut().and_then(|c| c.layout.take().map(|x| x.0));
 
         let scale = output.current_scale();
@@ -306,7 +308,7 @@ impl<W: LayoutElement> Workspace<W> {
             name: config.map(|c| c.name.0),
             layout_config,
             id: WorkspaceId::next(),
-            is_sticky: false,
+            is_sticky,
             activities,
         }
     }
@@ -331,6 +333,8 @@ impl<W: LayoutElement> Workspace<W> {
                 .and_then(|c| c.open_on_output.clone())
                 .unwrap_or_default(),
         ));
+
+        let is_sticky = config.as_ref().and_then(|c| c.sticky).unwrap_or(false);
 
         let layout_config = config.as_mut().and_then(|c| c.layout.take().map(|x| x.0));
 
@@ -380,7 +384,7 @@ impl<W: LayoutElement> Workspace<W> {
             name: config.map(|c| c.name.0),
             layout_config,
             id: WorkspaceId::next(),
-            is_sticky: false,
+            is_sticky,
             activities,
         }
     }

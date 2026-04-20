@@ -761,6 +761,56 @@ impl OverviewProgress {
 /// so a single grep finds all uses.
 const DEFAULT_ACTIVITY_NAME: &str = "Default";
 
+/// Resolve the activity-membership set for a config-declared workspace against
+/// the given `Activities` pool.
+///
+/// Precedence (DD §3.2 auto-expansion):
+/// 1. If `sticky` is `Some(true)`, the workspace is auto-tagged with every
+///    activity id in the pool. Sticky beats any explicit `activity "..."`
+///    list.
+/// 2. Else, if the config has no `activity "..."` entries, the workspace is
+///    stamped with exactly the currently-active activity id.
+/// 3. Else, each entry in `ws_config.activities` is resolved case-insensitively
+///    via [`Activities::resolve_config_names`]. Unknown names produce a
+///    `warn!`; if every entry is unknown, a second `warn!` notes that the
+///    workspace falls back to `{active_id}` so the non-empty invariant
+///    required by `Workspace::new*` (DD §3.2) is preserved.
+///
+/// This is a free function (not an `&mut self` method) so it can be called
+/// during `Layout::with_options_and_workspaces`, where `self` does not yet
+/// exist. The associated method [`Layout::resolve_workspace_activities`]
+/// delegates here for callers that do have `&self`.
+fn resolve_workspace_activities_for(
+    activities: &Activities,
+    ws_config: &WorkspaceConfig,
+) -> HashSet<ActivityId> {
+    let is_sticky = ws_config.sticky.unwrap_or(false);
+    if is_sticky {
+        return activities.iter().map(|a| a.id()).collect();
+    }
+
+    if ws_config.activities.is_empty() {
+        return HashSet::from([activities.active_id()]);
+    }
+
+    let (resolved, unknown) = activities.resolve_config_names(&ws_config.activities);
+    for name in &unknown {
+        warn!(
+            "workspace {:?}: unknown activity {:?} (no matching top-level `activity` block)",
+            ws_config.name.0, name,
+        );
+    }
+    if resolved.is_empty() {
+        warn!(
+            "workspace {:?}: every declared activity name was unknown; falling back to \
+             the currently-active activity",
+            ws_config.name.0,
+        );
+        return HashSet::from([activities.active_id()]);
+    }
+    resolved
+}
+
 impl<W: LayoutElement> Layout<W> {
     pub fn new(clock: Clock, config: &Config) -> Self {
         Self::with_options_and_workspaces(clock, config, Options::from_config(config))
@@ -790,16 +840,17 @@ impl<W: LayoutElement> Layout<W> {
         let opts = Rc::new(options);
 
         let activities = Activities::from_config_or_default(&config.activities);
-        let seed_id = activities.active_id();
 
         let mut workspaces: HashMap<WorkspaceId, Workspace<W>> = HashMap::new();
         let workspace_ids = config
             .workspaces
             .iter()
             .map(|ws| {
+                let ws_activities =
+                    resolve_workspace_activities_for(&activities, ws);
                 let workspace = Workspace::new_with_config_no_outputs(
                     Some(ws.clone()),
-                    HashSet::from([seed_id]),
+                    ws_activities,
                     clock.clone(),
                     opts.clone(),
                 );
@@ -4732,6 +4783,17 @@ impl<W: LayoutElement> Layout<W> {
         self.interactive_move = Some(InteractiveMoveState::Moving(move_));
     }
 
+    /// Thin `&self` wrapper over [`resolve_workspace_activities_for`]. Used by
+    /// `ensure_named_workspace` (config-reload path); the startup loop in
+    /// [`Self::with_options_and_workspaces`] calls the free function directly
+    /// because `self` does not yet exist there.
+    pub(crate) fn resolve_workspace_activities(
+        &self,
+        ws_config: &WorkspaceConfig,
+    ) -> HashSet<ActivityId> {
+        resolve_workspace_activities_for(&self.activities, ws_config)
+    }
+
     pub fn ensure_named_workspace(&mut self, ws_config: &WorkspaceConfig) {
         if self.find_workspace_by_name(&ws_config.name.0).is_some() {
             return;
@@ -4739,16 +4801,12 @@ impl<W: LayoutElement> Layout<W> {
 
         let clock = self.clock.clone();
         let options = self.options.clone();
-        let seed_activity = self.activities.active_id();
 
         if self.monitors.is_empty() {
-            // Stamped with the active activity. When the `workspace { activity "..." }`
-            // checklist box lands, that parser will *replace* this stamp at config-load
-            // time (DD §6.2 semantics: declared `activity` blocks define the set, not
-            // additions to a default).
+            let ws_activities = self.resolve_workspace_activities(ws_config);
             let ws = Workspace::new_with_config_no_outputs(
                 Some(ws_config.clone()),
-                HashSet::from([seed_activity]),
+                ws_activities,
                 clock,
                 options,
             );
@@ -4773,16 +4831,13 @@ impl<W: LayoutElement> Layout<W> {
                     .unwrap_or(primary_idx)
             })
             .unwrap_or(active_monitor_idx);
+        let ws_activities = self.resolve_workspace_activities(ws_config);
         let mon = &self.monitors[mon_idx];
 
-        // Stamped with the active activity. When the `workspace { activity "..." }`
-        // checklist box lands, that parser will *replace* this stamp at config-load
-        // time (DD §6.2 semantics: declared `activity` blocks define the set, not
-        // additions to a default).
         let ws = Workspace::new_with_config(
             &mon.output,
             Some(ws_config.clone()),
-            HashSet::from([seed_activity]),
+            ws_activities,
             clock,
             options,
         );

@@ -7,7 +7,7 @@
 //! Inactive activities carry a dormant snapshot of their views across activity switches.
 //! The active-activity invariant is enforced in `Layout::verify_invariants`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 
@@ -395,6 +395,34 @@ impl Activities {
 
     pub fn contains(&self, id: ActivityId) -> bool {
         self.map.contains_key(&id)
+    }
+
+    /// Resolve a list of config-declared activity names against this pool.
+    ///
+    /// Matching is case-insensitive (`str::eq_ignore_ascii_case`), mirroring
+    /// the duplicate-detection rule in `niri_config::ActivityName::raw_decode`.
+    /// Duplicate names in `names` collapse into the returned `HashSet`.
+    ///
+    /// Returns `(resolved_ids, unknown_names)`: resolved ids for entries that
+    /// matched, and the untouched unknown names (preserving their input
+    /// spelling) for the caller to `warn!` about. This method is pure and
+    /// logs nothing itself — callers own the diagnostic surface.
+    pub(super) fn resolve_config_names(&self, names: &[String]) -> (HashSet<ActivityId>, Vec<String>) {
+        let mut resolved = HashSet::new();
+        let mut unknown = Vec::new();
+        for name in names {
+            match self
+                .map
+                .values()
+                .find(|a| a.name().eq_ignore_ascii_case(name))
+            {
+                Some(activity) => {
+                    resolved.insert(activity.id());
+                }
+                None => unknown.push(name.clone()),
+            }
+        }
+        (resolved, unknown)
     }
 
     /// Flip the active cursor to `target`, recording the previously-active id
@@ -803,6 +831,45 @@ mod tests {
         assert!(!only.is_config_declared());
         assert_eq!(acts.active_id(), only.id());
         assert_eq!(acts.previous_id(), None);
+    }
+
+    #[test]
+    fn resolve_config_names_case_insensitive_match() {
+        let cfg = vec![
+            niri_config::Activity {
+                name: niri_config::ActivityName("Work".to_owned()),
+            },
+            niri_config::Activity {
+                name: niri_config::ActivityName("Personal".to_owned()),
+            },
+        ];
+        let acts = Activities::from_config_or_default(&cfg);
+        let work_id = acts.iter().find(|a| a.name() == "Work").unwrap().id();
+        let personal_id = acts.iter().find(|a| a.name() == "Personal").unwrap().id();
+
+        let (resolved, unknown) =
+            acts.resolve_config_names(&["work".to_owned(), "personal".to_owned()]);
+        assert_eq!(resolved, HashSet::from([work_id, personal_id]));
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn resolve_config_names_unknown_returns_in_unknowns_list() {
+        let cfg = vec![
+            niri_config::Activity {
+                name: niri_config::ActivityName("Work".to_owned()),
+            },
+            niri_config::Activity {
+                name: niri_config::ActivityName("Personal".to_owned()),
+            },
+        ];
+        let acts = Activities::from_config_or_default(&cfg);
+        let work_id = acts.iter().find(|a| a.name() == "Work").unwrap().id();
+
+        let (resolved, unknown) =
+            acts.resolve_config_names(&["Work".to_owned(), "DoesNotExist".to_owned()]);
+        assert_eq!(resolved, HashSet::from([work_id]));
+        assert_eq!(unknown, vec!["DoesNotExist".to_owned()]);
     }
 
     #[test]
