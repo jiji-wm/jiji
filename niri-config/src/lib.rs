@@ -28,6 +28,7 @@ use miette::{miette, Context as _, IntoDiagnostic as _};
 #[macro_use]
 pub mod macros;
 
+pub mod activity;
 pub mod animations;
 pub mod appearance;
 pub mod binds;
@@ -44,6 +45,7 @@ pub mod utils;
 pub mod window_rule;
 pub mod workspace;
 
+pub use crate::activity::{Activity, ActivityName};
 pub use crate::animations::{Animation, Animations};
 pub use crate::appearance::*;
 pub use crate::binds::*;
@@ -91,6 +93,7 @@ pub struct Config {
     pub switch_events: SwitchBinds,
     pub debug: Debug,
     pub workspaces: Vec<Workspace>,
+    pub activities: Vec<Activity>,
     pub recent_windows: RecentWindows,
 }
 
@@ -165,6 +168,7 @@ where
                     | "window-rule"
                     | "layer-rule"
                     | "workspace"
+                    | "activity"
                     | "include"
             ) && !seen.insert(name)
             {
@@ -214,6 +218,7 @@ where
                 "window-rule" => m_push!(window_rules),
                 "layer-rule" => m_push!(layer_rules),
                 "workspace" => m_push!(workspaces),
+                "activity" => m_push!(activities),
 
                 // Single-part sections.
                 "binds" => {
@@ -939,6 +944,10 @@ mod tests {
                 ignore-drm-device "/dev/dri/renderD128"
                 ignore-drm-device "/dev/dri/renderD130"
             }
+
+            activity "Work"
+            activity "Personal"
+            activity "Gaming"
 
             workspace "workspace-1" {
                 open-on-output "eDP-1"
@@ -2288,6 +2297,23 @@ mod tests {
                     ),
                     open_on_output: None,
                     layout: None,
+                },
+            ],
+            activities: [
+                Activity {
+                    name: ActivityName(
+                        "Work",
+                    ),
+                },
+                Activity {
+                    name: ActivityName(
+                        "Personal",
+                    ),
+                },
+                Activity {
+                    name: ActivityName(
+                        "Gaming",
+                    ),
                 },
             ],
             recent_windows: RecentWindows {
