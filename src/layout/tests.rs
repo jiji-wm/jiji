@@ -4495,6 +4495,156 @@ fn layout_switch_activity_previous_toggles_active() {
 }
 
 #[test]
+fn switch_activity_bootstraps_view_on_first_visit() {
+    // First switch to a brand-new activity on a monitor that's been connected only for
+    // the seed activity: ensure_active_views must allocate a fresh empty workspace for
+    // beta (no pre-tagged candidates), wrap it in a view, and install it into beta's
+    // per-output map.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let out_id = layout.monitors[0].output_id();
+    let pool_size_before = layout.workspaces.len();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.test_insert(beta);
+
+    layout.switch_activity(beta_id);
+
+    assert_eq!(layout.active_activity_id(), beta_id);
+    let beta_view = &layout.activities.active().views()[&out_id];
+    assert_eq!(beta_view.len(), 1, "fresh bootstrap view holds one id");
+    let fresh_id = beta_view.ids()[0];
+    let fresh_ws = layout
+        .workspaces
+        .get(&fresh_id)
+        .expect("bootstrap view id must be in the pool");
+    assert!(
+        fresh_ws.activities().contains(&beta_id) && !fresh_ws.activities().contains(&seed_id),
+        "fresh workspace is tagged with beta only",
+    );
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_before + 1,
+        "exactly one new pool entry",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn switch_activity_preserves_seed_dormant_view() {
+    // After the first switch to beta, seed's pre-existing view stays intact as a dormant
+    // snapshot. The widened pool-keys union must see workspace ids from both seed's
+    // dormant view and beta's newly-populated view.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let out_id = layout.monitors[0].output_id();
+
+    // Snapshot seed's view ids before switching away.
+    let seed_view_ids: Vec<_> = layout
+        .active_view(&out_id)
+        .ids()
+        .to_vec();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.test_insert(beta);
+
+    layout.switch_activity(beta_id);
+
+    let seed_dormant = layout
+        .activities
+        .get(seed_id)
+        .expect("seed activity still present")
+        .views()
+        .get(&out_id)
+        .expect("seed's view must persist across the switch");
+    assert_eq!(seed_dormant.ids(), seed_view_ids.as_slice());
+
+    // Both seed's dormant view and beta's active view contribute keys to the widened
+    // pool-keys union — verify_invariants would panic otherwise.
+    layout.verify_invariants();
+}
+
+#[test]
+fn switch_activity_reuses_existing_view_entry() {
+    // Going back to an activity whose view was already populated must not allocate
+    // another workspace: contains_key hits in ensure_active_views and the loop skips.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.test_insert(beta);
+
+    layout.switch_activity(beta_id);
+    layout.verify_invariants();
+    let pool_size_after_first_beta = layout.workspaces.len();
+
+    layout.switch_activity(seed_id);
+    layout.verify_invariants();
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_after_first_beta,
+        "returning to seed must not allocate",
+    );
+
+    layout.switch_activity(beta_id);
+    layout.verify_invariants();
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_after_first_beta,
+        "second visit to beta reuses the prior view with no fresh allocation",
+    );
+}
+
+#[test]
+fn switch_activity_with_tagged_workspace_builds_view_from_pool() {
+    // Pre-tag an existing seed-owned workspace with beta. Switching to beta must lift
+    // that workspace into beta's new view instead of allocating a fresh one.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let out_id = layout.monitors[0].output_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.test_insert(beta);
+
+    // Pick a workspace currently on this monitor (the bottom bookend is always present)
+    // and add beta to its activity set. `activities` is pub(super) on Workspace, so this
+    // direct mutation is available from the test module in the same layout parent.
+    let pick = layout.active_view(&out_id).ids()[0];
+    layout
+        .workspaces
+        .get_mut(&pick)
+        .expect("picked id must be a pool key")
+        .activities
+        .insert(beta_id);
+
+    let pool_size_before = layout.workspaces.len();
+
+    layout.switch_activity(beta_id);
+
+    let beta_view = &layout.activities.active().views()[&out_id];
+    assert!(
+        beta_view.ids().contains(&pick),
+        "beta's view must include the pre-tagged workspace",
+    );
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_before,
+        "pre-tagged candidate means no fresh workspace is created",
+    );
+
+    // Widened pool-keys union includes `pick` once (HashSet dedupes it across seed's
+    // dormant view and beta's active view).
+    layout.verify_invariants();
+}
+
+#[test]
 fn resolve_activity_ref_by_id_and_name() {
     let layout = Layout::<TestWindow>::default();
     let seed_id = layout.active_activity_id();

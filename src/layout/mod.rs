@@ -3703,9 +3703,9 @@ impl<W: LayoutElement> Layout<W> {
 
     /// Flip the active activity cursor to `target`.
     ///
-    /// Pure cursor flip. View population, focus restoration, event emission,
-    /// and §5.11 blocking are handled by higher-level entry points / future
-    /// work.
+    /// Focus restoration, event emission, and §5.11 blocking against
+    /// interactive-move / DnD / workspace-switch are handled by higher-level
+    /// entry points / future work.
     ///
     /// Ordering:
     /// 1. No-op fast-path on `ActivityId` equality — avoids a `HashMap`
@@ -3717,6 +3717,14 @@ impl<W: LayoutElement> Layout<W> {
     ///    log correlation. Step 2→3 ordering is also pinned by the
     ///    `debug_assert!` inside [`Activities::set_active`].
     /// 3. Flip cursors via [`Activities::set_active`].
+    /// 4. Defensive clear of every monitor's in-flight `WorkspaceSwitch`.
+    ///    Fractional positions inside `WorkspaceSwitch` refer to positions in
+    ///    the previously-active activity's view; after the flip they no longer
+    ///    make sense. §5.3 step 9's instant-cut approach; §5.11 will later gate
+    ///    the switch during active gestures entirely, this clear stays as the
+    ///    forward-compat safety belt.
+    /// 5. Lazily populate the target activity's per-output views via
+    ///    [`Self::ensure_active_views`] — see §5.3 step 3.
     pub fn switch_activity(&mut self, target: ActivityId) {
         if target == self.activities.active_id() {
             return;
@@ -3726,6 +3734,90 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         self.activities.set_active(target);
+        // Drop any in-flight WorkspaceSwitch animations/gestures whose fractional positions
+        // refer to the previous activity's view. Not reached on the no-op or unknown-id
+        // paths above, which both early-return before touching monitor state.
+        for mon in &mut self.monitors {
+            mon.workspace_switch = None;
+        }
+        self.ensure_active_views();
+    }
+
+    // Make the newly-active activity's `views` map cover every connected monitor.
+    // Required by the active-activity cross-field invariant at verify_invariants: after
+    // a switch, we may land on an activity that has no view yet for some output — either
+    // because this is the first time it's becoming active on that output, or because an
+    // output reconnected while the activity was dormant. We either lift pre-tagged
+    // workspaces from the pool into a fresh view, or allocate a single empty workspace.
+    //
+    // Borrow discipline: we read `&self.monitors` once into a Vec (pairs of OutputId +
+    // cloned `Output`), drop that borrow, and only then take `&mut self.activities`
+    // (and occasionally `&mut self.workspaces` when allocating). No overlapping borrows.
+    pub(super) fn ensure_active_views(&mut self) {
+        let connected: Vec<(OutputId, Output)> = self
+            .monitors
+            .iter()
+            .map(|m| (m.output_id(), m.output.clone()))
+            .collect();
+        let clock = self.clock.clone();
+        let options = self.options.clone();
+        let target = self.activities.active_id();
+
+        for (output_id, output) in connected {
+            if self
+                .activities
+                .active()
+                .views()
+                .contains_key(&output_id)
+            {
+                continue;
+            }
+
+            // Collect pre-tagged candidates under a shared borrow of the pool, so we can
+            // later take `&mut self.workspaces` without a conflicting active borrow.
+            let mut tagged: Vec<WorkspaceId> = self
+                .workspaces
+                .values()
+                .filter(|ws| {
+                    ws.output_id() == Some(&output_id) && ws.activities().contains(&target)
+                })
+                .map(|ws| ws.id())
+                .collect();
+            // Phase 1a: sort by WorkspaceId (monotonic creation counter) — placeholder for
+            // cmp_by_config_then_creation which requires is_config_declared on Workspace
+            // (Phase 1b/2). See DD §5.3 step 3.
+            tagged.sort_by_key(|id| id.get());
+
+            let view = if tagged.is_empty() {
+                // Mirrors Monitor::new trailing-empty allocation at monitor.rs:286-381.
+                let ws = Workspace::new(
+                    &output,
+                    HashSet::from([target]),
+                    clock.clone(),
+                    options.clone(),
+                );
+                let id = ws.id();
+                assert!(
+                    self.workspaces.insert(id, ws).is_none(),
+                    "fresh id must be unique",
+                );
+                WorkspaceView::new(vec![id], 0)
+            } else {
+                WorkspaceView::new(tagged, 0)
+            };
+
+            // Explicit contains_key → insert rather than `.entry().or_insert_with()`: the
+            // closure arg would need to capture `&mut self.workspaces` via `||`, conflicting
+            // with this outer `&mut self.activities` reborrow.
+            assert!(
+                self.activities
+                    .active_mut()
+                    .views_mut()
+                    .insert(output_id, view)
+                    .is_none(),
+                "contains_key check above ruled out existing entry",
+            );
+        }
     }
 
     /// Switch to the previously-active activity (history-based toggle).
@@ -4049,25 +4141,38 @@ impl<W: LayoutElement> Layout<W> {
 
         let pool = &self.workspaces;
 
-        // Pool keys equal the disjoint union of the active activity's views (one per connected
-        // monitor) and disconnected_workspace_ids. Build the expected key set and compare.
+        // Pool keys equal the union of every live activity's views over every
+        // `WorkspaceView.ids()`, plus `disconnected_workspace_ids`. The union is across
+        // activities (not just the active one) so dormant views on inactive activities also
+        // anchor their ids into the pool — without that, switching back to an inactive
+        // activity could find its view ids have been GCed. A single `WorkspaceId` can
+        // legitimately appear in multiple views (e.g. sticky workspaces, future
+        // `activities = {A, B}` membership), so cross-view duplicates fold into the HashSet
+        // without assertion; per-view uniqueness is still enforced by a local set below.
         let mut expected_keys: HashSet<WorkspaceId> = HashSet::new();
-        for mon in &self.monitors {
-            for id in self.active_view(&mon.output_id()).ids() {
-                assert!(
-                    expected_keys.insert(*id),
-                    "workspace id must appear in at most one monitor view",
-                );
-                assert!(
-                    pool.contains_key(id),
-                    "active activity view id must be a key in the workspace pool",
-                );
+        for activity in self.activities.iter() {
+            for view in activity.views().values() {
+                let mut per_view: HashSet<WorkspaceId> = HashSet::new();
+                for id in view.ids() {
+                    assert!(
+                        per_view.insert(*id),
+                        "workspace id must appear at most once within a single WorkspaceView",
+                    );
+                    // Sticky workspaces and future `activities = {A, B}` configurations
+                    // legitimately produce the same `WorkspaceId` in multiple views; per-view
+                    // uniqueness is enforced separately above.
+                    expected_keys.insert(*id);
+                    assert!(
+                        pool.contains_key(id),
+                        "every view id must be in the pool — no zombies",
+                    );
+                }
             }
         }
         for id in &self.disconnected_workspace_ids {
             assert!(
                 expected_keys.insert(*id),
-                "workspace id must appear at most once in disconnected_workspace_ids",
+                "disconnected_workspace_ids entry must not already appear in any activity's view",
             );
             assert!(
                 pool.contains_key(id),
@@ -4077,7 +4182,7 @@ impl<W: LayoutElement> Layout<W> {
         let pool_keys: HashSet<WorkspaceId> = pool.keys().copied().collect();
         assert_eq!(
             expected_keys, pool_keys,
-            "pool keys must equal the union of each connected monitor's active-activity view and disconnected_workspace_ids",
+            "pool keys must equal the union of every activity's views over all outputs plus disconnected_workspace_ids",
         );
 
         if self.monitors.is_empty() {
