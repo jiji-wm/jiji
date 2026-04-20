@@ -3145,6 +3145,11 @@ impl<W: LayoutElement> Layout<W> {
         self.monitors_mut().find(|mon| &mon.output == output)
     }
 
+    /// Resolves an `OutputId` to its connected monitor, if any.
+    pub(crate) fn monitor_for_output_id(&self, output_id: &OutputId) -> Option<&Monitor<W>> {
+        self.monitors.iter().find(|mon| mon.output_id() == *output_id)
+    }
+
     /// Reader seam for the active `WorkspaceView` keyed by connected output.
     ///
     /// Reads the view for `output_id` from the currently active activity's

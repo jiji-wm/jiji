@@ -705,32 +705,9 @@ impl State {
 
         let layout = &self.niri.layout;
         let focused_ws_id = layout.active_workspace().map(|ws| ws.id().get());
-        let active_id = layout.active_activity_id();
 
-        let current: Vec<Workspace> = layout
-            .workspaces()
-            .map(|(mon, ws_idx, ws)| {
-                let id = ws.id().get();
-                let mut activities: Vec<u64> =
-                    ws.activities().iter().map(|aid| aid.get()).collect();
-                activities.sort();
-                Workspace {
-                    id,
-                    idx: u8::try_from(ws_idx + 1).unwrap_or(u8::MAX),
-                    name: ws.name().cloned(),
-                    output: mon.map(|mon| mon.output_name().clone()),
-                    is_urgent: ws.is_urgent(),
-                    is_active: mon.is_some_and(|mon| {
-                        layout.active_view(&mon.output_id()).active_position() == ws_idx
-                    }),
-                    is_focused: Some(id) == focused_ws_id,
-                    active_window_id: ws.active_window().map(|win| win.id().get()),
-                    activities,
-                    is_sticky: ws.is_sticky(),
-                    is_in_active_activity: ws.activities().contains(&active_id),
-                }
-            })
-            .collect();
+        let current =
+            build_workspace_snapshot(layout, focused_ws_id, |win: &Mapped| win.id().get());
 
         for event in diff_workspaces(&state.workspaces, &current) {
             state.apply(event.clone());
@@ -1013,6 +990,103 @@ fn diff_active_activity(previous: Option<u64>, current: u64) -> Option<Event> {
         id: current,
         previous_id: previous,
     })
+}
+
+/// Builds the full per-refresh workspace snapshot sent to IPC clients.
+///
+/// Two-pass construction, together covering every pool workspace exactly once:
+///
+/// 1. Workspaces in the active activity, in monitor-and-view order (plus the
+///    `disconnected_workspace_ids` tail when no monitors are connected).
+///    Their `idx` is view-position + 1 (1-based user-visible index), and
+///    `is_in_active_activity` is `true`.
+/// 2. Workspaces that are members of some other activity only. Per DD §3.5
+///    their `idx` sentinel is `0`, `is_in_active_activity` is `false`, and
+///    neither `is_active` nor `is_focused` can be true (the active/focused
+///    workspace is always in the active activity, by construction).
+///
+/// The `active_window_id_of` closure extracts the IPC window id from a
+/// layout element; production uses `Mapped::id().get()`, and `layout/tests.rs`
+/// calls this helper directly with a `TestWindow`-compatible extractor.
+pub(crate) fn build_workspace_snapshot<W: LayoutElement>(
+    layout: &Layout<W>,
+    focused_ws_id: Option<u64>,
+    active_window_id_of: impl Fn(&W) -> u64,
+) -> Vec<Workspace> {
+    let active_id = layout.active_activity_id();
+
+    // Pass 1 is keyed on membership (`ws.activities().contains(&active_id)`)
+    // rather than "whatever `Layout::workspaces()` yields". `workspaces()`
+    // walks view order, and a view may legitimately hold a stale entry whose
+    // `activities` set no longer contains the active activity (only reachable
+    // via direct activity-set mutation today; future membership-editing
+    // handlers could also produce it). Membership is the source of truth for
+    // `is_in_active_activity`, so a stale view entry falls through to pass 2
+    // with `idx: 0` rather than being double-emitted.
+    let mut current: Vec<Workspace> = layout
+        .workspaces()
+        .filter(|(_, _, ws)| ws.activities().contains(&active_id))
+        .map(|(mon, ws_idx, ws)| {
+            let id = ws.id().get();
+            let mut activities: Vec<u64> = ws.activities().iter().map(|aid| aid.get()).collect();
+            activities.sort();
+            Workspace {
+                id,
+                idx: u8::try_from(ws_idx + 1).unwrap_or(u8::MAX),
+                name: ws.name().cloned(),
+                output: mon.map(|mon| mon.output_name().clone()),
+                is_urgent: ws.is_urgent(),
+                is_active: mon.is_some_and(|mon| {
+                    layout.active_view(&mon.output_id()).active_position() == ws_idx
+                }),
+                is_focused: Some(id) == focused_ws_id,
+                active_window_id: ws.active_window().map(&active_window_id_of),
+                activities,
+                is_sticky: ws.is_sticky(),
+                is_in_active_activity: true,
+            }
+        })
+        .collect();
+
+    // Second pass: pool workspaces that are members of another activity only.
+    // Together with pass 1 this covers the pool exactly once — pass 1 yields
+    // every workspace whose activity set contains `active_id` (that is the
+    // semantics of `Layout::workspaces()`), pass 2 yields the complement.
+    // Pass 2 ordering is HashMap iteration order (undefined); clients must
+    // not rely on positional stability of hidden workspaces in the snapshot.
+    for (output_id, ws) in layout.workspaces_all() {
+        if ws.activities().contains(&active_id) {
+            continue;
+        }
+
+        let id = ws.id().get();
+        let mut activities: Vec<u64> = ws.activities().iter().map(|aid| aid.get()).collect();
+        activities.sort();
+
+        // Symmetric with pass 1's handling of disconnected-tail workspaces:
+        // if the designated output is currently disconnected, yield `None`.
+        let output = output_id.and_then(|id| {
+            layout
+                .monitor_for_output_id(id)
+                .map(|mon| mon.output_name().clone())
+        });
+
+        current.push(Workspace {
+            id,
+            idx: 0,
+            name: ws.name().cloned(),
+            output,
+            is_urgent: ws.is_urgent(),
+            is_active: false,
+            is_focused: false,
+            active_window_id: ws.active_window().map(&active_window_id_of),
+            activities,
+            is_sticky: ws.is_sticky(),
+            is_in_active_activity: false,
+        });
+    }
+
+    current
 }
 
 /// Diff the previously-emitted workspace snapshot against the current one and

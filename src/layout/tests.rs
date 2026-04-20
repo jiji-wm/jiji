@@ -5067,3 +5067,273 @@ fn workspaces_with_activity_unknown_activity_yields_empty() {
         results.len(),
     );
 }
+
+/// Shared active-window-id extractor for `TestWindow`. The IPC helper is
+/// generic so production can pass `|win| win.id().get()` against `Mapped`
+/// while tests pass this widened cast.
+fn test_window_id_of(win: &TestWindow) -> u64 {
+    *win.id() as u64
+}
+
+#[test]
+fn ipc_workspace_snapshot_hidden_workspace_has_idx_zero_and_flag_false() {
+    // A workspace whose activity set is disjoint from the active activity's
+    // id must surface through pass 2 of the snapshot builder with the
+    // DD §3.5 sentinel `idx: 0`, `is_in_active_activity: false`, and neither
+    // is_active nor is_focused (pass 2 hardcodes both to false).
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let mon_out = layout.monitors[0].output_id();
+
+    let mut on_output: Vec<WorkspaceId> = layout
+        .workspaces
+        .values()
+        .filter(|ws| ws.output_id() == Some(&mon_out))
+        .map(|ws| ws.id())
+        .collect();
+    on_output.sort_by_key(|id| id.get());
+    assert!(
+        on_output.len() >= 2,
+        "need at least two workspaces on the output for a non-vacuous test",
+    );
+
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta = beta_activity.id();
+    layout.activities.test_insert(beta_activity);
+
+    // Stamp the lowest-id workspace with beta-only so it leaves the active
+    // (seed) activity's membership.
+    let hidden_ws_id = on_output[0];
+    layout
+        .workspaces
+        .get_mut(&hidden_ws_id)
+        .expect("hidden_ws_id must be a pool key")
+        .activities = std::iter::once(beta).collect();
+
+    let snapshot = crate::ipc::server::build_workspace_snapshot(&layout, None, test_window_id_of);
+
+    let expected_output_name = layout.monitors[0].output_name().clone();
+
+    let hidden = snapshot
+        .iter()
+        .find(|ws| ws.id == hidden_ws_id.get())
+        .expect("hidden workspace must appear in the snapshot via pass 2");
+
+    assert_eq!(hidden.idx, 0, "hidden workspace must have idx sentinel 0");
+    assert!(
+        !hidden.is_in_active_activity,
+        "hidden workspace must have is_in_active_activity = false",
+    );
+    assert!(!hidden.is_active, "pass 2 must never emit is_active = true");
+    assert!(
+        !hidden.is_focused,
+        "pass 2 must never emit is_focused = true",
+    );
+    assert_eq!(
+        hidden.output,
+        Some(expected_output_name),
+        "hidden workspace on a connected output must have its output name resolved",
+    );
+    assert_eq!(
+        hidden.activities,
+        vec![beta.get()],
+        "hidden workspace activities must list the owning activity id",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn ipc_workspace_snapshot_active_activity_workspace_has_view_position_idx() {
+    // Regression guard for pass 1: every workspace in the active activity
+    // must appear with `idx = view_position + 1` and `is_in_active_activity
+    // = true`, matching the pre-refactor behavior.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let layout = check_ops(ops);
+    let mon_out = layout.monitors[0].output_id();
+    let view = layout.active_view(&mon_out);
+    let view_ids: Vec<WorkspaceId> = view.ids().to_vec();
+    let active_ws_id = view.active();
+    assert!(
+        view_ids.len() >= 2,
+        "need at least two workspaces in the active view for a non-vacuous test",
+    );
+
+    // Pass a real focused workspace id so the is_focused branch is exercised.
+    let focused_ws_id = view_ids[0].get();
+    let snapshot = crate::ipc::server::build_workspace_snapshot(
+        &layout,
+        Some(focused_ws_id),
+        test_window_id_of,
+    );
+
+    for (pos, id) in view_ids.iter().enumerate() {
+        let expected_idx = u8::try_from(pos + 1).unwrap_or(u8::MAX);
+        let ws = snapshot
+            .iter()
+            .find(|ws| ws.id == id.get())
+            .unwrap_or_else(|| panic!("workspace {:?} must appear in the snapshot", id));
+        assert_eq!(
+            ws.idx, expected_idx,
+            "pass 1 workspace at view position {pos} must have idx = {expected_idx}",
+        );
+        assert!(
+            ws.is_in_active_activity,
+            "pass 1 workspace must have is_in_active_activity = true",
+        );
+    }
+
+    // Exactly one workspace must be active (the monitor's active workspace).
+    let active_count = snapshot.iter().filter(|ws| ws.is_active).count();
+    assert_eq!(
+        active_count, 1,
+        "exactly one workspace must be marked is_active in the snapshot",
+    );
+    let active_entry = snapshot
+        .iter()
+        .find(|ws| ws.is_active)
+        .expect("exactly one active workspace was asserted above");
+    assert_eq!(
+        active_entry.id,
+        active_ws_id.get(),
+        "is_active must be set on the view's active workspace id",
+    );
+
+    // Exactly one workspace must be focused (the one we passed as focused_ws_id).
+    let focused_count = snapshot.iter().filter(|ws| ws.is_focused).count();
+    assert_eq!(
+        focused_count, 1,
+        "exactly one workspace must be marked is_focused in the snapshot",
+    );
+    let focused_entry = snapshot
+        .iter()
+        .find(|ws| ws.is_focused)
+        .expect("exactly one focused workspace was asserted above");
+    assert_eq!(
+        focused_entry.id, focused_ws_id,
+        "is_focused must be set on the workspace matching the supplied focused_ws_id",
+    );
+}
+
+#[test]
+fn ipc_workspace_snapshot_mixed_visibility_preserves_pass_disjointness() {
+    // Seed a mix: one workspace alpha-only (pass 1, view-position idx), one
+    // beta-only (pass 2, idx 0), one in both (pass 1 wins because it's in
+    // the active activity). The two passes must together emit every pool
+    // workspace exactly once — no duplicate ids, no omissions.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+        Op::AddNamedWorkspace {
+            ws_name: 2,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let mut on_output: Vec<WorkspaceId> = layout
+        .workspaces
+        .values()
+        .filter(|ws| ws.output_id() == Some(&mon_out))
+        .map(|ws| ws.id())
+        .collect();
+    on_output.sort_by_key(|id| id.get());
+    assert!(
+        on_output.len() >= 3,
+        "need at least three workspaces on the output for a disjointness test",
+    );
+
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta = beta_activity.id();
+    layout.activities.test_insert(beta_activity);
+
+    // ws_b: beta-only (hidden, pass 2).
+    // ws_c: alpha + beta (visible via alpha, pass 1).
+    // Remaining workspaces: alpha-only (pass 1).
+    let ws_b = on_output[0];
+    let ws_c = on_output[1];
+
+    layout
+        .workspaces
+        .get_mut(&ws_b)
+        .expect("ws_b must be a pool key")
+        .activities = std::iter::once(beta).collect();
+    layout
+        .workspaces
+        .get_mut(&ws_c)
+        .expect("ws_c must be a pool key")
+        .activities = [alpha, beta].into_iter().collect();
+
+    let view = layout.active_view(&mon_out);
+    let ws_c_view_pos = view
+        .position_of(ws_c)
+        .expect("ws_c must be present in the active view");
+    let ws_c_expected_idx = u8::try_from(ws_c_view_pos + 1).unwrap_or(u8::MAX);
+
+    let snapshot = crate::ipc::server::build_workspace_snapshot(&layout, None, test_window_id_of);
+
+    let pool_ids: HashSet<u64> = layout.workspaces_all().map(|(_, ws)| ws.id().get()).collect();
+    let snapshot_ids: HashSet<u64> = snapshot.iter().map(|ws| ws.id).collect();
+    assert_eq!(
+        snapshot_ids, pool_ids,
+        "snapshot must cover the pool exactly once (no omissions, no extras)",
+    );
+    assert_eq!(
+        snapshot.len(),
+        pool_ids.len(),
+        "snapshot must not contain duplicate workspace ids",
+    );
+
+    let b = snapshot
+        .iter()
+        .find(|ws| ws.id == ws_b.get())
+        .expect("ws_b must appear");
+    assert_eq!(b.idx, 0, "beta-only workspace goes through pass 2 (idx 0)");
+    assert!(!b.is_in_active_activity);
+    assert_eq!(
+        b.activities,
+        vec![beta.get()],
+        "beta-only workspace must list only beta in activities",
+    );
+
+    let c = snapshot
+        .iter()
+        .find(|ws| ws.id == ws_c.get())
+        .expect("ws_c must appear");
+    assert_eq!(
+        c.idx, ws_c_expected_idx,
+        "alpha+beta workspace is in the active activity and must use \
+         its view-position idx ({}), not the sentinel 0",
+        ws_c_expected_idx,
+    );
+    assert!(c.is_in_active_activity);
+    let mut expected_c_activities = vec![alpha.get(), beta.get()];
+    expected_c_activities.sort();
+    assert_eq!(
+        c.activities, expected_c_activities,
+        "alpha+beta workspace must list both activity ids (sorted)",
+    );
+
+    layout.verify_invariants();
+}
