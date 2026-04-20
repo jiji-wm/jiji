@@ -1331,6 +1331,13 @@ mod tests {
     }
 
     #[test]
+    fn diff_active_activity_zero_id_no_change_returns_none() {
+        // Zero is not a sentinel — equality on `current == 0` must short-circuit
+        // exactly as for any other id.
+        assert!(diff_active_activity(Some(0), 0).is_none());
+    }
+
+    #[test]
     fn diff_active_activity_change_returns_some_with_previous() {
         // Guards against an accidental 'always None' regression in
         // `previous_id` — the other two tests don't exercise a non-None prior.
