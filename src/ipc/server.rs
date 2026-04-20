@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -50,6 +50,18 @@ pub struct IpcServer {
     pub socket_path: Option<PathBuf>,
     event_streams: Rc<RefCell<Vec<EventStreamSender>>>,
     event_stream_state: Rc<RefCell<EventStreamState>>,
+    /// Most recently emitted active-activity id, used to diff against the
+    /// current `Layout::active_activity_id()` on each refresh tick.
+    ///
+    /// `None` before the first observation: the first call to
+    /// [`State::ipc_refresh_active_activity`] seeds this field from the
+    /// current active activity without emitting, so clients do not see a
+    /// spurious `ActivitySwitched` on server startup.
+    ///
+    /// Deliberately a plain `Cell` (not part of `EventStreamState`): the
+    /// corresponding `ActivitiesState` on `EventStreamState` is Phase 1b
+    /// scope. Main-thread calloop only — no cross-thread access.
+    last_active_activity_id: Cell<Option<ActivityId>>,
 }
 
 struct ClientCtx {
@@ -111,6 +123,7 @@ impl IpcServer {
             socket_path,
             event_streams: Rc::new(RefCell::new(Vec::new())),
             event_stream_state: Rc::new(RefCell::new(EventStreamState::default())),
+            last_active_activity_id: Cell::new(None),
         })
     }
 
@@ -636,9 +649,48 @@ impl State {
     }
 
     pub fn ipc_refresh_layout(&mut self) {
+        // `ActivitySwitched` must precede any `WorkspaceOpenedOrChanged` whose
+        // `is_in_active_activity` flipped this tick, so clients can update
+        // their activity state before processing workspace visibility
+        // changes. See the contract pinned on `Event::ActivitySwitched` in
+        // `niri-ipc/src/lib.rs`. Do not move `ipc_refresh_active_activity`
+        // after `ipc_refresh_workspaces`.
+        self.ipc_refresh_active_activity();
         self.ipc_refresh_workspaces();
         self.ipc_refresh_windows();
         self.ipc_refresh_overview();
+    }
+
+    fn ipc_refresh_active_activity(&mut self) {
+        let Some(server) = &self.niri.ipc_server else {
+            return;
+        };
+
+        let _span = tracy_client::span!("State::ipc_refresh_active_activity");
+
+        let current_id = self.niri.layout.active_activity_id();
+        let current = current_id.get();
+
+        // First observation after server start seeds the tracker without
+        // emitting: the rustdoc contract says `ActivitySwitched` is a *change*
+        // notification, and a fresh server has no prior state to compare
+        // against. The seeding posture mirrors `ipc_refresh_overview`'s
+        // equality short-circuit, adapted for the `Option` tracker shape.
+        let previous_raw = server.last_active_activity_id.get();
+        let was_initialized = previous_raw.is_some();
+        let previous = previous_raw.map(|id| id.get());
+
+        if was_initialized {
+            if let Some(event) = diff_active_activity(previous, current) {
+                server.send_event(event);
+            }
+        }
+
+        // Tracker-update discipline: unconditional set at function exit so the
+        // "emitted == tracked" invariant holds whether or not `diff_active_activity`
+        // returned `Some`, and regardless of the seeding branch above. Never
+        // move this into the `if let Some(event)` body.
+        server.last_active_activity_id.set(Some(current_id));
     }
 
     fn ipc_refresh_workspaces(&mut self) {
@@ -945,6 +997,24 @@ impl State {
     }
 }
 
+/// Diff the previously-emitted active-activity id against the current one.
+///
+/// Returns `Some(Event::ActivitySwitched { id, previous_id })` iff the two
+/// differ, else `None`. The function is a pure equality check with no
+/// sentinel-in-signal behavior: callers gate emission behind a
+/// `was_initialized` check and write the tracker unconditionally at function
+/// exit, so the tracker is set on the first tick without emitting. See
+/// [`State::ipc_refresh_active_activity`] for the seeding pattern.
+fn diff_active_activity(previous: Option<u64>, current: u64) -> Option<Event> {
+    if Some(current) == previous {
+        return None;
+    }
+    Some(Event::ActivitySwitched {
+        id: current,
+        previous_id: previous,
+    })
+}
+
 /// Diff the previously-emitted workspace snapshot against the current one and
 /// produce the list of `Event`s to emit.
 ///
@@ -1087,6 +1157,30 @@ mod tests {
                 if workspace.id == 1 && !workspace.is_in_active_activity
         ));
         assert!(matches!(&events[1], Event::WorkspacesChanged { .. }));
+
+        // Verify `activities` change also triggers structural emission.
+        let prev = previous_from(&[ws(1, 1, "HDMI-1")]);
+        let mut now = ws(1, 1, "HDMI-1");
+        now.activities = vec![99];
+        let events = diff_workspaces(&prev, &[now]);
+        assert_eq!(events.len(), 2, "activities change: got {events:?}");
+        assert!(matches!(
+            &events[0],
+            Event::WorkspaceOpenedOrChanged { workspace } if workspace.activities == vec![99]
+        ));
+        assert!(matches!(&events[1], Event::WorkspacesChanged { .. }));
+
+        // Verify `is_sticky` change also triggers structural emission.
+        let prev = previous_from(&[ws(1, 1, "HDMI-1")]);
+        let mut now = ws(1, 1, "HDMI-1");
+        now.is_sticky = true;
+        let events = diff_workspaces(&prev, &[now]);
+        assert_eq!(events.len(), 2, "is_sticky change: got {events:?}");
+        assert!(matches!(
+            &events[0],
+            Event::WorkspaceOpenedOrChanged { workspace } if workspace.is_sticky
+        ));
+        assert!(matches!(&events[1], Event::WorkspacesChanged { .. }));
     }
 
     #[test]
@@ -1211,5 +1305,42 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], Event::WorkspaceOpenedOrChanged { .. }));
         assert!(matches!(&events[1], Event::WorkspacesChanged { .. }));
+    }
+
+    #[test]
+    fn diff_active_activity_none_previous_returns_some() {
+        // Pure-function shape: `None → Some(id)` yields `ActivitySwitched`
+        // with `previous_id: None`. The "do not emit on initial tick" wiring
+        // is a caller concern handled by the seeding gate in
+        // `ipc_refresh_active_activity`.
+        let event = diff_active_activity(None, 7);
+        assert!(matches!(
+            event,
+            Some(Event::ActivitySwitched {
+                id: 7,
+                previous_id: None,
+            })
+        ));
+    }
+
+    #[test]
+    fn diff_active_activity_no_change_returns_none() {
+        // Dominant hot-path case: every refresh tick without an activity
+        // switch short-circuits to `None`.
+        assert!(diff_active_activity(Some(7), 7).is_none());
+    }
+
+    #[test]
+    fn diff_active_activity_change_returns_some_with_previous() {
+        // Guards against an accidental 'always None' regression in
+        // `previous_id` — the other two tests don't exercise a non-None prior.
+        let event = diff_active_activity(Some(3), 7);
+        assert!(matches!(
+            event,
+            Some(Event::ActivitySwitched {
+                id: 7,
+                previous_id: Some(3),
+            })
+        ));
     }
 }
