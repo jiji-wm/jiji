@@ -355,6 +355,9 @@ mod tests {
             is_active: false,
             is_focused: false,
             active_window_id: None,
+            activities: vec![],
+            is_sticky: false,
+            is_in_active_activity: true,
         }
     }
 

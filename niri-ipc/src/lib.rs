@@ -1546,6 +1546,22 @@ pub struct Workspace {
     pub is_focused: bool,
     /// Id of the active window on this workspace, if any.
     pub active_window_id: Option<u64>,
+    /// Activity IDs this workspace belongs to, sorted ascending by ID. Always non-empty: every
+    /// workspace belongs to at least one activity.
+    pub activities: Vec<u64>,
+    /// Whether this workspace is sticky (auto-tagged with all activities).
+    pub is_sticky: bool,
+    /// Whether this workspace belongs to the active activity.
+    ///
+    /// When `true`, this workspace is eligible to be placed on an output (monitor). In niri's
+    /// Phase-1a model there is exactly one activity and every workspace belongs to it, so this
+    /// field is always `true` for reachable workspaces. The field is exposed now so that IPC
+    /// clients can be written activity-aware from the start.
+    ///
+    /// **`idx` contract:** the `idx` field on this workspace is only meaningful when
+    /// `is_in_active_activity` is `true`; clients must ignore `idx` for workspaces where this
+    /// field is `false`.
+    pub is_in_active_activity: bool,
 }
 
 /// Configured keyboard layouts.
@@ -2303,6 +2319,56 @@ mod tests {
         );
         let parsed: Activity = serde_json::from_str(&json).expect("deserialize Activity");
         assert_eq!(parsed, activity);
+    }
+
+    #[test]
+    fn workspace_ipc_roundtrips_serde() {
+        // Pin the exact JSON wire representation (field names, order, and the
+        // new activity-related fields) against accidental drift. Tests both an
+        // empty `activities` vec and a populated one, because the DD documents
+        // the invariant that real workspaces always carry at least one activity
+        // id while future test/default construction may still use an empty vec.
+        let ws = Workspace {
+            id: 7,
+            idx: 2,
+            name: Some("chat".to_owned()),
+            output: Some("HDMI-A-1".to_owned()),
+            is_urgent: false,
+            is_active: true,
+            is_focused: true,
+            active_window_id: Some(42),
+            activities: vec![],
+            is_sticky: false,
+            is_in_active_activity: true,
+        };
+        let json = serde_json::to_string(&ws).expect("serialize Workspace");
+        assert_eq!(
+            json,
+            r#"{"id":7,"idx":2,"name":"chat","output":"HDMI-A-1","is_urgent":false,"is_active":true,"is_focused":true,"active_window_id":42,"activities":[],"is_sticky":false,"is_in_active_activity":true}"#
+        );
+        let parsed: Workspace = serde_json::from_str(&json).expect("deserialize Workspace");
+        assert_eq!(parsed, ws);
+
+        let ws_with_activities = Workspace {
+            id: 8,
+            idx: 3,
+            name: None,
+            output: None,
+            is_urgent: true,
+            is_active: false,
+            is_focused: false,
+            active_window_id: None,
+            activities: vec![1, 2],
+            is_sticky: true,
+            is_in_active_activity: false,
+        };
+        let json = serde_json::to_string(&ws_with_activities).expect("serialize Workspace");
+        assert_eq!(
+            json,
+            r#"{"id":8,"idx":3,"name":null,"output":null,"is_urgent":true,"is_active":false,"is_focused":false,"active_window_id":null,"activities":[1,2],"is_sticky":true,"is_in_active_activity":false}"#
+        );
+        let parsed: Workspace = serde_json::from_str(&json).expect("deserialize Workspace");
+        assert_eq!(parsed, ws_with_activities);
     }
 
     #[test]

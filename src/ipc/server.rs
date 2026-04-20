@@ -653,11 +653,15 @@ impl State {
 
         let layout = &self.niri.layout;
         let focused_ws_id = layout.active_workspace().map(|ws| ws.id().get());
+        let active_id = layout.active_activity_id();
 
         let current: Vec<Workspace> = layout
             .workspaces()
             .map(|(mon, ws_idx, ws)| {
                 let id = ws.id().get();
+                let mut activities: Vec<u64> =
+                    ws.activities().iter().map(|aid| aid.get()).collect();
+                activities.sort();
                 Workspace {
                     id,
                     idx: u8::try_from(ws_idx + 1).unwrap_or(u8::MAX),
@@ -669,6 +673,9 @@ impl State {
                     }),
                     is_focused: Some(id) == focused_ws_id,
                     active_window_id: ws.active_window().map(|win| win.id().get()),
+                    activities,
+                    is_sticky: ws.is_sticky(),
+                    is_in_active_activity: ws.activities().contains(&active_id),
                 }
             })
             .collect();
@@ -969,7 +976,10 @@ fn diff_workspaces(previous: &HashMap<u64, Workspace>, current: &[Workspace]) ->
         // Structural change = anything not covered by a per-field event.
         let structural_changed = ipc_ws.idx != new_ipc.idx
             || ipc_ws.name != new_ipc.name
-            || ipc_ws.output != new_ipc.output;
+            || ipc_ws.output != new_ipc.output
+            || ipc_ws.activities != new_ipc.activities
+            || ipc_ws.is_sticky != new_ipc.is_sticky
+            || ipc_ws.is_in_active_activity != new_ipc.is_in_active_activity;
         if structural_changed {
             any_structural = true;
             events.push(Event::WorkspaceOpenedOrChanged {
@@ -1033,6 +1043,9 @@ mod tests {
             is_active: false,
             is_focused: false,
             active_window_id: None,
+            activities: vec![],
+            is_sticky: false,
+            is_in_active_activity: true,
         }
     }
 
@@ -1054,6 +1067,26 @@ mod tests {
             Event::WorkspaceOpenedOrChanged { workspace } if workspace.id == 2
         ));
         assert!(matches!(&events[2], Event::WorkspacesChanged { .. }));
+    }
+
+    #[test]
+    fn diff_workspaces_activity_fields_trigger_structural_emission() {
+        // A flip of `is_in_active_activity` (or any of the three activity-related
+        // fields) must count as a structural change so `WorkspaceOpenedOrChanged`
+        // is emitted. Clients rely on this to re-read `idx` (which is only
+        // meaningful when `is_in_active_activity` is true).
+        let prev = previous_from(&[ws(1, 1, "HDMI-1")]);
+        let mut now = ws(1, 1, "HDMI-1");
+        now.is_in_active_activity = false;
+        let events = diff_workspaces(&prev, &[now]);
+
+        assert_eq!(events.len(), 2, "got {events:?}");
+        assert!(matches!(
+            &events[0],
+            Event::WorkspaceOpenedOrChanged { workspace }
+                if workspace.id == 1 && !workspace.is_in_active_activity
+        ));
+        assert!(matches!(&events[1], Event::WorkspacesChanged { .. }));
     }
 
     #[test]
