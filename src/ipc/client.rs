@@ -7,8 +7,8 @@ use anyhow::{anyhow, bail, Context};
 use niri_config::OutputName;
 use niri_ipc::socket::Socket;
 use niri_ipc::{
-    Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode, Output,
-    OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
+    Action, Activity, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode,
+    Output, OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
 };
 use serde_json::json;
 
@@ -34,6 +34,8 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::Outputs => Request::Outputs,
         Msg::FocusedWindow => Request::FocusedWindow,
         Msg::FocusedOutput => Request::FocusedOutput,
+        Msg::Activities => Request::Activities,
+        Msg::FocusedActivity => Request::FocusedActivity,
         Msg::PickWindow => Request::PickWindow,
         Msg::PickColor => Request::PickColor,
         Msg::Action { action } => Request::Action(action.clone()),
@@ -279,6 +281,37 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
             } else {
                 println!("No output is focused.");
             }
+        }
+        Msg::Activities => {
+            let Response::Activities(response) = response else {
+                bail!("unexpected response: expected Activities, got {response:?}");
+            };
+
+            if json {
+                let s = serde_json::to_string(&response).context("error formatting response")?;
+                println!("{s}");
+                return Ok(());
+            }
+
+            if response.is_empty() {
+                println!("No activities.");
+                return Ok(());
+            }
+
+            print_activities(&response);
+        }
+        Msg::FocusedActivity => {
+            let Response::FocusedActivity(activity) = response else {
+                bail!("unexpected response: expected FocusedActivity, got {response:?}");
+            };
+
+            if json {
+                let s = serde_json::to_string(&activity).context("error formatting response")?;
+                println!("{s}");
+                return Ok(());
+            }
+
+            print_activity(&activity);
         }
         Msg::PickWindow => {
             let Response::PickedWindow(window) = response else {
@@ -736,6 +769,27 @@ fn print_window(window: &Window) {
         "    Window offset in tile: {} x {}",
         fmt_rounded(window_offset_in_tile.0),
         fmt_rounded(window_offset_in_tile.1)
+    );
+}
+
+fn print_activities(activities: &[Activity]) {
+    for activity in activities {
+        print_activity(activity);
+    }
+}
+
+fn print_activity(activity: &Activity) {
+    let active = if activity.is_active { " * " } else { "   " };
+    let config = if activity.is_config_declared {
+        " (config)"
+    } else {
+        ""
+    };
+    let urgent = if activity.is_urgent { " (urgent)" } else { "" };
+    println!(
+        "{active}{id} \"{name}\"{config}{urgent}",
+        id = activity.id,
+        name = activity.name,
     );
 }
 

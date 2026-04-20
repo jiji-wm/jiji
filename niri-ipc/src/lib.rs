@@ -82,6 +82,10 @@ pub enum Request {
     FocusedOutput,
     /// Request information about the focused window.
     FocusedWindow,
+    /// Request information about activities.
+    Activities,
+    /// Request information about the focused activity.
+    FocusedActivity,
     /// Request picking a window and get its information.
     PickWindow,
     /// Request picking a color from the screen.
@@ -155,6 +159,12 @@ pub enum Response {
     KeyboardLayouts(KeyboardLayouts),
     /// Information about the focused output.
     FocusedOutput(Option<Output>),
+    /// Information about activities.
+    Activities(Vec<Activity>),
+    /// Information about the focused activity.
+    ///
+    /// There is always at least one activity, so this is not wrapped in `Option`.
+    FocusedActivity(Activity),
     /// Information about the focused window.
     FocusedWindow(Option<Window>),
     /// Information about the picked window.
@@ -1465,6 +1475,38 @@ pub enum OutputConfigChanged {
     OutputWasMissing,
 }
 
+/// An activity — a named grouping of workspaces.
+///
+/// With global activities, exactly one activity is active at a time, so
+/// `is_active` also implies focused.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct Activity {
+    /// Session-local id of this activity.
+    ///
+    /// This id remains constant for the lifetime of the activity within a session.
+    ///
+    /// Do not assume that activity ids will always increase without wrapping, or start at 0. That
+    /// is an implementation detail subject to change. For example, ids may change to be randomly
+    /// generated for each new activity.
+    pub id: u64,
+    /// Human-readable name. Unique across activities.
+    pub name: String,
+    /// Whether this activity is declared in config (`true`) or runtime (`false`).
+    ///
+    /// Config-declared activities persist across config reloads; runtime-created activities do not.
+    ///
+    /// **Phase 1a note**: config-reload promotion is not yet wired. This field reflects how the
+    /// activity was originally created.
+    pub is_config_declared: bool,
+    /// Whether this is the currently active activity.
+    pub is_active: bool,
+    /// Whether this activity has any urgent windows.
+    ///
+    /// **Phase 1a note**: always `false`. Urgency tracking lands in Phase 1b.
+    pub is_urgent: bool,
+}
+
 /// A workspace.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -2207,5 +2249,28 @@ mod tests {
         );
         assert!("-".parse::<PositionChange>().is_err());
         assert!("10% ".parse::<PositionChange>().is_err());
+    }
+
+    #[test]
+    fn activity_ipc_roundtrips_serde() {
+        // Pin the exact JSON wire representation against accidental field
+        // rename/removal. A renamed field would desync external IPC consumers
+        // silently; asserting against a hardcoded string catches both name drift
+        // and field-order changes.
+        let activity = Activity {
+            id: 42,
+            name: "work".to_owned(),
+            is_config_declared: true,
+            is_active: true,
+            is_urgent: false,
+        };
+
+        let json = serde_json::to_string(&activity).expect("serialize Activity");
+        assert_eq!(
+            json,
+            r#"{"id":42,"name":"work","is_config_declared":true,"is_active":true,"is_urgent":false}"#
+        );
+        let parsed: Activity = serde_json::from_str(&json).expect("deserialize Activity");
+        assert_eq!(parsed, activity);
     }
 }

@@ -2155,6 +2155,15 @@ impl<W: LayoutElement> Layout<W> {
         self.activities.active_id()
     }
 
+    /// Borrow the activities pool (read-only).
+    ///
+    /// Use this when you need the full pool (e.g. IPC projections that iterate
+    /// all activities). For single-activity lookups prefer the narrow helpers
+    /// like [`Self::active_activity_id`] or `resolve_activity_ref`.
+    pub(crate) fn activities(&self) -> &Activities {
+        &self.activities
+    }
+
     /// Split-borrow helper: return `(&mut monitors, &mut pool)` for external callers that iterate
     /// monitors and call mutating `Monitor` methods threading `&mut pool`. Returns `(&mut [], ...)`
     /// if no outputs are connected.

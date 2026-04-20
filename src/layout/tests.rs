@@ -4373,6 +4373,55 @@ fn layout_new_with_workspaces_stamps_active_activity() {
 }
 
 #[test]
+fn build_activities_ipc_mirrors_seed_state() {
+    // A fresh layout has exactly one seed activity. Pin the IPC-projection
+    // helpers against accidental drift in field wiring (active-id comparison,
+    // `is_urgent` placeholder, name / config-declared flags).
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+
+    let ipc = crate::ipc::server::build_activities_ipc(&layout);
+    assert_eq!(ipc.len(), 1, "default seed activity must be the only one");
+
+    let only = &ipc[0];
+    // `Activities::new(Activity::new_runtime(DEFAULT_ACTIVITY_NAME))` via
+    // `new_runtime` → `is_config_declared == false`.
+    assert_eq!(only.name, "Default");
+    assert!(only.is_active);
+    assert!(!only.is_urgent, "Phase 1a hardcodes is_urgent = false");
+    assert!(!only.is_config_declared);
+
+    let focused = crate::ipc::server::build_focused_activity_ipc(&layout);
+    assert_eq!(&focused, only);
+
+    // --- Two-activity extension ---
+    // A single-activity pool trivially satisfies `is_active == true` and
+    // `focused == iter().next()`. Insert a second activity and switch to it so
+    // those trivial degeneracies can no longer mask bugs in `is_active` wiring
+    // or `build_focused_activity_ipc` returning the wrong entry.
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta_activity.id();
+    layout.activities.test_insert(beta_activity);
+    layout.switch_activity(beta_id);
+
+    let ipc = crate::ipc::server::build_activities_ipc(&layout);
+    assert_eq!(ipc.len(), 2);
+
+    let active_entries: Vec<_> = ipc.iter().filter(|a| a.is_active).collect();
+    assert_eq!(active_entries.len(), 1, "exactly one activity must be active");
+    assert_eq!(active_entries[0].id, beta_id.get(), "beta must be active");
+    assert_eq!(active_entries[0].name, "beta");
+
+    let seed_entry = ipc.iter().find(|a| a.id == seed_id.get()).unwrap();
+    assert!(!seed_entry.is_active, "seed must no longer be active");
+
+    let focused = crate::ipc::server::build_focused_activity_ipc(&layout);
+    assert_eq!(focused.id, beta_id.get(), "focused must be beta");
+
+    layout.verify_invariants();
+}
+
+#[test]
 fn active_activity_views_populated_on_add_output() {
     let ops = [Op::AddOutput(1)];
     let layout = check_ops(ops);

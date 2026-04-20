@@ -75,6 +75,10 @@ pub enum Msg {
     FocusedOutput,
     /// Print information about the focused window.
     FocusedWindow,
+    /// List activities.
+    Activities,
+    /// Print information about the focused activity.
+    FocusedActivity,
     /// Pick a window with the mouse and print information about it.
     PickWindow,
     /// Pick a color from the screen with the mouse.

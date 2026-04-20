@@ -32,7 +32,9 @@ use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
 
 use crate::backend::IpcOutputMap;
 use crate::input::pick_window_grab::PickWindowGrab;
+use crate::layout::activity::ActivityId;
 use crate::layout::workspace::WorkspaceId;
+use crate::layout::{Layout, LayoutElement};
 use crate::niri::State;
 use crate::utils::{version, with_toplevel_role};
 use crate::window::Mapped;
@@ -340,6 +342,27 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let window = windows.values().find(|win| win.is_focused).cloned();
             Response::FocusedWindow(window)
         }
+        Request::Activities => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let activities = build_activities_ipc(&state.niri.layout);
+                let _ = tx.send_blocking(activities);
+            });
+            let result = rx.recv().await;
+            let activities = result.map_err(|_| String::from("error getting activities info"))?;
+            Response::Activities(activities)
+        }
+        Request::FocusedActivity => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let focused = build_focused_activity_ipc(&state.niri.layout);
+                let _ = tx.send_blocking(focused);
+            });
+            let result = rx.recv().await;
+            let focused =
+                result.map_err(|_| String::from("error getting focused activity info"))?;
+            Response::FocusedActivity(focused)
+        }
         Request::PickWindow => {
             let (tx, rx) = async_channel::bounded(1);
             ctx.event_loop.insert_idle(move |state| {
@@ -459,6 +482,37 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
     };
 
     Ok(response)
+}
+
+pub(crate) fn build_activities_ipc<W: LayoutElement>(
+    layout: &Layout<W>,
+) -> Vec<niri_ipc::Activity> {
+    let active_id = layout.active_activity_id();
+    layout
+        .activities()
+        .iter()
+        .map(|a| to_ipc_activity(a, active_id))
+        .collect()
+}
+
+pub(crate) fn build_focused_activity_ipc<W: LayoutElement>(layout: &Layout<W>) -> niri_ipc::Activity {
+    let active_id = layout.active_activity_id();
+    to_ipc_activity(layout.activities().active(), active_id)
+}
+
+fn to_ipc_activity(
+    a: &crate::layout::activity::Activity,
+    active_id: ActivityId,
+) -> niri_ipc::Activity {
+    niri_ipc::Activity {
+        id: a.id().get(),
+        name: a.name().to_owned(),
+        is_config_declared: a.is_config_declared(),
+        is_active: a.id() == active_id,
+        // Phase 1b: internal `is_urgent` + `ActivityUrgencyChanged` event land
+        // together; wire through here then.
+        is_urgent: false,
+    }
 }
 
 fn validate_action(action: &Action) -> Result<(), String> {
