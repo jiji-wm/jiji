@@ -897,6 +897,8 @@ impl Op {
                     name: WorkspaceName(format!("ws{ws_name}")),
                     open_on_output: output_name.map(|name| format!("output{name}")),
                     layout: layout_config.map(|x| niri_config::WorkspaceLayoutPart(*x)),
+                    activities: Vec::new(),
+                    sticky: None,
                 });
             }
             Op::UnnameWorkspace { ws_name } => {
@@ -4347,11 +4349,15 @@ fn layout_new_with_workspaces_stamps_active_activity() {
                 name: WorkspaceName("main".to_owned()),
                 open_on_output: None,
                 layout: None,
+                activities: Vec::new(),
+                sticky: None,
             },
             WorkspaceConfig {
                 name: WorkspaceName("side".to_owned()),
                 open_on_output: None,
                 layout: None,
+                activities: Vec::new(),
+                sticky: None,
             },
         ],
         ..Config::default()

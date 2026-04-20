@@ -951,9 +951,17 @@ mod tests {
 
             workspace "workspace-1" {
                 open-on-output "eDP-1"
+                activity "Work"
+                activity "Personal"
             }
             workspace "workspace-2"
             workspace "workspace-3"
+            workspace "utils" {
+                sticky true
+            }
+            workspace "no-stick" {
+                sticky false
+            }
 
             recent-windows {
                 off
@@ -2283,6 +2291,11 @@ mod tests {
                         "eDP-1",
                     ),
                     layout: None,
+                    activities: [
+                        "Work",
+                        "Personal",
+                    ],
+                    sticky: None,
                 },
                 Workspace {
                     name: WorkspaceName(
@@ -2290,6 +2303,8 @@ mod tests {
                     ),
                     open_on_output: None,
                     layout: None,
+                    activities: [],
+                    sticky: None,
                 },
                 Workspace {
                     name: WorkspaceName(
@@ -2297,6 +2312,30 @@ mod tests {
                     ),
                     open_on_output: None,
                     layout: None,
+                    activities: [],
+                    sticky: None,
+                },
+                Workspace {
+                    name: WorkspaceName(
+                        "utils",
+                    ),
+                    open_on_output: None,
+                    layout: None,
+                    activities: [],
+                    sticky: Some(
+                        true,
+                    ),
+                },
+                Workspace {
+                    name: WorkspaceName(
+                        "no-stick",
+                    ),
+                    open_on_output: None,
+                    layout: None,
+                    activities: [],
+                    sticky: Some(
+                        false,
+                    ),
                 },
             ],
             activities: [

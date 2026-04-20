@@ -10,6 +10,23 @@ pub struct Workspace {
     pub open_on_output: Option<String>,
     #[knuffel(child)]
     pub layout: Option<WorkspaceLayoutPart>,
+    /// Names of activities this workspace belongs to, in declaration order.
+    ///
+    /// Parsing is liberal: unknown activity names are accepted here and
+    /// validated at layout consumption time. Duplicates (a workspace listing
+    /// the same activity twice) are also not rejected at parse time; the
+    /// consumer deduplicates as needed.
+    #[knuffel(children(name = "activity"), unwrap(argument))]
+    pub activities: Vec<String>,
+    /// Explicit `sticky` flag.
+    ///
+    /// `None` means the config did not declare `sticky` for this workspace
+    /// (consumer defaults to `false`). `Some(true)` / `Some(false)` reflect
+    /// the configured value. Keeping "unset" distinct from "explicitly
+    /// `sticky false`" lets future config-reload logic diff against a live
+    /// workspace without ambiguity.
+    #[knuffel(child, unwrap(argument))]
+    pub sticky: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,5 +110,31 @@ impl<S: knuffel::traits::ErrorSpan> knuffel::DecodeScalar<S> for WorkspaceName {
                 Ok(Self(String::new()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Config;
+
+    /// Cross-reference validation belongs to the layout consumer, not to KDL
+    /// parsing: a workspace naming an activity that does not exist (or naming
+    /// the same activity twice) must parse successfully. This pins that
+    /// contract so a future tightening that breaks it trips here first.
+    #[test]
+    fn workspace_activity_unknown_name_is_liberally_accepted() {
+        let config = Config::parse_mem(
+            r#"
+            workspace "ws" {
+                activity "DoesNotExist"
+                activity "AlsoDoesNotExist"
+            }
+            "#,
+        )
+        .expect("workspace with unknown activity names must still parse");
+
+        let ws = &config.workspaces[0];
+        assert_eq!(ws.activities, vec!["DoesNotExist", "AlsoDoesNotExist"]);
+        assert_eq!(ws.sticky, None);
     }
 }
