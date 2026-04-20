@@ -789,8 +789,8 @@ impl<W: LayoutElement> Layout<W> {
     fn with_options_and_workspaces(clock: Clock, config: &Config, options: Options) -> Self {
         let opts = Rc::new(options);
 
-        let seed = Activity::new_runtime(DEFAULT_ACTIVITY_NAME.to_owned());
-        let seed_id = seed.id();
+        let activities = Activities::from_config_or_default(&config.activities);
+        let seed_id = activities.active_id();
 
         let mut workspaces: HashMap<WorkspaceId, Workspace<W>> = HashMap::new();
         let workspace_ids = config
@@ -818,7 +818,7 @@ impl<W: LayoutElement> Layout<W> {
             active_monitor_idx: 0,
             disconnected_workspace_ids: workspace_ids,
             workspaces,
-            activities: Activities::new(seed),
+            activities,
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,

@@ -4407,7 +4407,7 @@ fn build_activities_ipc_mirrors_seed_state() {
     // or `build_focused_activity_ipc` returning the wrong entry.
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta_activity.id();
-    layout.activities.test_insert(beta_activity);
+    layout.activities.insert(beta_activity);
     layout.switch_activity(beta_id);
 
     let ipc = crate::ipc::server::build_activities_ipc(&layout);
@@ -4534,7 +4534,7 @@ fn layout_switch_activity_previous_toggles_active() {
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta_activity.id();
-    layout.activities.test_insert(beta_activity);
+    layout.activities.insert(beta_activity);
 
     // Switch to beta — this populates previous = seed_id.
     layout.switch_activity(beta_id);
@@ -4563,7 +4563,7 @@ fn switch_activity_bootstraps_view_on_first_visit() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.test_insert(beta);
+    layout.activities.insert(beta);
 
     layout.switch_activity(beta_id);
 
@@ -4605,7 +4605,7 @@ fn switch_activity_preserves_seed_dormant_view() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.test_insert(beta);
+    layout.activities.insert(beta);
 
     layout.switch_activity(beta_id);
 
@@ -4633,7 +4633,7 @@ fn switch_activity_reuses_existing_view_entry() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.test_insert(beta);
+    layout.activities.insert(beta);
 
     layout.switch_activity(beta_id);
     layout.verify_invariants();
@@ -4666,7 +4666,7 @@ fn switch_activity_with_tagged_workspace_builds_view_from_pool() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.test_insert(beta);
+    layout.activities.insert(beta);
 
     // Pick a workspace currently on this monitor (the bottom bookend is always present)
     // and add beta to its activity set. `activities` is pub(super) on Workspace, so this
@@ -4712,7 +4712,7 @@ fn switch_activity_creates_views_for_all_connected_monitors() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.test_insert(beta);
+    layout.activities.insert(beta);
 
     layout.switch_activity(beta_id);
 
@@ -4752,7 +4752,7 @@ fn switch_activity_tagged_workspace_output_affinity() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.test_insert(beta);
+    layout.activities.insert(beta);
 
     // Tag a workspace bound to out2 (only) with beta.
     let pick = layout
@@ -4940,7 +4940,7 @@ fn workspaces_with_activity_filters_by_membership() {
     // Mint a distinct activity and install it in the pool (test-only path).
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.test_insert(beta_activity);
+    layout.activities.insert(beta_activity);
 
     // Stamp the first workspace (lowest id) with beta-only; leave the rest
     // as alpha-only.  Direct field mutation is legal here: tests live in
@@ -5112,7 +5112,7 @@ fn ipc_workspace_snapshot_hidden_workspace_has_idx_zero_and_flag_false() {
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.test_insert(beta_activity);
+    layout.activities.insert(beta_activity);
 
     // Stamp the lowest-id workspace with beta-only so it leaves the active
     // (seed) activity's membership.
@@ -5272,7 +5272,7 @@ fn ipc_workspace_snapshot_mixed_visibility_preserves_pass_disjointness() {
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.test_insert(beta_activity);
+    layout.activities.insert(beta_activity);
 
     // ws_b: beta-only (hidden, pass 2).
     // ws_c: alpha + beta (visible via alpha, pass 1).

@@ -314,6 +314,49 @@ impl Activities {
         }
     }
 
+    /// Build an `Activities` pool from the parsed `config.activities` list.
+    ///
+    /// Empty input yields a single runtime "Default" activity (DD §6.5
+    /// backwards-compat: a config with no `activity` blocks must behave
+    /// identically to today's single-activity world).
+    ///
+    /// Non-empty input: the first entry becomes the seed (active cursor), the
+    /// rest are inserted in declaration order via [`Self::insert`]. All entries
+    /// are flagged `is_config_declared`. After construction, `active_id()`
+    /// equals the id of the `Activity` minted from the first config entry, and
+    /// `previous_id() == None`.
+    pub fn from_config_or_default(config_activities: &[niri_config::Activity]) -> Self {
+        if config_activities.is_empty() {
+            return Self::new(Activity::new_runtime("Default".to_owned()));
+        }
+
+        let mut iter = config_activities.iter();
+        let first = iter
+            .next()
+            .expect("non-empty check above guarantees at least one entry");
+        let mut pool = Self::new(Activity::new_config_declared(first.name.0.clone()));
+        for entry in iter {
+            pool.insert(Activity::new_config_declared(entry.name.0.clone()));
+        }
+        pool
+    }
+
+    /// Insert an additional activity into the pool, preserving the
+    /// id-equals-key invariant. The only other inserter is [`Self::new`]
+    /// (seed); runtime multi-activity population will later arrive via the
+    /// `CreateActivity` action (Phase 1b scope), and config-declared
+    /// multi-activity population arrives via [`Self::from_config_or_default`].
+    ///
+    /// Panics if `activity.id()` is already present in the pool — ids are
+    /// monotonic and minted by `ActivityId::next()`, so a collision indicates
+    /// a logic bug upstream (e.g., a double-insert).
+    pub(super) fn insert(&mut self, activity: Activity) {
+        assert!(
+            self.map.insert(activity.id, activity).is_none(),
+            "Activities::insert: id already present",
+        );
+    }
+
     pub fn active(&self) -> &Activity {
         self.map
             .get(&self.active)
@@ -352,15 +395,6 @@ impl Activities {
 
     pub fn contains(&self, id: ActivityId) -> bool {
         self.map.contains_key(&id)
-    }
-
-    /// Test-only: insert an additional activity into the pool, preserving the
-    /// id-equals-key invariant. Gated `#[cfg(test)]` because the only
-    /// production inserter is [`Self::new`] (seed); runtime multi-activity
-    /// population arrives with the `CreateActivity` action.
-    #[cfg(test)]
-    pub(super) fn test_insert(&mut self, activity: Activity) {
-        self.map.insert(activity.id, activity);
     }
 
     /// Flip the active cursor to `target`, recording the previously-active id
@@ -720,7 +754,7 @@ mod tests {
         let other_id = other.id();
 
         let mut acts = Activities::new(seed);
-        acts.test_insert(other);
+        acts.insert(other);
 
         // Establish a non-None previous.
         acts.set_active(other_id); // previous = Some(seed_id), active = other_id
@@ -740,7 +774,7 @@ mod tests {
         let other_id = other.id();
 
         let mut acts = Activities::new(seed);
-        acts.test_insert(other);
+        acts.insert(other);
 
         acts.set_active(other_id);
 
@@ -758,5 +792,35 @@ mod tests {
         let mut acts = Activities::new(seed);
         // `u64::MAX` cannot collide with a runtime-minted id (counter starts at 0).
         acts.set_active(ActivityId::specific(u64::MAX));
+    }
+
+    #[test]
+    fn activities_from_config_or_default_empty_seeds_runtime_default() {
+        let acts = Activities::from_config_or_default(&[]);
+        assert_eq!(acts.len(), 1);
+        let only = acts.active();
+        assert_eq!(only.name(), "Default");
+        assert!(!only.is_config_declared());
+        assert_eq!(acts.active_id(), only.id());
+        assert_eq!(acts.previous_id(), None);
+    }
+
+    #[test]
+    fn activities_from_config_or_default_multiple_preserves_order_and_first_active() {
+        let cfg = vec![
+            niri_config::Activity {
+                name: niri_config::ActivityName("Work".to_owned()),
+            },
+            niri_config::Activity {
+                name: niri_config::ActivityName("Personal".to_owned()),
+            },
+        ];
+        let acts = Activities::from_config_or_default(&cfg);
+        assert_eq!(acts.len(), 2);
+        let names: Vec<&str> = acts.iter().map(|a| a.name()).collect();
+        assert_eq!(names, vec!["Work", "Personal"]);
+        assert!(acts.iter().all(|a| a.is_config_declared()));
+        assert_eq!(acts.active().name(), "Work");
+        assert_eq!(acts.previous_id(), None);
     }
 }
