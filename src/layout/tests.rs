@@ -4530,44 +4530,65 @@ fn workspaces_all_output_id_matches_workspace() {
 
 #[test]
 fn workspaces_with_activity_filters_by_membership() {
-    // Seed activity alpha: on-output workspace stamped with alpha.
-    // Insert a second activity beta and stamp one pool workspace with beta
-    // only. `workspaces_with_activity(alpha, …)` must not see the
-    // beta-only workspace; `workspaces_with_activity(beta, …)` must see it
-    // and only it (on that output).
-    let ops = [Op::AddOutput(1)];
+    // Two workspaces on a single output, both initially stamped with alpha.
+    // Re-stamp exactly one with beta-only so alpha_ids is non-empty after
+    // the mutation; the vacuous-assertion trap from having a single workspace
+    // is avoided because alpha_ws_id stays alpha-only.
+    //
+    // Assertions:
+    //   alpha filter: exact set {alpha_ws_id} — no more, no less.
+    //   beta  filter: exact set {beta_ws_id}.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();
     let mon_out = layout.monitors[0].output_id();
 
-    // Mint a distinct activity and install it in the pool (test-only
-    // path). `Activity::new_runtime` mints a fresh id; capture it so we
-    // can stamp a workspace with that id and query it via the filter.
+    // Capture all workspace ids on this output before any mutation so we
+    // can deterministically designate one for beta (smallest id by value)
+    // while leaving the remainder as alpha-only.
+    let mut on_output: Vec<WorkspaceId> = layout
+        .workspaces
+        .values()
+        .filter(|ws| ws.output_id() == Some(&mon_out))
+        .map(|ws| ws.id())
+        .collect();
+    on_output.sort_by_key(|id| id.get());
+    assert!(
+        on_output.len() >= 2,
+        "need at least two workspaces on the output for a non-vacuous test"
+    );
+
+    // Mint a distinct activity and install it in the pool (test-only path).
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
     layout.activities.test_insert(beta_activity);
 
-    // Pick one pool workspace and re-stamp its activity set to beta-only.
-    // Direct field mutation is legal here: tests live in the `super` module
-    // and `Workspace::activities` is `pub(super)`.
-    let beta_ws_id = {
-        let ws = layout
-            .workspaces
-            .values_mut()
-            .find(|ws| ws.output_id() == Some(&mon_out))
-            .expect("at least one workspace must be bound to the connected output");
-        ws.activities.clear();
-        ws.activities.insert(beta);
-        ws.id()
-    };
+    // Stamp the first workspace (lowest id) with beta-only; leave the rest
+    // as alpha-only.  Direct field mutation is legal here: tests live in
+    // the `super` module and `Workspace::activities` is `pub(super)`.
+    let beta_ws_id = on_output[0];
+    let expected_alpha_ids: HashSet<WorkspaceId> = on_output[1..].iter().copied().collect();
+    layout
+        .workspaces
+        .get_mut(&beta_ws_id)
+        .expect("beta_ws_id must be a pool key")
+        .activities = std::iter::once(beta).collect();
 
     let alpha_ids: HashSet<WorkspaceId> = layout
         .workspaces_with_activity(alpha, &mon_out)
         .map(|ws| ws.id())
         .collect();
-    assert!(
-        !alpha_ids.contains(&beta_ws_id),
-        "alpha filter must exclude the beta-only workspace",
+    assert_eq!(
+        alpha_ids,
+        expected_alpha_ids,
+        "alpha filter must yield exactly the alpha-only workspaces",
     );
 
     let beta_ids: HashSet<WorkspaceId> = layout
@@ -4579,6 +4600,8 @@ fn workspaces_with_activity_filters_by_membership() {
         HashSet::from([beta_ws_id]),
         "beta filter on this output must yield exactly the beta-stamped workspace",
     );
+
+    layout.verify_invariants();
 }
 
 #[test]
@@ -4651,5 +4674,30 @@ fn workspaces_with_activity_includes_sticky() {
     assert!(
         ids.contains(&sticky_id),
         "sticky workspace with seed in its activity set must appear in the filter",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn workspaces_with_activity_unknown_activity_yields_empty() {
+    // An ActivityId that was never inserted into `layout.activities` must
+    // yield an empty iterator — the docstring guarantees silent empty
+    // rather than a panic for unknown ids.
+    let ops = [Op::AddOutput(1)];
+    let layout = check_ops(ops);
+
+    // Mint a fresh activity but deliberately do NOT insert it; its id is
+    // unknown to the layout's Activities map.
+    let dead_activity = super::activity::Activity::new_runtime("dead".to_owned());
+    let dead_id = dead_activity.id();
+    // `dead_activity` is intentionally dropped without inserting.
+
+    let out = layout.monitors[0].output_id();
+    let results: Vec<_> = layout.workspaces_with_activity(dead_id, &out).collect();
+    assert!(
+        results.is_empty(),
+        "unknown activity id must yield an empty iterator, got {} workspaces",
+        results.len(),
     );
 }
