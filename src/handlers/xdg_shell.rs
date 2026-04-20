@@ -462,10 +462,13 @@ impl XdgShellHandler for State {
                         .map(|(mon, _)| mon.output().clone());
                     let mon = mon.map(|(mon, _)| mon);
 
-                    let pool = self.niri.layout.workspace_pool();
+                    let layout = &self.niri.layout;
                     let ws = mon
-                        .map(|mon| mon.active_workspace_ref(pool))
-                        .or_else(|| self.niri.layout.active_workspace());
+                        .map(|mon| {
+                            let view = layout.active_view(&mon.output_id());
+                            mon.active_workspace_ref(layout.workspace_pool(), view)
+                        })
+                        .or_else(|| layout.active_workspace());
 
                     if let Some(ws) = ws {
                         // If the window is pending fullscreen, then this will do nothing. But
@@ -559,13 +562,25 @@ impl XdgShellHandler for State {
                         .map(|(mon, _)| mon.output().clone());
                     let mon = mon.map(|(mon, _)| mon);
 
-                    let pool = self.niri.layout.workspace_pool();
+                    let layout = &self.niri.layout;
                     let ws = workspace_name
                         .as_deref()
-                        .and_then(|name| mon.map(|mon| mon.find_named_workspace(pool, name)))
+                        .and_then(|name| {
+                            // .map (not .and_then) preserves Option<Option<_>> so that a named
+                            // workspace rule with no match does NOT fall through to the active-
+                            // workspace fallback below — the client asked for a specific workspace
+                            // and gets nothing if it doesn't exist.
+                            mon.map(|mon| {
+                                let view = layout.active_view(&mon.output_id());
+                                mon.find_named_workspace(layout.workspace_pool(), view, name)
+                            })
+                        })
                         .unwrap_or_else(|| {
-                            mon.map(|mon| mon.active_workspace_ref(pool))
-                                .or_else(|| self.niri.layout.active_workspace())
+                            mon.map(|mon| {
+                                let view = layout.active_view(&mon.output_id());
+                                mon.active_workspace_ref(layout.workspace_pool(), view)
+                            })
+                            .or_else(|| layout.active_workspace())
                         });
 
                     if let Some(ws) = ws {
@@ -680,10 +695,13 @@ impl XdgShellHandler for State {
                         .map(|(mon, _)| mon.output().clone());
                     let mon = mon.map(|(mon, _)| mon);
 
-                    let pool = self.niri.layout.workspace_pool();
+                    let layout = &self.niri.layout;
                     let ws = mon
-                        .map(|mon| mon.active_workspace_ref(pool))
-                        .or_else(|| self.niri.layout.active_workspace());
+                        .map(|mon| {
+                            let view = layout.active_view(&mon.output_id());
+                            mon.active_workspace_ref(layout.workspace_pool(), view)
+                        })
+                        .or_else(|| layout.active_workspace());
 
                     if let Some(ws) = ws {
                         toplevel.with_pending_state(|state| {
@@ -772,13 +790,24 @@ impl XdgShellHandler for State {
                         .map(|(mon, _)| mon.output().clone());
                     let mon = mon.map(|(mon, _)| mon);
 
-                    let pool = self.niri.layout.workspace_pool();
+                    let layout = &self.niri.layout;
                     let ws = workspace_name
                         .as_deref()
-                        .and_then(|name| mon.map(|mon| mon.find_named_workspace(pool, name)))
+                        .and_then(|name| {
+                            // .map (not .and_then) preserves Option<Option<_>> so that a named
+                            // workspace rule with no match does NOT fall through to the active-
+                            // workspace fallback below.
+                            mon.map(|mon| {
+                                let view = layout.active_view(&mon.output_id());
+                                mon.find_named_workspace(layout.workspace_pool(), view, name)
+                            })
+                        })
                         .unwrap_or_else(|| {
-                            mon.map(|mon| mon.active_workspace_ref(pool))
-                                .or_else(|| self.niri.layout.active_workspace())
+                            mon.map(|mon| {
+                                let view = layout.active_view(&mon.output_id());
+                                mon.active_workspace_ref(layout.workspace_pool(), view)
+                            })
+                            .or_else(|| layout.active_workspace())
                         });
 
                     if let Some(ws) = ws {
@@ -1117,14 +1146,24 @@ impl State {
         let is_floating = rules.compute_open_floating(toplevel);
 
         // Tell the surface the preferred size and bounds for its likely output.
-        let pool = self.niri.layout.workspace_pool();
+        let layout = &self.niri.layout;
         let ws = rules
             .open_on_workspace
             .as_deref()
-            .and_then(|name| mon.map(|mon| mon.find_named_workspace(pool, name)))
+            .and_then(|name| {
+                // .map (not .and_then) preserves Option<Option<_>> so that a named workspace
+                // rule with no match does NOT fall through to the active-workspace fallback below.
+                mon.map(|mon| {
+                    let view = layout.active_view(&mon.output_id());
+                    mon.find_named_workspace(layout.workspace_pool(), view, name)
+                })
+            })
             .unwrap_or_else(|| {
-                mon.map(|mon| mon.active_workspace_ref(pool))
-                    .or_else(|| self.niri.layout.active_workspace())
+                mon.map(|mon| {
+                    let view = layout.active_view(&mon.output_id());
+                    mon.active_workspace_ref(layout.workspace_pool(), view)
+                })
+                .or_else(|| layout.active_workspace())
             });
 
         let mut is_pending_maximized = false;

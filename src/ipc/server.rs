@@ -610,7 +610,9 @@ impl State {
                     name: ws.name().cloned(),
                     output: mon.map(|mon| mon.output_name().clone()),
                     is_urgent: ws.is_urgent(),
-                    is_active: mon.is_some_and(|mon| mon.active_workspace_idx() == ws_idx),
+                    is_active: mon.is_some_and(|mon| {
+                        layout.active_view(&mon.output_id()).active_position() == ws_idx
+                    }),
                     is_focused: Some(id) == focused_ws_id,
                     active_window_id: ws.active_window().map(|win| win.id().get()),
                 }

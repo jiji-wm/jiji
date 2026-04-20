@@ -932,11 +932,13 @@ impl State {
         let Some(output) = self.niri.layout.active_output() else {
             return false;
         };
-        let pool = self.niri.layout.workspace_pool();
-        let monitor = self.niri.layout.monitor_for_output(output).unwrap();
+        let layout = &self.niri.layout;
+        let monitor = layout.monitor_for_output(output).unwrap();
+        let view = layout.active_view(&monitor.output_id());
+        let pool = layout.workspace_pool();
 
         let mut rv = false;
-        let rect = monitor.active_window_visual_rectangle(pool);
+        let rect = monitor.active_window_visual_rectangle(pool, view);
 
         if let Some(rect) = rect {
             let output_geo = self.niri.global_space.output_geometry(output).unwrap();
@@ -1033,9 +1035,10 @@ impl State {
         {
             // Don't refresh cursor focus during transitions.
             if let Some((output, _)) = self.niri.output_under(location) {
-                let pool = self.niri.layout.workspace_pool();
-                let monitor = self.niri.layout.monitor_for_output(output).unwrap();
-                if monitor.are_transitions_ongoing(pool) {
+                let layout = &self.niri.layout;
+                let monitor = layout.monitor_for_output(output).unwrap();
+                let view = layout.active_view(&monitor.output_id());
+                if monitor.are_transitions_ongoing(layout.workspace_pool(), view) {
                     return;
                 }
             }
@@ -1775,25 +1778,34 @@ impl State {
             }
 
             let seed_activity = self.niri.layout.active_activity_id();
-            let (monitors, pool) = self.niri.layout.monitors_and_pool_mut();
-            for mon in monitors {
-                if mon.output() != output {
-                    continue;
-                }
-
-                let mut layout_config = config.and_then(|c| c.layout.clone());
-                // Support the deprecated non-layout background-color key.
-                if let Some(layout) = &mut layout_config {
-                    if layout.background_color.is_none() {
-                        layout.background_color = config.and_then(|c| c.background_color);
+            let output_id = crate::layout::workspace::OutputId::new(output);
+            if self
+                .niri
+                .layout
+                .monitor_for_output(output)
+                .is_some()
+            {
+                let (monitors, pool, view) =
+                    self.niri.layout.monitors_pool_view_mut(&output_id);
+                for mon in monitors {
+                    if mon.output() != output {
+                        continue;
                     }
-                }
 
-                if mon.update_layout_config(pool, layout_config, seed_activity) {
-                    // Also redraw these; if anything, the background color could've changed.
-                    recolored_outputs.push(output.clone());
+                    let mut layout_config = config.and_then(|c| c.layout.clone());
+                    // Support the deprecated non-layout background-color key.
+                    if let Some(layout) = &mut layout_config {
+                        if layout.background_color.is_none() {
+                            layout.background_color = config.and_then(|c| c.background_color);
+                        }
+                    }
+
+                    if mon.update_layout_config(pool, view, layout_config, seed_activity) {
+                        // Also redraw these; if anything, the background color could've changed.
+                        recolored_outputs.push(output.clone());
+                    }
+                    break;
                 }
-                break;
             }
         }
 

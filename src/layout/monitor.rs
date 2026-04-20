@@ -62,11 +62,6 @@ pub struct Monitor<W: LayoutElement> {
     // should only consider overlay and top layer-shell surfaces. However, Smithay doesn't easily
     // let you do this at the moment.
     working_area: Rectangle<f64, Logical>,
-    /// Active / previous cursor and visual ordering of workspaces for this monitor.
-    ///
-    /// Workspace values live in `Layout.workspaces`; `view.ids()` is the
-    /// authoritative ordering for this monitor. `view` is never empty.
-    pub(super) view: WorkspaceView,
     /// Witness for `W`; workspace values live in the pool.
     _phantom: PhantomData<W>,
     /// In-progress switch between workspaces.
@@ -290,12 +285,13 @@ impl From<&super::OverviewProgress> for OverviewProgress {
 }
 
 impl<W: LayoutElement> Monitor<W> {
-    /// Build a monitor owning `workspace_ids`.
+    /// Build a monitor that displays `workspace_ids` plus bookend workspaces.
     ///
     /// All `workspace_ids` must already be keys in `pool`. `Monitor::new` binds each of them to
     /// `output`, syncs config, then inserts empty bookend workspace(s) into the pool (top and/or
-    /// bottom per `options.layout.empty_workspace_above_first`). The resulting `view.ids()` is
-    /// `[optional_top_empty, ...workspace_ids_in_order..., bottom_empty]`.
+    /// bottom per `options.layout.empty_workspace_above_first`). Returns the new `Monitor` and
+    /// a `WorkspaceView` whose `ids()` is `[optional_top_empty, ...workspace_ids_in_order..., bottom_empty]`;
+    /// the caller stores the view in the active activity's `views` map.
     // Hits clippy::too_many_arguments (8/7). Every argument is load-bearing — splitting into
     // helper structs would obscure the call-site contract with `Layout::add_output`; the only
     // call site passes them all in from `Layout` fields. `seed_activity` is required by the
@@ -310,7 +306,7 @@ impl<W: LayoutElement> Monitor<W> {
         base_options: Rc<Options>,
         layout_config: Option<LayoutPart>,
         seed_activity: ActivityId,
-    ) -> Self {
+    ) -> (Self, WorkspaceView) {
         let options =
             Rc::new(Options::clone(&base_options).with_merged_layout(layout_config.as_ref()));
 
@@ -364,13 +360,12 @@ impl<W: LayoutElement> Monitor<W> {
 
         let view = WorkspaceView::new(ids, active_workspace_idx);
 
-        Self {
+        let monitor = Self {
             output_name: output.name(),
             output,
             scale,
             view_size,
             working_area,
-            view,
             _phantom: PhantomData,
             insert_hint: None,
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
@@ -382,19 +377,21 @@ impl<W: LayoutElement> Monitor<W> {
             base_options,
             options,
             layout_config,
-        }
+        };
+        (monitor, view)
     }
 
     /// Borrow the workspace this monitor displays at position `pos`.
     ///
-    /// Panics if `pos` is out of bounds for `self.view.ids()` or if the id is absent from `pool`;
+    /// Panics if `pos` is out of bounds for `view.ids()` or if the id is absent from `pool`;
     /// both indicate a broken pool/view invariant, not user error.
     pub fn workspace_at<'a>(
         &self,
         pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
         pos: usize,
     ) -> &'a Workspace<W> {
-        let id = self.view.ids()[pos];
+        let id = view.ids()[pos];
         pool.get(&id).expect("view id must be a key in the pool")
     }
 
@@ -404,16 +401,17 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn workspace_at_mut<'a>(
         &self,
         pool: &'a mut HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
         pos: usize,
     ) -> &'a mut Workspace<W> {
-        let id = self.view.ids()[pos];
+        let id = view.ids()[pos];
         pool.get_mut(&id)
             .expect("view id must be a key in the pool")
     }
 
     /// Number of workspaces this monitor displays, including empty bookends.
-    pub fn workspaces_len(&self) -> usize {
-        self.view.len()
+    pub fn workspaces_len(view: &WorkspaceView) -> usize {
+        view.len()
     }
 
     pub fn output(&self) -> &Output {
@@ -433,41 +431,25 @@ impl<W: LayoutElement> Monitor<W> {
         OutputId::new(&self.output)
     }
 
-    /// Access the per-monitor workspace view. When [`Layout`] is reachable,
-    /// prefer [`Layout::active_view`] for view-only reads or [`Layout::ctx_for`]
-    /// for render/hit-test contexts; this accessor exists for fallback call sites
-    /// that can't reach those seams (detached monitors post-`remove`, or
-    /// split-borrow contexts post-[`Layout::monitors_and_pool_mut`]).
-    pub fn view(&self) -> &WorkspaceView {
-        &self.view
-    }
-
-    /// Writer counterpart to [`Self::view`] used by call sites that have
-    /// already split `self` into disjoint field borrows (e.g. via
-    /// `Layout::monitors_and_pool_mut`) and therefore cannot reach the
-    /// `Layout::active_view_mut` seam. Direct field access is reserved to
-    /// `monitor.rs` internals.
-    pub(super) fn view_mut(&mut self) -> &mut WorkspaceView {
-        &mut self.view
-    }
-
-    pub fn active_workspace_idx(&self) -> usize {
-        self.view.active_position()
+    pub fn active_workspace_idx(view: &WorkspaceView) -> usize {
+        view.active_position()
     }
 
     pub fn active_workspace_ref<'a>(
         &self,
         pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
     ) -> &'a Workspace<W> {
-        self.workspace_at(pool, self.view.active_position())
+        self.workspace_at(pool, view, view.active_position())
     }
 
     pub fn find_named_workspace<'a>(
         &self,
         pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
         workspace_name: &str,
     ) -> Option<&'a Workspace<W>> {
-        self.view.ids().iter().find_map(|id| {
+        view.ids().iter().find_map(|id| {
             let ws = pool.get(id).expect("view id must be a key in the pool");
             ws.name
                 .as_ref()
@@ -477,11 +459,11 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn find_named_workspace_index(
-        &self,
         pool: &HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
         workspace_name: &str,
     ) -> Option<usize> {
-        self.view.ids().iter().position(|id| {
+        view.ids().iter().position(|id| {
             pool.get(id)
                 .expect("view id must be a key in the pool")
                 .name
@@ -493,38 +475,45 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn active_workspace<'a>(
         &self,
         pool: &'a mut HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
     ) -> &'a mut Workspace<W> {
-        self.workspace_at_mut(pool, self.view.active_position())
+        self.workspace_at_mut(pool, view, view.active_position())
     }
 
     pub fn windows<'a>(
         &'a self,
         pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        view: &'a WorkspaceView,
     ) -> impl Iterator<Item = &'a W> + 'a {
-        self.view
-            .ids()
+        view.ids()
             .iter()
             .map(move |id| pool.get(id).expect("view id must be a key in the pool"))
             .flat_map(|ws| ws.windows())
     }
 
-    pub fn has_window(&self, pool: &HashMap<WorkspaceId, Workspace<W>>, window: &W::Id) -> bool {
-        self.windows(pool).any(|win| win.id() == window)
+    pub fn has_window(
+        &self,
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
+        window: &W::Id,
+    ) -> bool {
+        self.windows(pool, view).any(|win| win.id() == window)
     }
 
-    pub fn activate_workspace(&mut self, idx: usize) {
-        self.activate_workspace_with_anim_config(idx, None);
+    pub fn activate_workspace(&mut self, view: &mut WorkspaceView, idx: usize) {
+        self.activate_workspace_with_anim_config(view, idx, None);
     }
 
     pub fn activate_workspace_with_anim_config(
         &mut self,
+        view: &mut WorkspaceView,
         idx: usize,
         config: Option<niri_config::Animation>,
     ) {
         // FIXME: also compute and use current velocity.
-        let current_idx = self.workspace_render_idx();
+        let current_idx = self.workspace_render_idx(view);
 
-        let changed = self.view.activate(idx);
+        let changed = view.activate(idx);
 
         let config = config.unwrap_or(self.options.animations.workspace_switch.0);
 
@@ -562,15 +551,15 @@ impl<W: LayoutElement> Monitor<W> {
     pub(super) fn resolve_add_window_target<'a>(
         &self,
         pool: &HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
         target: MonitorAddWindowTarget<'a, W>,
     ) -> (usize, WorkspaceAddWindowTarget<'a, W>) {
         match target {
             MonitorAddWindowTarget::Auto => {
-                (self.view.active_position(), WorkspaceAddWindowTarget::Auto)
+                (view.active_position(), WorkspaceAddWindowTarget::Auto)
             }
             MonitorAddWindowTarget::Workspace { id, column_idx } => {
-                let idx = self
-                    .view
+                let idx = view
                     .position_of(id)
                     .expect("workspace id must be on this monitor");
                 let target = if let Some(column_idx) = column_idx {
@@ -581,8 +570,7 @@ impl<W: LayoutElement> Monitor<W> {
                 (idx, target)
             }
             MonitorAddWindowTarget::NextTo(win_id) => {
-                let idx = self
-                    .view
+                let idx = view
                     .ids()
                     .iter()
                     .position(|id| {
@@ -596,65 +584,73 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    pub fn switch_workspace_up(&mut self) {
+    pub fn switch_workspace_up(&mut self, view: &mut WorkspaceView) {
         let new_idx = match &self.workspace_switch {
             // During a DnD scroll, select the prev apparent workspace.
             Some(WorkspaceSwitch::Gesture(gesture)) if gesture.dnd_last_event_time.is_some() => {
                 let current = gesture.current_idx;
                 let new = current.ceil() - 1.;
-                new.clamp(0., (self.view.len() - 1) as f64) as usize
+                new.clamp(0., (view.len() - 1) as f64) as usize
             }
-            _ => self.view.active_position().saturating_sub(1),
+            _ => view.active_position().saturating_sub(1),
         };
 
-        self.activate_workspace(new_idx);
+        self.activate_workspace(view, new_idx);
     }
 
-    pub fn switch_workspace_down(&mut self) {
+    pub fn switch_workspace_down(&mut self, view: &mut WorkspaceView) {
         let new_idx = match &self.workspace_switch {
             // During a DnD scroll, select the next apparent workspace.
             Some(WorkspaceSwitch::Gesture(gesture)) if gesture.dnd_last_event_time.is_some() => {
                 let current = gesture.current_idx;
                 let new = current.floor() + 1.;
-                new.clamp(0., (self.view.len() - 1) as f64) as usize
+                new.clamp(0., (view.len() - 1) as f64) as usize
             }
-            _ => min(self.view.active_position() + 1, self.view.len() - 1),
+            _ => min(view.active_position() + 1, view.len() - 1),
         };
 
-        self.activate_workspace(new_idx);
+        self.activate_workspace(view, new_idx);
     }
 
-    pub fn switch_workspace(&mut self, idx: usize) {
-        self.activate_workspace(min(idx, self.view.len() - 1));
+    pub fn switch_workspace(&mut self, view: &mut WorkspaceView, idx: usize) {
+        self.activate_workspace(view, min(idx, view.len() - 1));
     }
 
-    pub fn switch_workspace_auto_back_and_forth(&mut self, idx: usize) {
-        let idx = min(idx, self.view.len() - 1);
+    pub fn switch_workspace_auto_back_and_forth(&mut self, view: &mut WorkspaceView, idx: usize) {
+        let idx = min(idx, view.len() - 1);
 
-        if idx == self.view.active_position() {
-            if let Some(prev_idx) = self.view.previous_position() {
-                self.switch_workspace(prev_idx);
+        if idx == view.active_position() {
+            if let Some(prev_idx) = view.previous_position() {
+                self.switch_workspace(view, prev_idx);
             }
         } else {
-            self.switch_workspace(idx);
+            self.switch_workspace(view, idx);
         }
     }
 
-    pub fn switch_workspace_previous(&mut self) {
-        if let Some(idx) = self.view.previous_position() {
-            self.switch_workspace(idx);
+    pub fn switch_workspace_previous(&mut self, view: &mut WorkspaceView) {
+        if let Some(idx) = view.previous_position() {
+            self.switch_workspace(view, idx);
         }
     }
 
-    pub fn active_window<'a>(&self, pool: &'a HashMap<WorkspaceId, Workspace<W>>) -> Option<&'a W> {
-        self.active_workspace_ref(pool).active_window()
+    pub fn active_window<'a>(
+        &self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
+    ) -> Option<&'a W> {
+        self.active_workspace_ref(pool, view).active_window()
     }
 
     /// Advances per-monitor animations. Returns `true` when a workspace-switch animation
     /// completed this tick; the caller must then run `Layout::clean_up_workspaces_on` for this
     /// monitor — `clean_up_workspaces` lives on `Layout`, so Monitor can no longer call it inline.
     #[must_use]
-    pub fn advance_animations(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) -> bool {
+    pub fn advance_animations(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
+    ) -> bool {
         let mut workspace_switch_finished = false;
         match &mut self.workspace_switch {
             Some(WorkspaceSwitch::Animation(anim)) if anim.is_done() => {
@@ -689,7 +685,7 @@ impl<W: LayoutElement> Monitor<W> {
             None => (),
         }
 
-        for id in self.view.ids() {
+        for id in view.ids() {
             pool.get_mut(id)
                 .expect("view id must be a key in the pool")
                 .advance_animations();
@@ -698,22 +694,28 @@ impl<W: LayoutElement> Monitor<W> {
         workspace_switch_finished
     }
 
-    pub(super) fn are_animations_ongoing(&self, pool: &HashMap<WorkspaceId, Workspace<W>>) -> bool {
+    pub(super) fn are_animations_ongoing(
+        &self,
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
+    ) -> bool {
         self.workspace_switch
             .as_ref()
             .is_some_and(|s| s.is_animation_ongoing())
-            || self
-                .view
+            || view
                 .ids()
                 .iter()
                 .map(|id| pool.get(id).expect("view id must be a key in the pool"))
                 .any(|ws| ws.are_animations_ongoing())
     }
 
-    pub fn are_transitions_ongoing(&self, pool: &HashMap<WorkspaceId, Workspace<W>>) -> bool {
+    pub fn are_transitions_ongoing(
+        &self,
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
+    ) -> bool {
         self.workspace_switch.is_some()
-            || self
-                .view
+            || view
                 .ids()
                 .iter()
                 .map(|id| pool.get(id).expect("view id must be a key in the pool"))
@@ -723,6 +725,7 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn update_render_elements(
         &mut self,
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
         is_active: bool,
     ) {
         let mut insert_hint_ws_geo = None;
@@ -732,7 +735,7 @@ impl<W: LayoutElement> Monitor<W> {
             .and_then(|hint| hint.workspace.existing_id());
 
         for (id, geo) in self
-            .workspaces_with_render_geo_ids(true)
+            .workspaces_with_render_geo_ids(view, true)
             .collect::<Vec<_>>()
         {
             let ws = pool
@@ -751,7 +754,7 @@ impl<W: LayoutElement> Monitor<W> {
                 InsertWorkspace::Existing(ws_id) => {
                     if let Some(ws) = pool
                         .get(&ws_id)
-                        .filter(|_| self.view.ids().contains(&ws_id))
+                        .filter(|_| view.ids().contains(&ws_id))
                     {
                         if let Some(mut area) = ws.insert_hint_area(hint.position) {
                             let scale = ws.scale().fractional_scale();
@@ -795,7 +798,7 @@ impl<W: LayoutElement> Monitor<W> {
                     let hint_gap = round_logical_in_physical(scale, gap * 0.1);
                     let hint_height = gap - hint_gap * 2.;
 
-                    let next_ws_geo = self.workspaces_render_geo().nth(ws_idx).unwrap();
+                    let next_ws_geo = self.workspaces_render_geo(view).nth(ws_idx).unwrap();
                     let hint_width = round_logical_in_physical(scale, next_ws_geo.size.w * 0.75);
                     let hint_x =
                         round_logical_in_physical(scale, (next_ws_geo.size.w - hint_width) / 2.);
@@ -830,6 +833,7 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn update_config(
         &mut self,
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        view: &mut WorkspaceView,
         base_options: Rc<Options>,
         seed_activity: ActivityId,
     ) {
@@ -838,7 +842,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         if self.options.layout.empty_workspace_above_first
             != options.layout.empty_workspace_above_first
-            && self.view.len() > 1
+            && view.len() > 1
         {
             if options.layout.empty_workspace_above_first {
                 // Inlined former `self.add_workspace_top(pool)` — the pool-taking
@@ -853,15 +857,15 @@ impl<W: LayoutElement> Monitor<W> {
                 );
                 let id = ws.id();
                 assert!(pool.insert(id, ws).is_none(), "fresh id must be unique");
-                self.view.insert(0, id);
+                view.insert(0, id);
                 if let Some(switch) = &mut self.workspace_switch {
                     if 0. <= switch.target_idx() {
                         switch.offset(1);
                     }
                 }
-            } else if self.workspace_switch.is_none() && self.view.active_position() != 0 {
-                let id = self.view.ids()[0];
-                self.view.remove_at(0);
+            } else if self.workspace_switch.is_none() && view.active_position() != 0 {
+                let id = view.ids()[0];
+                view.remove_at(0);
                 assert!(
                     pool.remove(&id).is_some(),
                     "view id must be a key in the pool",
@@ -869,7 +873,7 @@ impl<W: LayoutElement> Monitor<W> {
             }
         }
 
-        for id in self.view.ids() {
+        for id in view.ids() {
             pool.get_mut(id)
                 .expect("view id must be a key in the pool")
                 .update_config(options.clone());
@@ -885,6 +889,7 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn update_layout_config(
         &mut self,
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        view: &mut WorkspaceView,
         layout_config: Option<niri_config::LayoutPart>,
         seed_activity: ActivityId,
     ) -> bool {
@@ -893,13 +898,17 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         self.layout_config = layout_config;
-        self.update_config(pool, self.base_options.clone(), seed_activity);
+        self.update_config(pool, view, self.base_options.clone(), seed_activity);
 
         true
     }
 
-    pub fn update_shaders(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) {
-        for id in self.view.ids() {
+    pub fn update_shaders(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
+    ) {
+        for id in view.ids() {
             pool.get_mut(id)
                 .expect("view id must be a key in the pool")
                 .update_shaders();
@@ -908,12 +917,16 @@ impl<W: LayoutElement> Monitor<W> {
         self.insert_hint_element.update_shaders();
     }
 
-    pub fn update_output_size(&mut self, pool: &mut HashMap<WorkspaceId, Workspace<W>>) {
+    pub fn update_output_size(
+        &mut self,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
+    ) {
         self.scale = self.output.current_scale();
         self.view_size = output_size(&self.output);
         self.working_area = compute_working_area(&self.output);
 
-        for id in self.view.ids() {
+        for id in view.ids() {
             pool.get_mut(id)
                 .expect("view id must be a key in the pool")
                 .update_output_size(&self.output);
@@ -926,12 +939,13 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn active_window_visual_rectangle(
         &self,
         pool: &HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
     ) -> Option<Rectangle<f64, Logical>> {
         if self.overview_open {
             return None;
         }
 
-        self.active_workspace_ref(pool)
+        self.active_workspace_ref(pool, view)
             .active_window_visual_rectangle()
     }
 
@@ -957,10 +971,14 @@ impl<W: LayoutElement> Monitor<W> {
         compute_overview_zoom(&self.options, progress)
     }
 
-    pub(super) fn set_overview_progress(&mut self, progress: Option<&super::OverviewProgress>) {
-        let prev_render_idx = self.workspace_render_idx();
+    pub(super) fn set_overview_progress(
+        &mut self,
+        view: &WorkspaceView,
+        progress: Option<&super::OverviewProgress>,
+    ) {
+        let prev_render_idx = self.workspace_render_idx(view);
         self.overview_progress = progress.map(OverviewProgress::from);
-        let new_render_idx = self.workspace_render_idx();
+        let new_render_idx = self.workspace_render_idx(view);
 
         // If the view jumped (can happen when going from corrected to uncorrected render_idx, for
         // example when toggling the overview in the middle of an overview animation), then restart
@@ -978,7 +996,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.overview_progress.as_ref().map(|p| p.value())
     }
 
-    pub fn workspace_render_idx(&self) -> f64 {
+    pub fn workspace_render_idx(&self, view: &WorkspaceView) -> f64 {
         // If workspace switch and overview progress are matching animations, then compute a
         // correction term to make the movement appear monotonic.
         if let (
@@ -1049,11 +1067,14 @@ impl<W: LayoutElement> Monitor<W> {
         if let Some(switch) = &self.workspace_switch {
             switch.current_idx()
         } else {
-            self.view.active_position() as f64
+            view.active_position() as f64
         }
     }
 
-    pub fn workspaces_render_geo(&self) -> impl Iterator<Item = Rectangle<f64, Logical>> {
+    pub fn workspaces_render_geo(
+        &self,
+        view: &WorkspaceView,
+    ) -> impl Iterator<Item = Rectangle<f64, Logical>> {
         let scale = self.scale.fractional_scale();
         let zoom = self.overview_zoom();
 
@@ -1066,11 +1087,11 @@ impl<W: LayoutElement> Monitor<W> {
             .to_physical_precise_round(scale)
             .to_logical(scale);
 
-        let first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
+        let first_ws_y = -self.workspace_render_idx(view) * ws_height_with_gap;
         let first_ws_y = round_logical_in_physical(scale, first_ws_y);
 
         // Return position for one-past-last workspace too.
-        (0..=self.view.len()).map(move |idx| {
+        (0..=view.len()).map(move |idx| {
             let y = first_ws_y + idx as f64 * ws_height_with_gap;
             let loc = Point::from((0., y)) + static_offset;
 
@@ -1090,7 +1111,7 @@ impl<W: LayoutElement> Monitor<W> {
     ) -> impl Iterator<Item = (&'a Workspace<W>, Rectangle<f64, Logical>)> + 'a {
         let output_geo = Rectangle::from_size(self.view_size);
 
-        let geo = self.workspaces_render_geo();
+        let geo = self.workspaces_render_geo(ctx.view());
         zip(ctx.view().ids().iter().copied(), geo)
             .map(move |(id, geo)| (ctx.workspace(id), geo))
             // Cull out workspaces outside the output.
@@ -1103,7 +1124,7 @@ impl<W: LayoutElement> Monitor<W> {
     ) -> impl Iterator<Item = ((usize, &'a Workspace<W>), Rectangle<f64, Logical>)> + 'a {
         let output_geo = Rectangle::from_size(self.view_size);
 
-        let geo = self.workspaces_render_geo();
+        let geo = self.workspaces_render_geo(ctx.view());
         zip(ctx.view().ids().iter().copied().enumerate(), geo)
             .map(move |((idx, id), geo)| ((idx, ctx.workspace(id)), geo))
             // Cull out workspaces outside the output.
@@ -1115,12 +1136,13 @@ impl<W: LayoutElement> Monitor<W> {
     /// `&mut pool` borrow through each yielded id.
     pub fn workspaces_with_render_geo_ids<'a>(
         &'a self,
+        view: &'a WorkspaceView,
         cull: bool,
     ) -> impl Iterator<Item = (WorkspaceId, Rectangle<f64, Logical>)> + 'a {
         let output_geo = Rectangle::from_size(self.view_size);
 
-        let geo = self.workspaces_render_geo();
-        let ids = self.view.ids();
+        let geo = self.workspaces_render_geo(view);
+        let ids = view.ids();
         zip(ids.iter().copied(), geo)
             // Cull out workspaces outside the output.
             .filter(move |(_id, geo)| !cull || geo.intersection(output_geo).is_some())
@@ -1382,9 +1404,9 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    pub fn workspace_switch_gesture_begin(&mut self, is_touchpad: bool) {
-        let center_idx = self.view.active_position();
-        let current_idx = self.workspace_render_idx();
+    pub fn workspace_switch_gesture_begin(&mut self, view: &WorkspaceView, is_touchpad: bool) {
+        let center_idx = view.active_position();
+        let current_idx = self.workspace_render_idx(view);
 
         let gesture = WorkspaceSwitchGesture {
             center_idx,
@@ -1400,7 +1422,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.workspace_switch = Some(WorkspaceSwitch::Gesture(gesture));
     }
 
-    pub fn dnd_scroll_gesture_begin(&mut self) {
+    pub fn dnd_scroll_gesture_begin(&mut self, view: &WorkspaceView) {
         if let Some(WorkspaceSwitch::Gesture(WorkspaceSwitchGesture {
             dnd_last_event_time: Some(_),
             ..
@@ -1415,8 +1437,8 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         }
 
-        let center_idx = self.view.active_position();
-        let current_idx = self.workspace_render_idx();
+        let center_idx = view.active_position();
+        let current_idx = self.workspace_render_idx(view);
 
         let gesture = WorkspaceSwitchGesture {
             center_idx,
@@ -1434,6 +1456,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn workspace_switch_gesture_update(
         &mut self,
+        view: &WorkspaceView,
         delta_y: f64,
         timestamp: Duration,
         is_touchpad: bool,
@@ -1472,7 +1495,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         let pos = gesture.tracker.pos() / total_height;
 
-        let (min, max) = gesture.min_max(self.view.len());
+        let (min, max) = gesture.min_max(view.len());
         let new_idx = gesture.start_idx + pos;
         let new_idx = rubber_band.clamp(min, max, new_idx);
 
@@ -1484,7 +1507,12 @@ impl<W: LayoutElement> Monitor<W> {
         Some(true)
     }
 
-    pub fn dnd_scroll_gesture_scroll(&mut self, pos: Point<f64, Logical>, speed: f64) -> bool {
+    pub fn dnd_scroll_gesture_scroll(
+        &mut self,
+        view: &WorkspaceView,
+        pos: Point<f64, Logical>,
+        speed: f64,
+    ) -> bool {
         let zoom = self.overview_zoom();
 
         let Some(WorkspaceSwitch::Gesture(gesture)) = &mut self.workspace_switch else {
@@ -1559,7 +1587,7 @@ impl<W: LayoutElement> Monitor<W> {
         let pos = gesture.tracker.pos() / total_height;
         let unclamped = gesture.start_idx + pos;
 
-        let (min, max) = gesture.min_max(self.view.len());
+        let (min, max) = gesture.min_max(view.len());
         let clamped = unclamped.clamp(min, max);
 
         // Make sure that DnD scrolling too much outside the min/max does not "build up".
@@ -1569,7 +1597,11 @@ impl<W: LayoutElement> Monitor<W> {
         true
     }
 
-    pub fn workspace_switch_gesture_end(&mut self, is_touchpad: Option<bool>) -> bool {
+    pub fn workspace_switch_gesture_end(
+        &mut self,
+        view: &mut WorkspaceView,
+        is_touchpad: Option<bool>,
+    ) -> bool {
         let Some(WorkspaceSwitch::Gesture(gesture)) = &self.workspace_switch else {
             return false;
         };
@@ -1602,7 +1634,7 @@ impl<W: LayoutElement> Monitor<W> {
         let current_pos = gesture.tracker.pos() / total_height;
         let pos = gesture.tracker.projected_end_pos() / total_height;
 
-        let (min, max) = gesture.min_max(self.view.len());
+        let (min, max) = gesture.min_max(view.len());
         let new_idx = gesture.start_idx + pos;
 
         let new_idx = new_idx.clamp(min, max);
@@ -1610,7 +1642,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         velocity *= rubber_band.clamp_derivative(min, max, gesture.start_idx + current_pos);
 
-        self.view.activate(new_idx);
+        view.activate(new_idx);
         self.workspace_switch = Some(WorkspaceSwitch::Animation(Animation::new(
             self.clock.clone(),
             gesture.current_idx,
@@ -1622,7 +1654,7 @@ impl<W: LayoutElement> Monitor<W> {
         true
     }
 
-    pub fn dnd_scroll_gesture_end(&mut self) {
+    pub fn dnd_scroll_gesture_end(&mut self, view: &mut WorkspaceView) {
         if !matches!(
             self.workspace_switch,
             Some(WorkspaceSwitch::Gesture(WorkspaceSwitchGesture {
@@ -1634,7 +1666,7 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         };
 
-        self.workspace_switch_gesture_end(None);
+        self.workspace_switch_gesture_end(view, None);
     }
 
     pub fn scale(&self) -> smithay::output::Scale {
@@ -1654,7 +1686,11 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     #[cfg(debug_assertions)]
-    pub(super) fn verify_invariants(&self, pool: &HashMap<WorkspaceId, Workspace<W>>) {
+    pub(super) fn verify_invariants(
+        &self,
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        view: &WorkspaceView,
+    ) {
         use approx::assert_abs_diff_eq;
 
         let options =
@@ -1663,28 +1699,28 @@ impl<W: LayoutElement> Monitor<W> {
 
         // `WorkspaceView::new` already enforces `!ids.is_empty()` and no mutator empties the
         // view, so `view.len() >= 1` is a `WorkspaceView` invariant — not re-asserted here.
-        for (i, id) in self.view.ids().iter().enumerate() {
+        for (i, id) in view.ids().iter().enumerate() {
             assert!(
                 pool.contains_key(id),
                 "view.ids[{i}] must be a key in the workspace pool",
             );
         }
-        assert!(self.view.active_position() < self.view.len());
+        assert!(view.active_position() < view.len());
 
         if let Some(WorkspaceSwitch::Animation(anim)) = &self.workspace_switch {
             let before_idx = anim.from() as usize;
             let after_idx = anim.to() as usize;
 
-            assert!(before_idx < self.view.len());
-            assert!(after_idx < self.view.len());
+            assert!(before_idx < view.len());
+            assert!(after_idx < view.len());
         }
 
         let ws = |id: WorkspaceId| -> &Workspace<W> {
             pool.get(&id).expect("view id must be a key in the pool")
         };
 
-        let last_id = *self.view.ids().last().unwrap();
-        let first_id = *self.view.ids().first().unwrap();
+        let last_id = *view.ids().last().unwrap();
+        let first_id = *view.ids().first().unwrap();
 
         assert!(
             !ws(last_id).has_windows(),
@@ -1710,7 +1746,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         if self.options.layout.empty_workspace_above_first {
             assert!(
-                self.view.len() != 2,
+                view.len() != 2,
                 "if empty_workspace_above_first is set there must be just 1 or 3+ workspaces"
             )
         }
@@ -1724,8 +1760,7 @@ impl<W: LayoutElement> Monitor<W> {
             0
         };
         if self.workspace_switch.is_none() {
-            for (idx, id) in self
-                .view
+            for (idx, id) in view
                 .ids()
                 .iter()
                 .enumerate()
@@ -1734,7 +1769,7 @@ impl<W: LayoutElement> Monitor<W> {
                 // skip last
                 .skip(1)
             {
-                if idx != self.view.active_position() {
+                if idx != view.active_position() {
                     assert!(
                         ws(*id).has_windows_or_name(),
                         "non-active workspace can't be empty and unnamed except the last one"
@@ -1743,7 +1778,7 @@ impl<W: LayoutElement> Monitor<W> {
             }
         }
 
-        for id in self.view.ids() {
+        for id in view.ids() {
             let workspace = ws(*id);
             assert_eq!(self.clock, workspace.clock);
 
@@ -1765,9 +1800,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         let scale = self.scale().fractional_scale();
-        // TODO: source ctx from the active activity's view for this monitor,
-        // not `self.view`.
-        let ctx = LayoutCtx::new(pool, &self.view);
+        let ctx = LayoutCtx::new(pool, view);
         let iter = self.workspaces_with_render_geo(ctx);
         for (_ws, ws_geo) in iter {
             let pos = ws_geo.loc;

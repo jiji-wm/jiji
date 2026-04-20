@@ -1,9 +1,11 @@
 //! Activity / workspace-view types.
 //!
-//! `Workspace<W>` values live in `Layout.workspaces: HashMap<WorkspaceId,
-//! Workspace<W>>`; `Monitor` only holds a `view: WorkspaceView` of ordered
-//! ids. Invariant: every id in `Monitor.view.ids()` is a key in
-//! `Layout.workspaces`.
+//! `Workspace<W>` values live in `Layout.workspaces: HashMap<WorkspaceId, Workspace<W>>`.
+//! Per-output [`WorkspaceView`]s live in `Activity.views: HashMap<OutputId, WorkspaceView>`.
+//! For the active activity, the `views` key domain equals `{ OutputId::new(&mon.output) | mon ∈
+//! Layout.monitors }`; every id in any view's `ids()` is a key in `Layout.workspaces`.
+//! Inactive activities carry a dormant snapshot of their views across activity switches.
+//! The active-activity invariant is enforced in `Layout::verify_invariants`.
 
 use std::collections::HashMap;
 
@@ -210,11 +212,18 @@ impl ActivityId {
 /// `is_config_declared` distinguishes activities the user named in config
 /// (stable across reload) from runtime-created ones. The promotion rules
 /// (rename / config reload) land with the action handlers that need them.
+///
+/// The `views` map backs [`Layout::active_view`] when this activity is the active one. For the
+/// active activity the key domain equals the connected monitors' `OutputId`s; inactive activities
+/// carry a dormant snapshot across activity switches. The Layout-level invariant is enforced in
+/// `Layout::verify_invariants`.
 #[derive(Debug)]
 pub struct Activity {
     id: ActivityId,
     name: String,
     is_config_declared: bool,
+    /// Per-output workspace views. For the active activity, the key domain equals connected
+    /// monitors' `OutputId`s; for inactive activities this is a dormant snapshot. See struct doc.
     views: HashMap<OutputId, WorkspaceView>,
 }
 
@@ -249,10 +258,14 @@ impl Activity {
         self.is_config_declared
     }
 
+    /// Per-output views owned by this activity. For the active activity, the key domain equals
+    /// connected monitors' `OutputId`s and this is what [`Layout::active_view`] reads. For
+    /// inactive activities the map is a dormant snapshot preserved across activity switches.
     pub fn views(&self) -> &HashMap<OutputId, WorkspaceView> {
         &self.views
     }
 
+    /// Mutable access to per-output views. Same key-domain semantics as [`Self::views`].
     pub fn views_mut(&mut self) -> &mut HashMap<OutputId, WorkspaceView> {
         &mut self.views
     }

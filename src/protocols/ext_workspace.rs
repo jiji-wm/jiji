@@ -132,8 +132,10 @@ pub fn refresh(state: &mut State) {
     });
 
     // Update existing workspaces and create new ones.
-    for (mon, ws_idx, ws) in state.niri.layout.workspaces() {
-        changed |= refresh_workspace(protocol_state, mon, ws_idx, ws);
+    let layout = &state.niri.layout;
+    for (mon, ws_idx, ws) in layout.workspaces() {
+        let active_pos = mon.map(|m| layout.active_view(&m.output_id()).active_position());
+        changed |= refresh_workspace(protocol_state, mon, active_pos, ws_idx, ws);
     }
 
     // Update workspace groups and create new ones, sending workspace_enter events as needed.
@@ -260,11 +262,12 @@ fn build_name(ws: &Workspace<Mapped>, ws_idx: usize) -> String {
 fn refresh_workspace(
     protocol_state: &mut ExtWorkspaceManagerState,
     mon: Option<&Monitor<Mapped>>,
+    active_ws_pos: Option<usize>,
     ws_idx: usize,
     ws: &Workspace<Mapped>,
 ) -> bool {
     let mut state = ext_workspace_handle_v1::State::empty();
-    if mon.is_some_and(|mon| mon.active_workspace_idx() == ws_idx) {
+    if mon.is_some() && active_ws_pos == Some(ws_idx) {
         state |= ext_workspace_handle_v1::State::Active;
     }
     if ws.is_urgent() {
