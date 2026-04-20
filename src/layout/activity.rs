@@ -282,9 +282,14 @@ impl Activity {
 ///   no push-to-empty API.
 /// - `active` is always a key in `map`.
 /// - `previous`, if `Some`, is always a key in `map`.
-/// - Each stored `Activity`'s `id` equals its key in `map` (enforced by private `Activity.id` +
-///   construction-only id minting; inserts go through `map.insert(activity.id, activity)`
-///   exclusively).
+/// - `previous`, if `Some`, is never equal to `active` (distinctness). The
+///   no-op fast-path in [`Activities::set_active`] preserves this: when
+///   `target == active` the call returns early without touching `previous`;
+///   otherwise `previous` is set to the old active (guaranteed `!= target`),
+///   so after the write `previous != active` still holds.
+/// - Each stored `Activity`'s `id` equals its key in `map` (enforced by
+///   private `Activity.id` + construction-only id minting; inserts go through
+///   `map.insert(activity.id, activity)` exclusively).
 #[derive(Debug)]
 // No `is_empty` — `Activities` is never empty by construction.
 #[allow(clippy::len_without_is_empty)]
@@ -347,6 +352,67 @@ impl Activities {
 
     pub fn contains(&self, id: ActivityId) -> bool {
         self.map.contains_key(&id)
+    }
+
+    /// Test-only: insert an additional activity into the pool, preserving the
+    /// id-equals-key invariant. Gated `#[cfg(test)]` because the only
+    /// production inserter is [`Self::new`] (seed); runtime multi-activity
+    /// population arrives with the `CreateActivity` action.
+    #[cfg(test)]
+    pub(super) fn test_insert(&mut self, activity: Activity) {
+        self.map.insert(activity.id, activity);
+    }
+
+    /// Flip the active cursor to `target`, recording the previously-active id
+    /// in `previous` on a real flip.
+    ///
+    /// Contract: `target` must be a live key in `map`. Caller validates before
+    /// dispatch (see [`Self::contains`]); this method is debug-asserted only
+    /// and does not perform user-input validation. Folding validation here
+    /// would duplicate the single caller-side error-log site at
+    /// `Layout::switch_activity`.
+    ///
+    /// No-op fast-path: if `target == active_id()`, returns immediately
+    /// without touching `previous`. Otherwise `previous = Some(old_active)`
+    /// and `active = target`; since `target != old_active` in that branch,
+    /// the `previous != active` distinctness invariant is re-established.
+    ///
+    /// Panics (debug only) if `target` is not a live key in `map`.
+    pub(super) fn set_active(&mut self, target: ActivityId) {
+        debug_assert!(
+            self.map.contains_key(&target),
+            "set_active target must be a live key in the map",
+        );
+        if target == self.active {
+            return;
+        }
+        self.previous = Some(self.active);
+        self.active = target;
+        debug_assert!(
+            self.previous != Some(self.active),
+            "set_active must preserve previous != Some(active) distinctness",
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    pub(super) fn verify_invariants(&self) {
+        assert!(
+            self.map.contains_key(&self.active),
+            "Activities.active {:?} must be a live key in the map",
+            self.active,
+        );
+        if let Some(prev) = self.previous {
+            assert!(
+                self.map.contains_key(&prev),
+                "Activities.previous {:?} must be a live key in the map",
+                prev,
+            );
+            assert_ne!(
+                Some(prev),
+                Some(self.active),
+                "Activities.previous must not equal active (distinctness invariant)",
+            );
+        }
     }
 }
 
@@ -628,5 +694,69 @@ mod tests {
     #[test]
     fn activity_id_specific_roundtrips() {
         assert_eq!(ActivityId::specific(7).get(), 7);
+    }
+
+    #[test]
+    fn set_active_no_op_preserves_previous() {
+        let seed = Activity::new_runtime("work".into());
+        let seed_id = seed.id();
+        let mut acts = Activities::new(seed);
+
+        // Precondition: fresh pool has no previous.
+        assert_eq!(acts.previous_id(), None);
+
+        acts.set_active(seed_id);
+
+        assert_eq!(acts.active_id(), seed_id);
+        // No-op must leave `previous` untouched (not overwrite with Some(seed_id)).
+        assert_eq!(acts.previous_id(), None);
+    }
+
+    #[test]
+    fn set_active_no_op_with_existing_previous_preserves_it() {
+        let seed = Activity::new_runtime("work".into());
+        let seed_id = seed.id();
+        let other = Activity::new_runtime("play".into());
+        let other_id = other.id();
+
+        let mut acts = Activities::new(seed);
+        acts.test_insert(other);
+
+        // Establish a non-None previous.
+        acts.set_active(other_id); // previous = Some(seed_id), active = other_id
+
+        // No-op: must not clear `previous`.
+        acts.set_active(other_id);
+
+        assert_eq!(acts.previous_id(), Some(seed_id));
+        assert_eq!(acts.active_id(), other_id);
+    }
+
+    #[test]
+    fn set_active_flip_updates_cursors() {
+        let seed = Activity::new_runtime("work".into());
+        let seed_id = seed.id();
+        let other = Activity::new_runtime("play".into());
+        let other_id = other.id();
+
+        let mut acts = Activities::new(seed);
+        acts.test_insert(other);
+
+        acts.set_active(other_id);
+
+        assert_eq!(acts.active_id(), other_id);
+        assert_eq!(acts.previous_id(), Some(seed_id));
+        // Distinctness invariant on the flip path.
+        assert_ne!(acts.previous_id(), Some(acts.active_id()));
+    }
+
+    #[test]
+    #[should_panic]
+    #[cfg(debug_assertions)]
+    fn set_active_unknown_debug_asserts() {
+        let seed = Activity::new_runtime("work".into());
+        let mut acts = Activities::new(seed);
+        // `u64::MAX` cannot collide with a runtime-minted id (counter starts at 0).
+        acts.set_active(ActivityId::specific(u64::MAX));
     }
 }

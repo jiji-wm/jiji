@@ -3699,6 +3699,33 @@ impl<W: LayoutElement> Layout<W> {
         monitors[mon_idx].switch_workspace_previous(view);
     }
 
+    /// Flip the active activity cursor to `target`.
+    ///
+    /// Pure cursor flip. View population, focus restoration, event emission,
+    /// and §5.11 blocking are handled by higher-level entry points / future
+    /// work.
+    ///
+    /// Ordering:
+    /// 1. No-op fast-path on `ActivityId` equality — avoids a `HashMap`
+    ///    lookup on the dominant real-input path (`target ==
+    ///    active_activity_id()`). Load-bearing for the hot path.
+    /// 2. Reject unknown `target` with `error!` + early return, follows the
+    ///    early-return-with-`error!` pattern from `update_output_size` and
+    ///    `update_render_elements`, with the offending id in the message for
+    ///    log correlation. Step 2→3 ordering is also pinned by the
+    ///    `debug_assert!` inside [`Activities::set_active`].
+    /// 3. Flip cursors via [`Activities::set_active`].
+    pub fn switch_activity(&mut self, target: ActivityId) {
+        if target == self.activities.active_id() {
+            return;
+        }
+        if !self.activities.contains(target) {
+            error!("switch_activity: target {target:?} is not a live activity id");
+            return;
+        }
+        self.activities.set_active(target);
+    }
+
     pub fn consume_into_column(&mut self) {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
@@ -3937,6 +3964,9 @@ impl<W: LayoutElement> Layout<W> {
                 }
             }
         }
+
+        // Activities-internal invariants: active/previous cursor validity + distinctness.
+        self.activities.verify_invariants();
 
         // DD §3.2: every Workspace.activities is a non-empty subset of the Activities keyset.
         // Walks the full pool unconditionally (before the zero-monitor / any-monitor split below);

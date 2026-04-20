@@ -4407,3 +4407,49 @@ fn active_activity_views_empty_when_no_monitors() {
     assert!(layout.activities.active().views().is_empty());
     layout.verify_invariants();
 }
+
+#[test]
+fn layout_switch_activity_no_op_on_same_target() {
+    // No-monitor Layout to isolate the pure cursor-flip path from any
+    // view-population or refresh effects.
+    let layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+    assert_eq!(layout.activities.previous_id(), None);
+
+    let mut layout = layout;
+    layout.switch_activity(seed_id);
+
+    assert_eq!(layout.active_activity_id(), seed_id);
+    // No-op must leave previous untouched.
+    assert_eq!(layout.activities.previous_id(), None);
+    layout.verify_invariants();
+}
+
+#[test]
+fn layout_switch_activity_unknown_target_leaves_state_unchanged() {
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+
+    // `u64::MAX` cannot collide with a runtime-minted id (counter starts at 0).
+    layout.switch_activity(ActivityId::specific(u64::MAX));
+
+    // State must be unchanged: still the seed, still no previous.
+    assert_eq!(layout.active_activity_id(), seed_id);
+    assert_eq!(layout.activities.previous_id(), None);
+    layout.verify_invariants();
+}
+
+#[test]
+fn layout_switch_activity_no_op_preserves_verify_invariants() {
+    // With a connected monitor, `verify_invariants` walks the
+    // `active_views.len() == self.monitors.len()` assertion. Pin that the
+    // no-op `switch_activity` path does not trip it.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+
+    layout.switch_activity(seed_id);
+
+    assert_eq!(layout.active_activity_id(), seed_id);
+    layout.verify_invariants();
+}
