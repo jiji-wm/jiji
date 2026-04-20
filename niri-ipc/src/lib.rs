@@ -1734,6 +1734,37 @@ pub enum Event {
         /// Id of the new active window, if any.
         active_window_id: Option<u64>,
     },
+    /// The activity configuration has changed.
+    ///
+    /// Sent on initial event stream connection with full state, and after
+    /// bulk operations like config reload that add or remove multiple
+    /// activities. Individual lifecycle actions (`CreateActivity`,
+    /// `RemoveActivity`, `RenameActivity` (Phase 1b)) emit per-activity
+    /// events instead; those do not emit [`Event::ActivitiesChanged`].
+    ///
+    /// **Phase 1a stub:** not yet emitted anywhere — variant exists so
+    /// `#[non_exhaustive]` consumers can pattern-match on it today. Emission
+    /// lands with `ActivitiesState` in Phase 1b.
+    ActivitiesChanged {
+        /// The new activity configuration.
+        activities: Vec<Activity>,
+    },
+    /// The active activity changed.
+    ///
+    /// Emitted before the accompanying [`Event::WorkspaceOpenedOrChanged`] events
+    /// for workspaces whose `is_in_active_activity` flipped, so clients
+    /// can update their activity state before processing workspace
+    /// visibility changes.
+    ///
+    /// **Phase 1a stub:** not yet emitted anywhere. Emission lands in Phase 1a
+    /// (together with the `is_in_active_activity` `Workspace` field);
+    /// [`state::EventStreamState`] tracking lands in Phase 1b.
+    ActivitySwitched {
+        /// ID of the newly active activity.
+        id: u64,
+        /// ID of the previously active activity, if any.
+        previous_id: Option<u64>,
+    },
     /// The window configuration has changed.
     WindowsChanged {
         /// The new window configuration.
@@ -2272,5 +2303,97 @@ mod tests {
         );
         let parsed: Activity = serde_json::from_str(&json).expect("deserialize Activity");
         assert_eq!(parsed, activity);
+    }
+
+    #[test]
+    fn activities_changed_event_roundtrips_serde() {
+        let event = Event::ActivitiesChanged {
+            activities: vec![
+                Activity {
+                    id: 1,
+                    name: "work".to_owned(),
+                    is_config_declared: true,
+                    is_active: true,
+                    is_urgent: false,
+                },
+                Activity {
+                    id: 2,
+                    name: "personal".to_owned(),
+                    is_config_declared: false,
+                    is_active: false,
+                    is_urgent: true,
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&event).expect("serialize Event::ActivitiesChanged");
+        assert_eq!(
+            json,
+            r#"{"ActivitiesChanged":{"activities":[{"id":1,"name":"work","is_config_declared":true,"is_active":true,"is_urgent":false},{"id":2,"name":"personal","is_config_declared":false,"is_active":false,"is_urgent":true}]}}"#
+        );
+        let parsed: Event = serde_json::from_str(&json).expect("deserialize Event::ActivitiesChanged");
+        let Event::ActivitiesChanged { activities } = parsed else {
+            panic!("expected ActivitiesChanged variant");
+        };
+        assert_eq!(activities.len(), 2);
+        assert_eq!(activities[0].id, 1);
+        assert_eq!(activities[0].name, "work");
+        assert!(activities[0].is_config_declared);
+        assert!(activities[0].is_active);
+        assert!(!activities[0].is_urgent);
+        assert_eq!(activities[1].id, 2);
+        assert_eq!(activities[1].name, "personal");
+        assert!(!activities[1].is_config_declared);
+        assert!(!activities[1].is_active);
+        assert!(activities[1].is_urgent);
+    }
+
+    #[test]
+    fn activity_switched_event_roundtrips_serde() {
+        // Pin wire form for the Some case.
+        let event_some = Event::ActivitySwitched {
+            id: 7,
+            previous_id: Some(3),
+        };
+        let json_some =
+            serde_json::to_string(&event_some).expect("serialize Event::ActivitySwitched (Some)");
+        assert_eq!(
+            json_some,
+            r#"{"ActivitySwitched":{"id":7,"previous_id":3}}"#
+        );
+        let parsed_some: Event =
+            serde_json::from_str(&json_some).expect("deserialize Event::ActivitySwitched (Some)");
+        let Event::ActivitySwitched {
+            id: parsed_id,
+            previous_id: parsed_prev,
+        } = parsed_some
+        else {
+            panic!("expected ActivitySwitched variant");
+        };
+        assert_eq!(parsed_id, 7);
+        assert_eq!(parsed_prev, Some(3));
+
+        // Pin wire form for the None case.
+        let event_none = Event::ActivitySwitched {
+            id: 7,
+            previous_id: None,
+        };
+        let json_none =
+            serde_json::to_string(&event_none).expect("serialize Event::ActivitySwitched (None)");
+        assert_eq!(
+            json_none,
+            r#"{"ActivitySwitched":{"id":7,"previous_id":null}}"#
+        );
+        let parsed_none: Event =
+            serde_json::from_str(&json_none).expect("deserialize Event::ActivitySwitched (None)");
+        let Event::ActivitySwitched {
+            id: parsed_id2,
+            previous_id: parsed_prev2,
+        } = parsed_none
+        else {
+            panic!("expected ActivitySwitched variant");
+        };
+        assert_eq!(parsed_id2, 7);
+        assert_eq!(parsed_prev2, None);
     }
 }
