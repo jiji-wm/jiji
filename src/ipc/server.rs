@@ -424,6 +424,8 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                 // Make sure some logic like workspace clean-up has a chance to run before doing
                 // actions.
                 state.niri.advance_animations();
+                // TODO(§5.11): queue per-connection for IPC callers; Phase 1a inherits
+                // keybinding silent-drop semantics (Handled returned even if hard-blocked).
                 state.do_action(action, false);
                 let _ = tx.send_blocking(());
             });

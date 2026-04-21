@@ -5102,6 +5102,146 @@ fn switch_activity_view_active_remains_in_ids_after_switch() {
 }
 
 #[test]
+fn is_activity_switch_hard_blocked_returns_some_during_interactive_move() {
+    // Arrange a real interactive move so the field is `Some(_)` via the public API
+    // path rather than constructing the private InteractiveMoveState directly.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(0),
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    assert!(layout.is_activity_switch_hard_blocked().is_none());
+
+    let output = layout
+        .outputs()
+        .find(|o| o.name() == "output1")
+        .cloned()
+        .expect("output1 must exist after AddOutput(1)");
+    let armed = layout.interactive_move_begin(0, &output, Point::from((0., 0.)));
+    assert!(armed, "interactive_move_begin must arm the move");
+
+    assert_eq!(
+        layout.is_activity_switch_hard_blocked(),
+        Some(super::ActivitySwitchBlock::InteractiveMove),
+    );
+
+    layout.interactive_move_end(&0);
+    assert!(layout.is_activity_switch_hard_blocked().is_none());
+}
+
+#[test]
+fn is_activity_switch_hard_blocked_returns_some_during_dnd() {
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    assert!(layout.is_activity_switch_hard_blocked().is_none());
+
+    let output = layout
+        .outputs()
+        .find(|o| o.name() == "output1")
+        .cloned()
+        .expect("output1 must exist after AddOutput(1)");
+    layout.dnd_update(output, Point::from((0., 0.)));
+
+    assert_eq!(
+        layout.is_activity_switch_hard_blocked(),
+        Some(super::ActivitySwitchBlock::Dnd),
+    );
+
+    layout.dnd_end();
+    assert!(layout.is_activity_switch_hard_blocked().is_none());
+}
+
+#[test]
+fn is_activity_switch_hard_blocked_returns_some_during_workspace_switch_gesture_on_any_monitor() {
+    // Two monitors: arm the gesture on the SECOND monitor (output2) so a future
+    // regression that hard-codes monitors[0] in the reader fails this test.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+
+    assert!(layout.is_activity_switch_hard_blocked().is_none());
+
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .expect("output2 must exist after AddOutput(2)");
+    layout.workspace_switch_gesture_begin(&output2, true);
+
+    // Canary load-bearing: the gesture must land on a non-zero index so a
+    // monitors[0]-hardcoded reader fails the assertion below.
+    assert!(layout.monitors[0].workspace_switch.is_none());
+    assert!(matches!(
+        layout.monitors[1].workspace_switch,
+        Some(super::monitor::WorkspaceSwitch::Gesture(_)),
+    ));
+
+    assert_eq!(
+        layout.is_activity_switch_hard_blocked(),
+        Some(super::ActivitySwitchBlock::WorkspaceSwitchGesture),
+    );
+
+    layout.workspace_switch_gesture_end(Some(true));
+    assert!(layout.is_activity_switch_hard_blocked().is_none());
+}
+
+#[test]
+fn switch_activity_snaps_in_flight_animation_and_proceeds() {
+    // Single monitor + a named workspace gives the seed view ≥2 ids, so
+    // `switch_workspace(1)` arms a `WorkspaceSwitch::Animation`. Then assert
+    // the activity switch (a) is not hard-blocked, (b) does not panic, (c)
+    // snaps the animation to None on every monitor, (d) flips to beta.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let out_id = layout.monitors[0].output_id();
+    // The named-workspace setup leaves active at position 1 (the named ws), with the
+    // empty trailing ws at position 0 — switching to a different position arms the
+    // animation. Pick whichever non-active position exists.
+    let target_pos = if layout.active_view(&out_id).active_position() == 0 {
+        1
+    } else {
+        0
+    };
+    layout.switch_workspace(target_pos);
+    assert!(
+        matches!(
+            layout.monitors[0].workspace_switch,
+            Some(super::monitor::WorkspaceSwitch::Animation(_)),
+        ),
+        "switch_workspace(target_pos) must arm a WorkspaceSwitch::Animation",
+    );
+    // Animation is NOT a hard block — pin the reader contract.
+    assert!(layout.is_activity_switch_hard_blocked().is_none());
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    layout.switch_activity(beta_id);
+
+    for mon in &layout.monitors {
+        assert!(
+            mon.workspace_switch.is_none(),
+            "switch_activity must clear in-flight WorkspaceSwitch on every monitor",
+        );
+    }
+    assert_eq!(layout.active_activity_id(), beta_id);
+    assert_eq!(layout.activities.previous_id(), Some(seed_id));
+    layout.verify_invariants();
+}
+
+#[test]
 fn resolve_activity_ref_by_id_and_name() {
     let layout = Layout::<TestWindow>::default();
     let seed_id = layout.active_activity_id();

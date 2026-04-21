@@ -468,6 +468,19 @@ pub struct Options {
     pub deactivate_unfocused_windows: bool,
 }
 
+/// Why an activity switch was rejected without proceeding. Returned by
+/// [`Layout::is_activity_switch_hard_blocked`] for callers that need to gate
+/// before reaching [`Layout::switch_activity`].
+///
+/// Per DD §5.11, only the live-input states block: workspace-switch
+/// animations are *not* covered, since the switch itself snaps them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActivitySwitchBlock {
+    InteractiveMove,
+    Dnd,
+    WorkspaceSwitchGesture,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum InteractiveMoveState<W: LayoutElement> {
@@ -3766,11 +3779,37 @@ impl<W: LayoutElement> Layout<W> {
         monitors[mon_idx].switch_workspace_previous(view);
     }
 
+    /// Returns `Some(reason)` when the three live-input conditions from DD
+    /// §5.11 forbid switching activities — interactive window move, DnD, or a
+    /// workspace-switch gesture in flight on *any* monitor. Returns `None`
+    /// otherwise; in particular, an in-flight `WorkspaceSwitch::Animation` is
+    /// not a hard block (it is snapped by `switch_activity` itself).
+    ///
+    /// The keybinding and IPC dispatch sites consult this reader and drop /
+    /// queue the action accordingly. The `debug_assert!` at the top of
+    /// [`Self::switch_activity`] pins that no caller bypasses the gate.
+    pub(crate) fn is_activity_switch_hard_blocked(&self) -> Option<ActivitySwitchBlock> {
+        if self.interactive_move.is_some() {
+            return Some(ActivitySwitchBlock::InteractiveMove);
+        }
+        if self.dnd.is_some() {
+            return Some(ActivitySwitchBlock::Dnd);
+        }
+        // Gesture can be in flight on any monitor, not just the active one.
+        for mon in &self.monitors {
+            if matches!(mon.workspace_switch, Some(WorkspaceSwitch::Gesture(_))) {
+                return Some(ActivitySwitchBlock::WorkspaceSwitchGesture);
+            }
+        }
+        None
+    }
+
     /// Flip the active activity cursor to `target`.
     ///
-    /// Focus restoration, event emission, and §5.11 blocking against
-    /// interactive-move / DnD / workspace-switch are handled by higher-level
-    /// entry points / future work.
+    /// Hard-block conditions from DD §5.11 (interactive move, DnD, workspace-
+    /// switch gesture) MUST be filtered by the caller via
+    /// [`Self::is_activity_switch_hard_blocked`]; the entry `debug_assert!`
+    /// below pins this contract.
     ///
     /// Ordering:
     /// 1. No-op fast-path on `ActivityId` equality — avoids a `HashMap`
@@ -3782,12 +3821,15 @@ impl<W: LayoutElement> Layout<W> {
     ///    log correlation. Step 2→3 ordering is also pinned by the
     ///    `debug_assert!` inside [`Activities::set_active`].
     /// 3. Flip cursors via [`Activities::set_active`].
-    /// 4. Defensive clear of every monitor's in-flight `WorkspaceSwitch`.
-    ///    Fractional positions inside `WorkspaceSwitch` refer to positions in
-    ///    the previously-active activity's view; after the flip they no longer
-    ///    make sense. §5.3 step 9's instant-cut approach; §5.11 will later gate
-    ///    the switch during active gestures entirely, this clear stays as the
-    ///    forward-compat safety belt.
+    /// 4. Snap any in-flight `WorkspaceSwitch` on every monitor by setting it
+    ///    to `None`. Per DD §5.11 this is the load-bearing snap step of the
+    ///    snap+proceed contract for `WorkspaceSwitch::Animation`. Gestures
+    ///    are filtered out by the caller-side hard-block guard, so the only
+    ///    `Some(_)` reachable here is `Animation(_)`; the unconditional
+    ///    `mon.workspace_switch = None` matches every other clear site in
+    ///    the codebase. Fractional positions inside `WorkspaceSwitch` refer
+    ///    to positions in the previously-active activity's view, so leaving
+    ///    them around after the flip would be incoherent.
     /// 5. Lazily populate the target activity's per-output views via
     ///    [`Self::ensure_active_views`] — see §5.3 step 3.
     ///
@@ -3812,6 +3854,11 @@ impl<W: LayoutElement> Layout<W> {
     ///   Monitors don't mutate during a switch, so this is also a pin, not a
     ///   fix — a drift would be a caller-side bug.
     pub fn switch_activity(&mut self, target: ActivityId) {
+        debug_assert!(
+            self.is_activity_switch_hard_blocked().is_none(),
+            "switch_activity called while hard-blocked (DD §5.11): caller must filter via \
+             is_activity_switch_hard_blocked",
+        );
         if target == self.activities.active_id() {
             return;
         }
@@ -3820,9 +3867,11 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         self.activities.set_active(target);
-        // Drop any in-flight WorkspaceSwitch animations/gestures whose fractional positions
-        // refer to the previous activity's view. Not reached on the no-op or unknown-id
-        // paths above, which both early-return before touching monitor state.
+        // Snap any in-flight WorkspaceSwitch::Animation per DD §5.11's snap+proceed contract.
+        // Gestures are filtered by the caller-side hard-block guard, so the only Some(_)
+        // reachable here is Animation(_); the unconditional clear matches every other clear
+        // site in the codebase. Not reached on the no-op or unknown-id paths above, which
+        // both early-return before touching monitor state.
         for mon in &mut self.monitors {
             mon.workspace_switch = None;
         }

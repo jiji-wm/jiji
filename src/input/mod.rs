@@ -1542,6 +1542,14 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::SwitchActivity(reference) => {
+                // Per DD §5.11, keybinding-triggered switches are silently dropped while
+                // hard-blocked (no cursor warp, no redraw, no focus reset). IPC callers
+                // get queued instead — but Phase 1a inherits this silent-drop semantics
+                // for the IPC path too (see ipc/server.rs TODO).
+                if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
+                    debug!("switch_activity: hard-blocked by {block:?}, ignoring (DD §5.11)");
+                    return;
+                }
                 // niri-config holds its own ActivityReference to keep config
                 // types independent of niri-ipc's wire enums; layout's API
                 // speaks the IPC type, so map variants at the boundary.
@@ -1556,6 +1564,13 @@ impl State {
                 }
             }
             Action::SwitchActivityPrevious => {
+                if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
+                    debug!(
+                        "switch_activity_previous: hard-blocked by {block:?}, ignoring \
+                         (DD §5.11)"
+                    );
+                    return;
+                }
                 self.niri.layout.switch_activity_previous();
                 self.maybe_warp_cursor_to_focus();
                 self.niri.layer_shell_on_demand_focus = None;
