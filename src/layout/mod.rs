@@ -1042,8 +1042,15 @@ impl<W: LayoutElement> Layout<W> {
         let needs_cleanup = stopped_primary_ws_switch
             || (primary.options.layout.empty_workspace_above_first && primary_view.len() == 2);
         if needs_cleanup {
-            let (monitors, pool, view) = self.monitors_pool_view_mut(&primary_output_id);
-            Self::clean_up_workspaces_on(monitors, pool, view, primary_idx);
+            let ids_to_destroy = {
+                let (monitors, pool, view) = self.monitors_pool_view_mut(&primary_output_id);
+                Self::clean_up_workspaces_on(monitors, pool, view, primary_idx)
+            };
+            Self::destroy_workspaces_cross_activity(
+                &mut self.activities,
+                &mut self.workspaces,
+                ids_to_destroy,
+            );
         }
 
         workspace_ids.reverse();
@@ -1744,8 +1751,15 @@ impl<W: LayoutElement> Layout<W> {
                 .unname();
             if self.monitors[mon_idx].workspace_switch.is_none() {
                 let mon_out = self.monitors[mon_idx].output_id();
-                let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
-                Self::clean_up_workspaces_on(monitors, pool, view, mon_idx);
+                let ids_to_destroy = {
+                    let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+                    Self::clean_up_workspaces_on(monitors, pool, view, mon_idx)
+                };
+                Self::destroy_workspaces_cross_activity(
+                    &mut self.activities,
+                    &mut self.workspaces,
+                    ids_to_destroy,
+                );
             }
             return;
         }
@@ -2323,14 +2337,27 @@ impl<W: LayoutElement> Layout<W> {
         let id = self.active_view(&mon_out).ids()[view_idx];
         self.active_view_mut(&mon_out).remove_at(view_idx);
 
-        let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
-        let mon = &mut monitors[mon_idx];
-        pool.get_mut(&id)
-            .expect("view id must be a key in the pool")
-            .unbind_output(&mon.output);
+        let ids_to_destroy = {
+            let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+            let mon = &mut monitors[mon_idx];
+            pool.get_mut(&id)
+                .expect("view id must be a key in the pool")
+                .unbind_output(&mon.output);
 
-        mon.workspace_switch = None;
-        Self::clean_up_workspaces_on(monitors, pool, view, mon_idx);
+            mon.workspace_switch = None;
+            Self::clean_up_workspaces_on(monitors, pool, view, mon_idx)
+        };
+        // `remove_at(view_idx)` already removed `id` from the view before
+        // `clean_up_workspaces_on` ran, so the pruner never sees it.
+        debug_assert!(
+            !ids_to_destroy.contains(&id),
+            "clean_up must not prune the extracted workspace id",
+        );
+        Self::destroy_workspaces_cross_activity(
+            &mut self.activities,
+            &mut self.workspaces,
+            ids_to_destroy,
+        );
 
         id
     }
@@ -2350,37 +2377,44 @@ impl<W: LayoutElement> Layout<W> {
     ) {
         let seed_activity = self.activities.active_id();
         let mon_out = self.monitors[mon_idx].output_id();
-        let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+        let ids_to_destroy = {
+            let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
 
-        {
-            let mon = &monitors[mon_idx];
-            let ws = pool
-                .get_mut(&id)
-                .expect("workspace id must be a key in the pool");
-            ws.bind_output(&mon.output);
-            ws.update_config(mon.options.clone());
-        }
+            {
+                let mon = &monitors[mon_idx];
+                let ws = pool
+                    .get_mut(&id)
+                    .expect("workspace id must be a key in the pool");
+                ws.bind_output(&mon.output);
+                ws.update_config(mon.options.clone());
+            }
 
-        // Don't insert past the last empty workspace.
-        if view_idx == view.len() {
-            view_idx -= 1;
-        }
-        if view_idx == 0 && monitors[mon_idx].options.layout.empty_workspace_above_first {
-            // Insert a new empty workspace on top to prepare for insertion of new workspace.
-            Self::add_workspace_top_on(monitors, pool, view, mon_idx, seed_activity);
-            view_idx += 1;
-        }
+            // Don't insert past the last empty workspace.
+            if view_idx == view.len() {
+                view_idx -= 1;
+            }
+            if view_idx == 0 && monitors[mon_idx].options.layout.empty_workspace_above_first {
+                // Insert a new empty workspace on top to prepare for insertion of new workspace.
+                Self::add_workspace_top_on(monitors, pool, view, mon_idx, seed_activity);
+                view_idx += 1;
+            }
 
-        let mon = &mut monitors[mon_idx];
-        view.insert(view_idx, id);
+            let mon = &mut monitors[mon_idx];
+            view.insert(view_idx, id);
 
-        if activate {
+            if activate {
+                mon.workspace_switch = None;
+                mon.activate_workspace(view, view_idx);
+            }
+
             mon.workspace_switch = None;
-            mon.activate_workspace(view, view_idx);
-        }
-
-        mon.workspace_switch = None;
-        Self::clean_up_workspaces_on(monitors, pool, view, mon_idx);
+            Self::clean_up_workspaces_on(monitors, pool, view, mon_idx)
+        };
+        Self::destroy_workspaces_cross_activity(
+            &mut self.activities,
+            &mut self.workspaces,
+            ids_to_destroy,
+        );
     }
 
     /// Attach a list of existing pool-held workspaces to the monitor at `mon_idx`, in order, just
@@ -2394,51 +2428,58 @@ impl<W: LayoutElement> Layout<W> {
 
         let seed_activity = self.activities.active_id();
         let mon_out = self.monitors[mon_idx].output_id();
-        let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+        let ids_to_destroy = {
+            let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
 
-        {
-            let mon = &monitors[mon_idx];
-            for id in &workspace_ids {
-                let ws = pool
-                    .get_mut(id)
-                    .expect("workspace id must be a key in the pool");
-                ws.bind_output(&mon.output);
-                ws.update_config(mon.options.clone());
+            {
+                let mon = &monitors[mon_idx];
+                for id in &workspace_ids {
+                    let ws = pool
+                        .get_mut(id)
+                        .expect("workspace id must be a key in the pool");
+                    ws.bind_output(&mon.output);
+                    ws.update_config(mon.options.clone());
+                }
             }
-        }
 
-        let mon = &mut monitors[mon_idx];
-        let empty_was_focused = view.active_position() == view.len() - 1;
+            let mon = &mut monitors[mon_idx];
+            let empty_was_focused = view.active_position() == view.len() - 1;
 
-        // Insert in place so the view stays non-empty at every step
-        // (`WorkspaceView` requires at least one id).
-        let start = view.len() - 1;
-        for (offset, id) in workspace_ids.into_iter().enumerate() {
-            let insert_pos = start + offset;
-            view.insert(insert_pos, id);
-        }
+            // Insert in place so the view stays non-empty at every step
+            // (`WorkspaceView` requires at least one id).
+            let start = view.len() - 1;
+            for (offset, id) in workspace_ids.into_iter().enumerate() {
+                let insert_pos = start + offset;
+                view.insert(insert_pos, id);
+            }
 
-        // If empty_workspace_above_first is set and the first workspace is now no longer empty,
-        // add a new empty workspace on top.
-        if mon.options.layout.empty_workspace_above_first
-            && mon.workspace_at(pool, view, 0).has_windows_or_name()
-        {
-            Self::add_workspace_top_on(monitors, pool, view, mon_idx, seed_activity);
-        }
+            // If empty_workspace_above_first is set and the first workspace is now no longer empty,
+            // add a new empty workspace on top.
+            if mon.options.layout.empty_workspace_above_first
+                && mon.workspace_at(pool, view, 0).has_windows_or_name()
+            {
+                Self::add_workspace_top_on(monitors, pool, view, mon_idx, seed_activity);
+            }
 
-        let mon = &mut monitors[mon_idx];
-        // If the empty workspace was focused on the primary monitor, keep it focused.
-        // Use `set_active_at` (not `activate`) so `previous` isn't clobbered — this is
-        // an output reshuffle, not a user-visible workspace switch.
-        if empty_was_focused {
-            let last = view.len() - 1;
-            view.set_active_at(last);
-        }
+            let mon = &mut monitors[mon_idx];
+            // If the empty workspace was focused on the primary monitor, keep it focused.
+            // Use `set_active_at` (not `activate`) so `previous` isn't clobbered — this is
+            // an output reshuffle, not a user-visible workspace switch.
+            if empty_was_focused {
+                let last = view.len() - 1;
+                view.set_active_at(last);
+            }
 
-        // FIXME: if we're adding workspaces to currently invisible positions
-        // (outside the workspace switch), we don't need to cancel it.
-        mon.workspace_switch = None;
-        Self::clean_up_workspaces_on(monitors, pool, view, mon_idx);
+            // FIXME: if we're adding workspaces to currently invisible positions
+            // (outside the workspace switch), we don't need to cancel it.
+            mon.workspace_switch = None;
+            Self::clean_up_workspaces_on(monitors, pool, view, mon_idx)
+        };
+        Self::destroy_workspaces_cross_activity(
+            &mut self.activities,
+            &mut self.workspaces,
+            ids_to_destroy,
+        );
     }
 
     /// Detach the workspaces owned by `monitor` from its output.
@@ -2527,14 +2568,25 @@ impl<W: LayoutElement> Layout<W> {
         Self::add_workspace_at_on(monitors, pool, view, mon_idx, len, seed_activity);
     }
 
+    /// Prunes empty unnamed workspaces from this monitor's view, returning the
+    /// set of `WorkspaceId`s that were dropped from the view but NOT yet
+    /// removed from the pool.
+    ///
+    /// Callers MUST pass the returned `Vec<WorkspaceId>` through
+    /// [`Layout::destroy_workspaces_cross_activity`] before the next
+    /// `refresh` — otherwise the pool will keep workspaces that no activity's
+    /// view references, and `verify_invariants` will trip at the next refresh.
+    #[must_use]
     fn clean_up_workspaces_on(
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         view: &mut WorkspaceView,
         mon_idx: usize,
-    ) {
+    ) -> Vec<WorkspaceId> {
         let mon = &mut monitors[mon_idx];
         assert!(mon.workspace_switch.is_none());
+
+        let mut pruned = Vec::new();
 
         let range_start = if mon.options.layout.empty_workspace_above_first {
             1
@@ -2549,10 +2601,7 @@ impl<W: LayoutElement> Layout<W> {
             if !mon.workspace_at(pool, view, idx).has_windows_or_name() {
                 let id = view.ids()[idx];
                 view.remove_at(idx);
-                assert!(
-                    pool.remove(&id).is_some(),
-                    "view id must be a key in the pool",
-                );
+                pruned.push(id);
             }
         }
 
@@ -2563,9 +2612,50 @@ impl<W: LayoutElement> Layout<W> {
             assert!(!mon.workspace_at(pool, view, 1).has_windows_or_name());
             let id = view.ids()[1];
             view.remove_at(1);
+            pruned.push(id);
+        }
+
+        pruned
+    }
+
+    /// Drops workspaces from the pool after patching every activity's
+    /// `WorkspaceView` that still references them. The retain closure mirrors
+    /// `RemoveActivity`'s exclusive-workspace destruction pass: single-entry
+    /// views are dropped entirely (a `WorkspaceView` cannot be zero-sized),
+    /// multi-entry views get `remove_at`-patched so `active`/`previous` stay
+    /// coherent.
+    ///
+    /// **Precondition (Phase 1b):** callers supply only ids that are currently
+    /// exclusive to a single activity (i.e. `workspace.activities.len() == 1`).
+    /// Phase 2 `AddWorkspaceToActivity`/sticky-mutator actions will make
+    /// shared workspaces constructible; at that point callers must gate on
+    /// `workspace_is_safe_to_reclaim` (DD §5.4) before passing an id here.
+    ///
+    /// **Ordering is load-bearing:** every activity's view is patched before
+    /// `pool.remove` for each id, so that debug assertions and
+    /// `verify_invariants` always see pool and views in agreement. Do not
+    /// hoist the `pool.remove` calls out of the per-id loop.
+    fn destroy_workspaces_cross_activity(
+        activities: &mut Activities,
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        ids: impl IntoIterator<Item = WorkspaceId>,
+    ) {
+        for ws_id in ids {
+            for activity in activities.iter_mut() {
+                activity.views_mut().retain(|_output_id, view| {
+                    let Some(pos) = view.position_of(ws_id) else {
+                        return true;
+                    };
+                    if view.len() == 1 {
+                        return false;
+                    }
+                    view.remove_at(pos);
+                    true
+                });
+            }
             assert!(
-                pool.remove(&id).is_some(),
-                "view id must be a key in the pool",
+                pool.remove(&ws_id).is_some(),
+                "destroy id {ws_id:?} must be a live pool key",
             );
         }
     }
@@ -2905,6 +2995,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     fn move_to_workspace_on(
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
@@ -2914,7 +3005,7 @@ impl<W: LayoutElement> Layout<W> {
         idx: usize,
         activate: ActivateWindow,
         seed_activity: ActivityId,
-    ) {
+    ) -> Vec<WorkspaceId> {
         let mon = &mut monitors[mon_idx];
         let source_workspace_idx = if let Some(window) = window {
             view.ids()
@@ -2931,7 +3022,7 @@ impl<W: LayoutElement> Layout<W> {
 
         let new_idx = min(idx, view.len() - 1);
         if new_idx == source_workspace_idx {
-            return;
+            return Vec::new();
         }
         let new_id = view.ids()[new_idx];
 
@@ -2946,7 +3037,7 @@ impl<W: LayoutElement> Layout<W> {
         } else if let Some(removed) = workspace.remove_active_tile(Some(&mon.output), transaction) {
             removed
         } else {
-            return;
+            return Vec::new();
         };
 
         Self::add_tile_on(
@@ -2972,7 +3063,9 @@ impl<W: LayoutElement> Layout<W> {
         );
 
         if monitors[mon_idx].workspace_switch.is_none() {
-            Self::clean_up_workspaces_on(monitors, pool, view, mon_idx);
+            Self::clean_up_workspaces_on(monitors, pool, view, mon_idx)
+        } else {
+            Vec::new()
         }
     }
 
@@ -3060,6 +3153,7 @@ impl<W: LayoutElement> Layout<W> {
         );
     }
 
+    #[must_use]
     fn move_column_to_workspace_on(
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
@@ -3068,13 +3162,13 @@ impl<W: LayoutElement> Layout<W> {
         idx: usize,
         activate: bool,
         seed_activity: ActivityId,
-    ) {
+    ) -> Vec<WorkspaceId> {
         let mon = &mut monitors[mon_idx];
         let source_workspace_idx = view.active_position();
 
         let new_idx = min(idx, view.len() - 1);
         if new_idx == source_workspace_idx {
-            return;
+            return Vec::new();
         }
 
         if mon
@@ -3086,7 +3180,7 @@ impl<W: LayoutElement> Layout<W> {
             } else {
                 ActivateWindow::No
             };
-            Self::move_to_workspace_on(
+            return Self::move_to_workspace_on(
                 monitors,
                 pool,
                 view,
@@ -3096,12 +3190,11 @@ impl<W: LayoutElement> Layout<W> {
                 activate,
                 seed_activity,
             );
-            return;
         }
 
         let workspace = mon.workspace_at_mut(pool, view, source_workspace_idx);
         let Some(column) = workspace.remove_active_column(Some(&mon.output)) else {
-            return;
+            return Vec::new();
         };
 
         Self::add_column_on(
@@ -3114,19 +3207,23 @@ impl<W: LayoutElement> Layout<W> {
             activate,
             seed_activity,
         );
+
+        // Column moved to an existing target workspace; no empty trailing workspaces to prune.
+        Vec::new()
     }
 
+    #[must_use]
     fn move_workspace_down_on(
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         view: &mut WorkspaceView,
         mon_idx: usize,
         seed_activity: ActivityId,
-    ) {
+    ) -> Vec<WorkspaceId> {
         let active_idx = view.active_position();
         let mut new_idx = min(active_idx + 1, view.len() - 1);
         if new_idx == active_idx {
-            return;
+            return Vec::new();
         }
 
         view.swap(active_idx, new_idx);
@@ -3147,20 +3244,21 @@ impl<W: LayoutElement> Layout<W> {
         mon.workspace_switch = None;
         view.set_previous(previous_workspace_id);
 
-        Self::clean_up_workspaces_on(monitors, pool, view, mon_idx);
+        Self::clean_up_workspaces_on(monitors, pool, view, mon_idx)
     }
 
+    #[must_use]
     fn move_workspace_up_on(
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         view: &mut WorkspaceView,
         mon_idx: usize,
         seed_activity: ActivityId,
-    ) {
+    ) -> Vec<WorkspaceId> {
         let active_idx = view.active_position();
         let mut new_idx = active_idx.saturating_sub(1);
         if new_idx == active_idx {
-            return;
+            return Vec::new();
         }
 
         view.swap(active_idx, new_idx);
@@ -3181,9 +3279,10 @@ impl<W: LayoutElement> Layout<W> {
         mon.workspace_switch = None;
         view.set_previous(previous_workspace_id);
 
-        Self::clean_up_workspaces_on(monitors, pool, view, mon_idx);
+        Self::clean_up_workspaces_on(monitors, pool, view, mon_idx)
     }
 
+    #[must_use]
     fn move_workspace_to_idx_on(
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
@@ -3192,14 +3291,14 @@ impl<W: LayoutElement> Layout<W> {
         old_idx: usize,
         new_idx: usize,
         seed_activity: ActivityId,
-    ) {
+    ) -> Vec<WorkspaceId> {
         if view.len() <= old_idx {
-            return;
+            return Vec::new();
         }
 
         let new_idx = new_idx.clamp(0, view.len() - 1);
         if old_idx == new_idx {
-            return;
+            return Vec::new();
         }
 
         view.move_within(old_idx, new_idx);
@@ -3226,7 +3325,7 @@ impl<W: LayoutElement> Layout<W> {
 
         monitors[mon_idx].workspace_switch = None;
 
-        Self::clean_up_workspaces_on(monitors, pool, view, mon_idx);
+        Self::clean_up_workspaces_on(monitors, pool, view, mon_idx)
     }
 
     pub fn monitors(&self) -> impl Iterator<Item = &Monitor<W>> + '_ {
@@ -3697,16 +3796,23 @@ impl<W: LayoutElement> Layout<W> {
 
         let seed_activity = self.activities.active_id();
         let mon_out = self.monitors[mon_idx].output_id();
-        let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
-        Self::move_to_workspace_on(
-            monitors,
-            pool,
-            view,
-            mon_idx,
-            window,
-            idx,
-            activate,
-            seed_activity,
+        let ids_to_destroy = {
+            let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+            Self::move_to_workspace_on(
+                monitors,
+                pool,
+                view,
+                mon_idx,
+                window,
+                idx,
+                activate,
+                seed_activity,
+            )
+        };
+        Self::destroy_workspaces_cross_activity(
+            &mut self.activities,
+            &mut self.workspaces,
+            ids_to_destroy,
         );
     }
 
@@ -3753,15 +3859,22 @@ impl<W: LayoutElement> Layout<W> {
         let active_monitor_idx = self.active_monitor_idx;
         let mon_out = self.monitors[active_monitor_idx].output_id();
         let seed_activity = self.activities.active_id();
-        let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
-        Self::move_column_to_workspace_on(
-            monitors,
-            pool,
-            view,
-            active_monitor_idx,
-            idx,
-            activate,
-            seed_activity,
+        let ids_to_destroy = {
+            let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+            Self::move_column_to_workspace_on(
+                monitors,
+                pool,
+                view,
+                active_monitor_idx,
+                idx,
+                activate,
+                seed_activity,
+            )
+        };
+        Self::destroy_workspaces_cross_activity(
+            &mut self.activities,
+            &mut self.workspaces,
+            ids_to_destroy,
         );
     }
 
@@ -4886,20 +4999,34 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let views_map = self.activities.active_mut().views_mut();
-        let pool = &mut self.workspaces;
-        let overview = self.overview_progress.as_ref();
-        let monitors = &mut self.monitors[..];
-        for mon_idx in 0..monitors.len() {
-            let view = views_map
-                .get_mut(&OutputId::new(&monitors[mon_idx].output))
-                .expect("connected output must have a view in the active activity");
-            monitors[mon_idx].set_overview_progress(view, overview);
-            let workspace_switch_finished = monitors[mon_idx].advance_animations(pool, view);
-            if workspace_switch_finished {
-                Self::clean_up_workspaces_on(monitors, pool, view, mon_idx);
+        // Accumulate pruned ids across every monitor under one triple-borrow
+        // scope; flush them through `destroy_workspaces_cross_activity` once
+        // the scope closes. Calling the helper inside the loop would fight the
+        // borrow checker because it re-borrows `&mut self.activities` and
+        // `&mut self.workspaces`.
+        let ids_to_destroy: Vec<WorkspaceId> = {
+            let views_map = self.activities.active_mut().views_mut();
+            let pool = &mut self.workspaces;
+            let overview = self.overview_progress.as_ref();
+            let monitors = &mut self.monitors[..];
+            let mut accum = Vec::new();
+            for mon_idx in 0..monitors.len() {
+                let view = views_map
+                    .get_mut(&OutputId::new(&monitors[mon_idx].output))
+                    .expect("connected output must have a view in the active activity");
+                monitors[mon_idx].set_overview_progress(view, overview);
+                let workspace_switch_finished = monitors[mon_idx].advance_animations(pool, view);
+                if workspace_switch_finished {
+                    accum.extend(Self::clean_up_workspaces_on(monitors, pool, view, mon_idx));
+                }
             }
-        }
+            accum
+        };
+        Self::destroy_workspaces_cross_activity(
+            &mut self.activities,
+            &mut self.workspaces,
+            ids_to_destroy,
+        );
         for id in &self.disconnected_workspace_ids {
             self.workspaces
                 .get_mut(id)
@@ -5628,8 +5755,15 @@ impl<W: LayoutElement> Layout<W> {
 
         let mon_out = self.monitors[mon_idx].output_id();
         if self.monitors[mon_idx].workspace_switch.is_none() {
-            let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
-            Self::clean_up_workspaces_on(monitors, pool, view, mon_idx);
+            let ids_to_destroy = {
+                let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+                Self::clean_up_workspaces_on(monitors, pool, view, mon_idx)
+            };
+            Self::destroy_workspaces_cross_activity(
+                &mut self.activities,
+                &mut self.workspaces,
+                ids_to_destroy,
+            );
         }
     }
 
@@ -6904,13 +7038,20 @@ impl<W: LayoutElement> Layout<W> {
         let active_monitor_idx = self.active_monitor_idx;
         let mon_out = self.monitors[active_monitor_idx].output_id();
         let seed_activity = self.activities.active_id();
-        let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
-        Self::move_workspace_down_on(
-            monitors,
-            pool,
-            view,
-            active_monitor_idx,
-            seed_activity,
+        let ids_to_destroy = {
+            let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+            Self::move_workspace_down_on(
+                monitors,
+                pool,
+                view,
+                active_monitor_idx,
+                seed_activity,
+            )
+        };
+        Self::destroy_workspaces_cross_activity(
+            &mut self.activities,
+            &mut self.workspaces,
+            ids_to_destroy,
         );
     }
 
@@ -6921,13 +7062,20 @@ impl<W: LayoutElement> Layout<W> {
         let active_monitor_idx = self.active_monitor_idx;
         let mon_out = self.monitors[active_monitor_idx].output_id();
         let seed_activity = self.activities.active_id();
-        let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
-        Self::move_workspace_up_on(
-            monitors,
-            pool,
-            view,
-            active_monitor_idx,
-            seed_activity,
+        let ids_to_destroy = {
+            let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+            Self::move_workspace_up_on(
+                monitors,
+                pool,
+                view,
+                active_monitor_idx,
+                seed_activity,
+            )
+        };
+        Self::destroy_workspaces_cross_activity(
+            &mut self.activities,
+            &mut self.workspaces,
+            ids_to_destroy,
         );
     }
 
@@ -6957,15 +7105,22 @@ impl<W: LayoutElement> Layout<W> {
 
         let mon_out = self.monitors[mon_idx].output_id();
         let seed_activity = self.activities.active_id();
-        let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
-        Self::move_workspace_to_idx_on(
-            monitors,
-            pool,
-            view,
-            mon_idx,
-            old_idx,
-            new_idx,
-            seed_activity,
+        let ids_to_destroy = {
+            let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+            Self::move_workspace_to_idx_on(
+                monitors,
+                pool,
+                view,
+                mon_idx,
+                old_idx,
+                new_idx,
+                seed_activity,
+            )
+        };
+        Self::destroy_workspaces_cross_activity(
+            &mut self.activities,
+            &mut self.workspaces,
+            ids_to_destroy,
         );
     }
 
