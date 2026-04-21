@@ -7198,8 +7198,6 @@ fn clean_up_workspaces_on_returns_pruned_ids_empty_above_first() {
 // workspace is gone from the pool.
 #[test]
 fn destroy_workspaces_cross_activity_patches_other_activity_views() {
-    // Active view must have >= 2 entries so the doomed id's removal doesn't
-    // collapse the active view to empty.
     let ops = [
         Op::AddOutput(1),
         Op::AddWindow {
@@ -7208,16 +7206,32 @@ fn destroy_workspaces_cross_activity_patches_other_activity_views() {
     ];
     let mut layout = check_ops(ops);
     let mon_out = layout.monitors[0].output_id();
+    let seed_activity = layout.active_activity_id();
+    let mon_output = layout.monitors[0].output.clone();
 
-    // Pick the doomed id: the trailing empty workspace on the active activity.
+    // Shape: `[W1 (active, pos 0), doomed_empty, E_bottom]` — doomed at a non-terminal
+    // middle position so the retain closure takes the remove_at branch.
     let doomed_id = {
-        let view = layout.active_view(&mon_out);
-        assert!(
-            view.len() >= 2,
-            "need at least two entries so active view survives",
+        let spare = Workspace::<TestWindow>::new_no_outputs(
+            HashSet::from([seed_activity]),
+            layout.clock.clone(),
+            layout.options.clone(),
         );
-        view.ids()[view.len() - 1]
+        let id = spare.id();
+        layout.workspaces.insert(id, spare);
+        layout
+            .workspaces
+            .get_mut(&id)
+            .expect("doomed spare must be in pool")
+            .bind_output(&mon_output);
+        id
     };
+    layout.active_view_mut(&mon_out).insert(1, doomed_id);
+
+    // Sanity-check the seeded shape.
+    assert_eq!(layout.active_view(&mon_out).len(), 3);
+    assert_eq!(layout.active_view(&mon_out).active_position(), 0);
+    assert_eq!(layout.active_view(&mon_out).ids()[1], doomed_id);
 
     // Create a second activity (Beta) and seed its view so Beta's view also
     // contains `doomed_id` alongside a spare id. Beta's view must have at
@@ -7235,6 +7249,11 @@ fn destroy_workspaces_cross_activity_patches_other_activity_views() {
         );
         let id = spare.id();
         layout.workspaces.insert(id, spare);
+        layout
+            .workspaces
+            .get_mut(&id)
+            .expect("spare must be in pool")
+            .bind_output(&mon_output);
         id
     };
     // Put `doomed_id` into Beta's membership too, so `destroy` removes it
@@ -7257,9 +7276,9 @@ fn destroy_workspaces_cross_activity_patches_other_activity_views() {
         );
 
     // Call destroy with `doomed_id`. Active activity's view contains it at
-    // position len-1 and has multiple entries — it must be removed_at.
-    // Beta's view has two entries — the retain closure's remove_at branch
-    // fires there too.
+    // a non-terminal position (pos 1) and has multiple entries — it must be
+    // removed_at. Beta's view has two entries — the retain closure's
+    // remove_at branch fires there too.
     Layout::<TestWindow>::destroy_workspaces_cross_activity(
         &mut layout.activities,
         &mut layout.workspaces,
@@ -7285,13 +7304,7 @@ fn destroy_workspaces_cross_activity_patches_other_activity_views() {
         .get(&mon_out)
         .expect("beta view retained (multi-entry)");
     assert_eq!(beta_view.ids(), &[spare_id]);
-    // Note: `verify_invariants` is not called here. The spare workspace was
-    // seeded via `Workspace::new_no_outputs`, which leaves `output_id =
-    // Some(OutputId(""))` rather than the real monitor's OutputId — this
-    // violates the output-binding invariant checked in `verify_invariants`.
-    // Fixing the seed (calling `bind_output` on the spare before inserting)
-    // is deferred; the test correctly exercises both retain-closure arms
-    // without it.
+    layout.verify_invariants();
 }
 
 // Single-entry Beta view containing the doomed id must be dropped entirely
