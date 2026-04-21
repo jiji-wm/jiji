@@ -964,13 +964,9 @@ pub enum Action {
     /// reload. On next reload, the runtime activity's name matches the new
     /// config entry and it is promoted.
     ///
-    /// Returns `Response::Handled`. To obtain the new activity's ID, use the
-    /// event stream: `ActivityCreated` is emitted immediately after creation
-    /// with the full `Activity` struct.
-    ///
-    /// **Phase 1a stub:** not yet implemented — currently logs and returns
-    /// `Response::Handled` without creating an activity or emitting an event.
-    /// The full implementation lands with the lifecycle box in Phase 1a.
+    /// Returns `Response::Handled`. To obtain the new activity's ID, listen on
+    /// the event stream; a per-activity creation event will be emitted (Phase
+    /// 1b scope — not yet implemented).
     CreateActivity {
         /// Name for the new activity.
         name: String,

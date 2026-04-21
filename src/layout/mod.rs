@@ -56,6 +56,7 @@ use tile::{Tile, TileRenderElement};
 use workspace::{WorkspaceAddWindowTarget, WorkspaceId};
 
 use self::activity::{Activities, Activity, ActivityId, WorkspaceView};
+pub use self::activity::CreateActivityError;
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{Monitor, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
@@ -3989,6 +3990,36 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
         self.switch_activity(prev);
+    }
+
+    /// Create a fresh runtime activity with `name`, returning its id.
+    ///
+    /// Validation is delegated to [`Activities::create_runtime`] — empty /
+    /// whitespace-only names and case-insensitive duplicates are rejected
+    /// without mutating any pool state (see [`CreateActivityError`]).
+    ///
+    /// On success, the new activity id is unioned into every sticky workspace's
+    /// `activities` set. Sticky workspaces are "present on every activity" by
+    /// definition; whenever the activity pool grows, those sets must grow with
+    /// it, or the pool-level union invariant (each workspace's `activities` set
+    /// is a subset of live activity ids) would diverge from the intended
+    /// semantics. The new activity's `views` map stays empty — lazy population
+    /// for the active monitors happens on the next
+    /// [`Self::switch_activity`] to this id (see DD §5.3).
+    ///
+    /// The `active` / `previous` cursors on [`Activities`] are not touched; the
+    /// caller remains on whatever activity was active before the call.
+    pub(crate) fn create_activity(
+        &mut self,
+        name: String,
+    ) -> Result<ActivityId, CreateActivityError> {
+        let id = self.activities.create_runtime(name)?;
+        for ws in self.workspaces.values_mut() {
+            if ws.is_sticky() {
+                ws.activities.insert(id);
+            }
+        }
+        Ok(id)
     }
 
     /// Resolve an [`ActivityReferenceArg`] to an [`ActivityId`] if the pool

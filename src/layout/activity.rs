@@ -8,6 +8,7 @@
 //! The active-activity invariant is enforced in `Layout::verify_invariants`.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use indexmap::IndexMap;
 
@@ -275,6 +276,30 @@ impl Activity {
     }
 }
 
+/// Validation failure for runtime activity creation via [`Activities::create_runtime`]
+/// / `Layout::create_activity`. The two variants mirror the rejection rules enforced
+/// inside `create_runtime`; callers surface them as log messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateActivityError {
+    /// The requested name was empty after trimming whitespace.
+    EmptyName,
+    /// The requested name collided (case-insensitively) with an existing activity's
+    /// name. Mirrors the uniqueness policy in
+    /// [`Activities::resolve_config_names`].
+    DuplicateName,
+}
+
+impl fmt::Display for CreateActivityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyName => f.write_str("activity name must not be empty"),
+            Self::DuplicateName => f.write_str("activity name already exists"),
+        }
+    }
+}
+
+impl std::error::Error for CreateActivityError {}
+
 /// Ordered pool of [`Activity`]s plus active / previous cursors.
 ///
 /// Invariants:
@@ -355,6 +380,44 @@ impl Activities {
             self.map.insert(activity.id, activity).is_none(),
             "Activities::insert: id already present",
         );
+    }
+
+    /// Validate `name` and, on success, mint a fresh runtime [`Activity`] and insert
+    /// it into the pool, returning the new id.
+    ///
+    /// Rejection rules (both are pure inspections; on either error the pool is
+    /// left untouched):
+    ///
+    /// - `name.trim().is_empty()` → [`CreateActivityError::EmptyName`]. Trimming
+    ///   before the check matches user intent — a whitespace-only name is not a
+    ///   legitimate distinct activity identifier.
+    /// - Any existing activity's name equals `name` case-insensitively (via
+    ///   `str::eq_ignore_ascii_case`) → [`CreateActivityError::DuplicateName`].
+    ///   Mirrors the collision policy in [`Self::resolve_config_names`] and
+    ///   `niri_config::ActivityName::raw_decode`.
+    ///
+    /// On success, delegates insertion to [`Self::insert`]; the new activity is
+    /// `is_config_declared == false` and carries an empty `views` map. The pool's
+    /// `active` / `previous` cursors are not touched — creation is independent of
+    /// focus transitions.
+    pub(super) fn create_runtime(
+        &mut self,
+        name: String,
+    ) -> Result<ActivityId, CreateActivityError> {
+        if name.trim().is_empty() {
+            return Err(CreateActivityError::EmptyName);
+        }
+        if self
+            .map
+            .values()
+            .any(|a| a.name().eq_ignore_ascii_case(&name))
+        {
+            return Err(CreateActivityError::DuplicateName);
+        }
+        let activity = Activity::new_runtime(name);
+        let id = activity.id();
+        self.insert(activity);
+        Ok(id)
     }
 
     pub fn active(&self) -> &Activity {

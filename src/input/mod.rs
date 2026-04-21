@@ -1576,8 +1576,19 @@ impl State {
                 self.niri.layer_shell_on_demand_focus = None;
                 self.niri.queue_redraw_all();
             }
-            Action::CreateActivity(_name) => {
-                warn!("CreateActivity: not yet implemented (Phase 1a, DD line 1818)");
+            Action::CreateActivity(name) => {
+                let name_str = name.clone();
+                match self.niri.layout.create_activity(name) {
+                    Ok(id) => {
+                        debug!("CreateActivity: created {id:?} {name_str:?}");
+                    }
+                    Err(crate::layout::CreateActivityError::EmptyName) => {
+                        warn!("CreateActivity: empty name {name_str:?}");
+                    }
+                    Err(crate::layout::CreateActivityError::DuplicateName) => {
+                        warn!("CreateActivity: duplicate name {name_str:?}");
+                    }
+                }
             }
             Action::RemoveActivity(_reference) => {
                 warn!("RemoveActivity: not yet implemented (Phase 1a, DD line 1818)");

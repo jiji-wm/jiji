@@ -5941,3 +5941,239 @@ fn ipc_workspace_snapshot_mixed_visibility_preserves_pass_disjointness() {
 
     layout.verify_invariants();
 }
+
+#[test]
+fn create_activity_valid_name_succeeds() {
+    // Happy path: create_activity("Beta") on a fresh layout must mint a new
+    // runtime activity, leave the seed active, and satisfy the pool-level
+    // invariants (verify_invariants) immediately.
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+
+    let id = layout
+        .create_activity("Beta".to_owned())
+        .expect("valid name must succeed");
+
+    assert_ne!(id, seed_id, "new activity must have a distinct id");
+    assert_eq!(layout.activities.len(), 2);
+    assert_eq!(
+        layout.active_activity_id(),
+        seed_id,
+        "create_activity must not flip the active cursor",
+    );
+    assert_eq!(
+        layout.activities.previous_id(),
+        None,
+        "create_activity must not touch the previous cursor",
+    );
+
+    let created = layout
+        .activities
+        .get(id)
+        .expect("new activity must be present in the pool");
+    assert_eq!(created.name(), "Beta");
+    assert!(
+        !created.is_config_declared(),
+        "runtime-created activity must not be flagged as config-declared",
+    );
+    assert!(
+        created.views().is_empty(),
+        "new runtime activity starts with no views (lazy population on switch)",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn create_activity_empty_name_errs() {
+    // Empty name → EmptyName, pool size unchanged, invariants preserved.
+    let mut layout = Layout::<TestWindow>::default();
+    let size_before = layout.activities.len();
+
+    let err = layout
+        .create_activity(String::new())
+        .expect_err("empty name must be rejected");
+    assert_eq!(err, CreateActivityError::EmptyName);
+    assert_eq!(
+        layout.activities.len(),
+        size_before,
+        "rejected create must not grow the pool",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn create_activity_whitespace_only_name_errs() {
+    // Whitespace-only name trims to empty and must be rejected as EmptyName
+    // (not DuplicateName). Documents the trim-then-check rule.
+    let mut layout = Layout::<TestWindow>::default();
+
+    let err = layout
+        .create_activity("   ".to_owned())
+        .expect_err("whitespace-only name must be rejected");
+    assert_eq!(err, CreateActivityError::EmptyName);
+}
+
+#[test]
+fn create_activity_duplicate_name_errs_case_insensitive() {
+    // Seed activity is "Default"; requesting "default" (lowercase) must collide
+    // case-insensitively and be rejected without mutating the pool.
+    let mut layout = Layout::<TestWindow>::default();
+    let size_before = layout.activities.len();
+
+    let err = layout
+        .create_activity("default".to_owned())
+        .expect_err("case-insensitive collision must be rejected");
+    assert_eq!(err, CreateActivityError::DuplicateName);
+    assert_eq!(
+        layout.activities.len(),
+        size_before,
+        "rejected duplicate must not grow the pool",
+    );
+}
+
+#[test]
+fn create_activity_duplicate_name_errs_exact() {
+    // After a successful create of "Beta", a second create_activity("Beta")
+    // must collide on exact name and be rejected.
+    let mut layout = Layout::<TestWindow>::default();
+    layout
+        .create_activity("Beta".to_owned())
+        .expect("first create must succeed");
+    let size_before = layout.activities.len();
+
+    let err = layout
+        .create_activity("Beta".to_owned())
+        .expect_err("exact-name duplicate must be rejected");
+    assert_eq!(err, CreateActivityError::DuplicateName);
+    assert_eq!(layout.activities.len(), size_before);
+}
+
+#[test]
+fn create_activity_duplicate_name_errs_case_insensitive_runtime() {
+    // Case-insensitive collision with a runtime-created activity (not just the
+    // config-seeded default) must also be rejected without growing the pool.
+    let mut layout = Layout::<TestWindow>::default();
+    layout
+        .create_activity("Beta".to_owned())
+        .expect("first create must succeed");
+
+    let err = layout
+        .create_activity("BETA".to_owned())
+        .expect_err("case-insensitive collision with runtime activity must be rejected");
+    assert_eq!(err, CreateActivityError::DuplicateName);
+    assert_eq!(layout.activities.len(), 2, "pool must not grow on rejection");
+}
+
+#[test]
+fn create_activity_expands_sticky_workspaces() {
+    // A sticky workspace is "present on every activity" by DD semantics. When
+    // a new runtime activity is created, its id must be unioned into every
+    // sticky workspace's `activities` set; non-sticky workspaces' sets must
+    // be untouched.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    // Partition the two workspaces currently bound to the monitor: flip the
+    // first sticky, leave the second as a non-sticky baseline. Direct field
+    // access is permitted because this test module is a submodule of `layout`.
+    let (sticky_id, nonsticky_id) = {
+        let mut bound: Vec<WorkspaceId> = layout
+            .workspaces
+            .values()
+            .filter(|ws| ws.output_id() == Some(&mon_out))
+            .map(|ws| ws.id())
+            .collect();
+        bound.sort_by_key(|id| id.get());
+        assert!(
+            bound.len() >= 2,
+            "test precondition: at least two workspaces bound to the output",
+        );
+        let sticky_id = bound[0];
+        let nonsticky_id = bound[1];
+
+        let sticky = layout
+            .workspaces
+            .get_mut(&sticky_id)
+            .expect("sticky candidate must be in the pool");
+        sticky.is_sticky = true;
+        sticky.activities = HashSet::from([seed_id]);
+
+        (sticky_id, nonsticky_id)
+    };
+
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("valid name must succeed");
+
+    // Sticky workspace's set must now contain both ids.
+    let sticky_ws = layout
+        .workspaces
+        .get(&sticky_id)
+        .expect("sticky workspace must still be in the pool");
+    assert_eq!(
+        sticky_ws.activities(),
+        &HashSet::from([seed_id, beta_id]),
+        "sticky workspace must gain the new activity id",
+    );
+
+    // Non-sticky workspace's set must NOT contain beta.
+    let nonsticky_ws = layout
+        .workspaces
+        .get(&nonsticky_id)
+        .expect("non-sticky workspace must still be in the pool");
+    assert_eq!(
+        nonsticky_ws.activities(),
+        &HashSet::from([seed_id]),
+        "non-sticky workspace's activities set must be untouched by create",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn create_activity_no_view_population() {
+    // Lazy view creation (DD §5.3): create_activity does not populate per-output
+    // views — those materialize on the first switch_activity to the new id.
+    let mut layout = Layout::<TestWindow>::default();
+    let id = layout
+        .create_activity("Beta".to_owned())
+        .expect("valid name must succeed");
+
+    let created = layout
+        .activities
+        .get(id)
+        .expect("new activity must be present");
+    assert!(
+        created.views().is_empty(),
+        "new activity has no views until it becomes active",
+    );
+}
+
+#[test]
+fn create_activity_verify_invariants_empty_pool() {
+    // Zero-workspace, zero-monitor layout (the default shape): verify_invariants
+    // must accept the layout after create_activity, confirming the
+    // sticky-expansion loop is a no-op when the workspace pool is empty.
+    let mut layout = Layout::<TestWindow>::default();
+    assert!(
+        layout.monitors.is_empty(),
+        "default layout starts with no monitors",
+    );
+
+    layout
+        .create_activity("Beta".to_owned())
+        .expect("valid name must succeed");
+
+    layout.verify_invariants();
+}
