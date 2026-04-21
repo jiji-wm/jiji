@@ -47,7 +47,7 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
-use crate::layout::{ActivateWindow, LayoutElement as _};
+use crate::layout::{ActivateWindow, ActivitySwitchBlock, LayoutElement as _};
 use crate::niri::{CastTarget, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
@@ -676,9 +676,27 @@ impl State {
         }
     }
 
+    /// Silent-drop wrapper over [`Self::do_action_inner`].
+    ///
+    /// Keybinding-triggered actions (and other internal callers like switch
+    /// events) inherit the DD §5.11 contract: when an activity-switch action
+    /// is hard-blocked, the `Err(ActivitySwitchBlock)` is dropped here on
+    /// purpose — the keypress is discarded, not queued. Callers that can
+    /// surface the `Err` to a client (e.g., the IPC `Request::Action`
+    /// dispatch) call `do_action_inner` directly.
     pub fn do_action(&mut self, action: Action, allow_when_locked: bool) {
+        let _ = self.do_action_inner(action, allow_when_locked);
+    }
+
+    #[must_use = "hard-block Err must be surfaced to IPC callers or explicitly dropped \
+                  (see do_action wrapper for the §5.11 silent-drop contract)"]
+    pub(crate) fn do_action_inner(
+        &mut self,
+        action: Action,
+        allow_when_locked: bool,
+    ) -> Result<(), ActivitySwitchBlock> {
         if self.niri.is_locked() && !(allow_when_locked || allowed_when_locked(&action)) {
-            return;
+            return Ok(());
         }
 
         if let Some(touch) = self.niri.seat.get_touch() {
@@ -689,7 +707,7 @@ impl State {
             Action::Quit(skip_confirmation) => {
                 if !skip_confirmation && self.niri.exit_confirm_dialog.show() {
                     self.niri.queue_redraw_all();
-                    return;
+                    return Ok(());
                 }
 
                 info!("quitting as requested");
@@ -756,7 +774,7 @@ impl State {
             }
             Action::CancelScreenshot => {
                 if !self.niri.screenshot_ui.is_open() {
-                    return;
+                    return Ok(());
                 }
 
                 self.niri.screenshot_ui.close();
@@ -1544,11 +1562,12 @@ impl State {
             Action::SwitchActivity(reference) => {
                 // Per DD §5.11, keybinding-triggered switches are silently dropped while
                 // hard-blocked (no cursor warp, no redraw, no focus reset). IPC callers
-                // get queued instead — but Phase 1a inherits this silent-drop semantics
-                // for the IPC path too (see ipc/server.rs TODO).
+                // receive `Reply::Err("activity switch blocked: ...")` with the block
+                // reason; per-connection queue-and-await is DD §5.11 Part 2 scope
+                // (see the TODO in ipc/server.rs).
                 if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
                     debug!("switch_activity: hard-blocked by {block:?}, ignoring (DD §5.11)");
-                    return;
+                    return Err(block);
                 }
                 // niri-config holds its own ActivityReference to keep config
                 // types independent of niri-ipc's wire enums; layout's API
@@ -1569,7 +1588,7 @@ impl State {
                         "switch_activity_previous: hard-blocked by {block:?}, ignoring \
                          (DD §5.11)"
                     );
-                    return;
+                    return Err(block);
                 }
                 self.niri.layout.switch_activity_previous();
                 self.maybe_warp_cursor_to_focus();
@@ -1600,7 +1619,7 @@ impl State {
                     debug!(
                         "remove_activity: hard-blocked by {block:?}, ignoring (DD §5.11)"
                     );
-                    return;
+                    return Err(block);
                 }
                 let arg: ActivityReferenceArg = reference.into();
                 match self.niri.layout.remove_activity(&arg) {
@@ -2294,7 +2313,7 @@ impl State {
                     let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
                     let window = window.map(|(_, m)| m.window.clone());
                     if window.is_none() {
-                        return;
+                        return Ok(());
                     }
                     window
                 } else {
@@ -2505,6 +2524,8 @@ impl State {
                 }
             }
         }
+
+        Ok(())
     }
 
     fn on_pointer_motion<I: InputBackend>(&mut self, event: I::PointerMotionEvent) {

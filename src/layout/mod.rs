@@ -33,6 +33,7 @@
 
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::mem;
 use std::rc::Rc;
 use std::time::Duration;
@@ -480,6 +481,40 @@ pub(crate) enum ActivitySwitchBlock {
     InteractiveMove,
     Dnd,
     WorkspaceSwitchGesture,
+}
+
+impl fmt::Display for ActivitySwitchBlock {
+    /// Stable human-readable token for each block reason.
+    ///
+    /// These three strings are part of the observable IPC wire contract: the
+    /// `Request::Action` dispatch formats them into a `Reply::Err("activity
+    /// switch blocked: {token} (DD §5.11)")` string that external clients may
+    /// pattern-match. Changing any token is a breaking change. The tokens are
+    /// pinned by `activity_switch_block_display_matches_wire_contract` in
+    /// `src/layout/tests.rs`; the full envelope string is assembled by
+    /// [`format_activity_switch_block_err`] and pinned by
+    /// `activity_switch_block_err_envelope_matches_wire_contract` there and by
+    /// the serde roundtrip `reply_err_format_for_activity_switch_block` in
+    /// `niri-ipc`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::InteractiveMove => "interactive window move",
+            Self::Dnd => "drag and drop",
+            Self::WorkspaceSwitchGesture => "workspace switch gesture",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Assemble the full IPC wire error string for a hard-block reason.
+///
+/// The format `"activity switch blocked: {token} (DD §5.11)"` is the stable
+/// observable contract that IPC clients may pattern-match against. Both the
+/// `ipc/server.rs` call site and the envelope pin test call this function, so
+/// a regression to the format string here will fail
+/// `activity_switch_block_err_envelope_matches_wire_contract`.
+pub(crate) fn format_activity_switch_block_err(block: ActivitySwitchBlock) -> String {
+    format!("activity switch blocked: {block} (DD §5.11)")
 }
 
 #[allow(clippy::large_enum_variant)]

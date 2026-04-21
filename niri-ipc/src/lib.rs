@@ -2465,4 +2465,43 @@ mod tests {
         assert_eq!(parsed_id2, 7);
         assert_eq!(parsed_prev2, None);
     }
+
+    #[test]
+    fn reply_err_format_for_activity_switch_block() {
+        // Roundtrips the full wire strings through serde to pin their JSON
+        // representation. The exact prefix "activity switch blocked: " and the
+        // three block tokens ("interactive window move", "drag and drop",
+        // "workspace switch gesture") are the observable IPC contract.
+        // The tokens are pinned on the compositor side by
+        // `activity_switch_block_display_matches_wire_contract` in
+        // `niri/src/layout/tests.rs`; the envelope format is assembled by
+        // `format_activity_switch_block_err` in `niri/src/layout/mod.rs` and
+        // pinned by `activity_switch_block_err_envelope_matches_wire_contract`
+        // there. Both `ipc/server.rs` and that test call the helper, so a
+        // regression to the format string will fail the envelope test.
+        for (msg, expected_json) in [
+            (
+                "activity switch blocked: interactive window move (DD §5.11)",
+                r#"{"Err":"activity switch blocked: interactive window move (DD §5.11)"}"#,
+            ),
+            (
+                "activity switch blocked: drag and drop (DD §5.11)",
+                r#"{"Err":"activity switch blocked: drag and drop (DD §5.11)"}"#,
+            ),
+            (
+                "activity switch blocked: workspace switch gesture (DD §5.11)",
+                r#"{"Err":"activity switch blocked: workspace switch gesture (DD §5.11)"}"#,
+            ),
+        ] {
+            let reply: Reply = Err(msg.to_owned());
+            let json = serde_json::to_string(&reply).expect("serialize Reply::Err");
+            assert_eq!(json, expected_json);
+            let parsed: Reply =
+                serde_json::from_str(&json).expect("deserialize Reply::Err");
+            match parsed {
+                Err(parsed_msg) => assert_eq!(parsed_msg, msg),
+                Ok(_) => panic!("expected Reply::Err variant"),
+            }
+        }
+    }
 }

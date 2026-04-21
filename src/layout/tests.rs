@@ -5400,6 +5400,52 @@ fn switch_activity_snaps_in_flight_animation_and_proceeds() {
 }
 
 #[test]
+fn activity_switch_block_display_matches_wire_contract() {
+    // Pins the `Display` tokens that form the token half of the IPC wire
+    // contract. The full envelope string is assembled by
+    // `format_activity_switch_block_err` and pinned by
+    // `activity_switch_block_err_envelope_matches_wire_contract` below and the
+    // serde roundtrip in `niri-ipc`. A change to either layer's strings without
+    // updating the other will be caught by one of these tests.
+    use super::ActivitySwitchBlock;
+    assert_eq!(
+        format!("{}", ActivitySwitchBlock::InteractiveMove),
+        "interactive window move",
+    );
+    assert_eq!(format!("{}", ActivitySwitchBlock::Dnd), "drag and drop");
+    assert_eq!(
+        format!("{}", ActivitySwitchBlock::WorkspaceSwitchGesture),
+        "workspace switch gesture",
+    );
+}
+
+#[test]
+fn activity_switch_block_err_envelope_matches_wire_contract() {
+    // Pins the full IPC wire error string produced by
+    // `format_activity_switch_block_err`. Both `ipc/server.rs` and this test
+    // call that helper, so a regression to its format string will fail here.
+    // A change to the prefix or suffix wording will be caught by this test;
+    // a change to a token string will be caught by the token-level test above.
+    use super::{format_activity_switch_block_err, ActivitySwitchBlock};
+    for (block, expected) in [
+        (
+            ActivitySwitchBlock::InteractiveMove,
+            "activity switch blocked: interactive window move (DD §5.11)",
+        ),
+        (
+            ActivitySwitchBlock::Dnd,
+            "activity switch blocked: drag and drop (DD §5.11)",
+        ),
+        (
+            ActivitySwitchBlock::WorkspaceSwitchGesture,
+            "activity switch blocked: workspace switch gesture (DD §5.11)",
+        ),
+    ] {
+        assert_eq!(format_activity_switch_block_err(block), expected);
+    }
+}
+
+#[test]
 fn resolve_activity_ref_by_id_and_name() {
     let layout = Layout::<TestWindow>::default();
     let seed_id = layout.active_activity_id();

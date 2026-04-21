@@ -34,7 +34,7 @@ use crate::backend::IpcOutputMap;
 use crate::input::pick_window_grab::PickWindowGrab;
 use crate::layout::activity::ActivityId;
 use crate::layout::workspace::WorkspaceId;
-use crate::layout::{Layout, LayoutElement};
+use crate::layout::{format_activity_switch_block_err, ActivitySwitchBlock, Layout, LayoutElement};
 use crate::niri::State;
 use crate::utils::{version, with_toplevel_role};
 use crate::window::Mapped;
@@ -417,24 +417,34 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
         Request::Action(action) => {
             validate_action(&action)?;
 
-            let (tx, rx) = async_channel::bounded(1);
+            let (tx, rx) = async_channel::bounded::<Result<(), ActivitySwitchBlock>>(1);
 
             let action = niri_config::Action::from(action);
             ctx.event_loop.insert_idle(move |state| {
                 // Make sure some logic like workspace clean-up has a chance to run before doing
                 // actions.
                 state.niri.advance_animations();
-                // TODO(§5.11): queue per-connection for IPC callers; Phase 1a inherits
-                // keybinding silent-drop semantics (Handled returned even if hard-blocked).
-                state.do_action(action, false);
-                let _ = tx.send_blocking(());
+                // TODO(§5.11 Part 2): per-connection depth-1 queue for hard-blocked
+                // activity actions. Today we surface Err(block) immediately; Part 2
+                // replaces that with queue-and-await so `Handled` means "performed".
+                let result = state.do_action_inner(action, false);
+                // Connection may have closed between enqueue and action completion.
+                // Safe to drop the send: on Ok the action already executed with
+                // no state loss; on Err(block) the action was rejected without
+                // performing any side effect, so dropping the result is harmless.
+                let _ = tx.send_blocking(result);
             });
 
             // Wait until the action has been processed before returning. This is important for a
             // few actions, for instance for DoScreenTransition this wait ensures that the screen
             // contents were sampled into the texture.
-            let _ = rx.recv().await;
-            Response::Handled
+            match rx.recv().await {
+                Ok(Ok(())) => Response::Handled,
+                Ok(Err(block)) => {
+                    return Err(format_activity_switch_block_err(block));
+                }
+                Err(_) => return Err("action dispatch channel closed".into()),
+            }
         }
         Request::Output { output, action } => {
             action.validate()?;
