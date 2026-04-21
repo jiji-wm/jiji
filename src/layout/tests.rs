@@ -6257,6 +6257,8 @@ fn remove_activity_last_remaining_errs() {
         1,
         "pool size must stay at 1 after LastRemaining",
     );
+
+    layout.verify_invariants();
 }
 
 #[test]
@@ -6629,6 +6631,369 @@ fn remove_activity_sticky_workspace_pruned_not_destroyed() {
         &HashSet::from([alpha]),
         "sticky workspace must have beta pruned",
     );
+    assert_eq!(layout.activities.len(), 1);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_error_precedence_windows_beats_named() {
+    // When a target activity has BOTH an exclusive workspace with windows AND
+    // an exclusive named workspace, `ExclusiveWorkspaceHasWindows` must win
+    // over `ExclusiveNamedWorkspace` regardless of HashMap iteration order.
+    // This pins the accumulate-all-violations design at mod.rs:4047-4071.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 7,
+            output_name: None,
+            layout_config: None,
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(42),
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta = beta_activity.id();
+    layout.activities.insert(beta_activity);
+
+    // Flip the named workspace to exclusively beta.
+    let named_ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"ws7".to_owned()))
+        .expect("named workspace was added")
+        .id();
+    layout
+        .workspaces
+        .get_mut(&named_ws_id)
+        .expect("named_ws_id must be a live pool key")
+        .activities = std::iter::once(beta).collect();
+
+    // Flip the window-carrying workspace to exclusively beta.
+    let windowed_ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.has_windows())
+        .expect("window was added")
+        .id();
+    layout
+        .workspaces
+        .get_mut(&windowed_ws_id)
+        .expect("windowed_ws_id must be a live pool key")
+        .activities = std::iter::once(beta).collect();
+
+    assert_ne!(
+        named_ws_id, windowed_ws_id,
+        "test requires two distinct exclusive workspaces to pin precedence between simultaneous violations",
+    );
+    assert!(
+        !layout.workspaces[&named_ws_id].has_windows(),
+        "named workspace must be empty so ExclusiveNamedWorkspace is the only violation it contributes",
+    );
+
+    // Both violations are present; the has-windows check must take precedence.
+    let err = layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect_err("compound violation must err");
+    assert_eq!(
+        err,
+        RemoveActivityError::ExclusiveWorkspaceHasWindows,
+        "ExclusiveWorkspaceHasWindows must outrank ExclusiveNamedWorkspace",
+    );
+
+    // Pool must be completely untouched.
+    assert!(layout.activities.contains(beta), "beta still present");
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_view_patching_both_branches() {
+    // Exercises BOTH branches of the retain closure in the exclusive-workspace
+    // destruction loop (mod.rs:4097-4113):
+    //
+    //   - Drop branch (view.len() == 1 → return false): gamma's dormant view
+    //     for the output contains only beta_ws_id; after removal the whole
+    //     entry is dropped.
+    //   - Patch branch (view.len() > 1 → remove_at): alpha's active view for
+    //     the output contains [alpha_default_ws, beta_ws_id]; after removal
+    //     only [alpha_default_ws] remains.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta = beta_activity.id();
+    layout.activities.insert(beta_activity);
+
+    let gamma_activity = super::activity::Activity::new_runtime("gamma".to_owned());
+    let gamma = gamma_activity.id();
+    layout.activities.insert(gamma_activity);
+
+    // Allocate an exclusive unnamed empty workspace for beta.
+    let mon_out = layout.monitors[0].output_id();
+    let output = layout.monitors[0].output.clone();
+    let beta_ws = Workspace::new(
+        &output,
+        HashSet::from([beta]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let beta_ws_id = beta_ws.id();
+    assert!(
+        layout.workspaces.insert(beta_ws_id, beta_ws).is_none(),
+        "fresh id must be unique",
+    );
+
+    // Retrieve alpha's existing workspace id from its active view.
+    let alpha_default_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("active view must have at least one workspace");
+
+    // Patch branch: inject beta_ws_id into alpha's active view alongside
+    // the existing workspace so the view has two entries.
+    layout
+        .activities
+        .active_mut()
+        .views_mut()
+        .get_mut(&mon_out)
+        .expect("active activity must have a view for the connected output")
+        .insert(1, beta_ws_id);
+
+    // Drop branch: give gamma a dormant view whose sole entry is beta_ws_id.
+    layout
+        .activities
+        .get_mut(gamma)
+        .expect("gamma must be a live activity")
+        .views_mut()
+        .insert(
+            mon_out.clone(),
+            WorkspaceView::new(vec![beta_ws_id], 0),
+        );
+
+    // Sanity: both branches are populated before removal.
+    assert_eq!(
+        layout.active_view(&mon_out).ids(),
+        &[alpha_default_ws_id, beta_ws_id],
+        "alpha view must contain both workspaces before removal",
+    );
+    assert_eq!(
+        layout
+            .activities
+            .get(gamma)
+            .expect("gamma live")
+            .views()
+            .get(&mon_out)
+            .expect("gamma has view")
+            .ids(),
+        &[beta_ws_id],
+        "gamma view must contain only beta_ws_id before removal",
+    );
+
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("remove beta with exclusive ws must succeed");
+
+    // Patch branch result: alpha's view now contains only the original workspace.
+    assert_eq!(
+        layout.active_view(&mon_out).ids(),
+        &[alpha_default_ws_id],
+        "alpha view must have beta_ws_id removed (patch branch)",
+    );
+
+    // Drop branch result: gamma's view entry for the output must be gone
+    // because its only entry was the destroyed workspace.
+    assert!(
+        layout
+            .activities
+            .get(gamma)
+            .expect("gamma still live")
+            .views()
+            .get(&mon_out)
+            .is_none(),
+        "gamma view entry for output must be dropped (drop branch)",
+    );
+
+    assert!(!layout.activities.contains(beta), "beta removed");
+    assert!(!layout.workspaces.contains_key(&beta_ws_id), "beta_ws destroyed");
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_active_with_exclusive_workspace_cascades_and_destroys() {
+    // Compound path: active activity with an exclusive unnamed-empty workspace.
+    // switch_activity → ensure_active_views allocates an exclusive workspace for
+    // beta on the connected output. Both the cascade (active → previous) and
+    // exclusive-ws destruction must complete in a single `remove_activity` call.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+
+    let alpha_ws_id = {
+        let mon_out = layout.monitors[0].output_id();
+        layout
+            .active_view(&mon_out)
+            .ids()
+            .first()
+            .copied()
+            .expect("alpha's initial view must have a workspace")
+    };
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    // Switch so beta is active; ensure_active_views allocates an unnamed-empty
+    // exclusive workspace for beta on the output.
+    layout.switch_activity(beta);
+    assert_eq!(layout.active_activity_id(), beta);
+    assert_eq!(layout.activities.previous_id(), Some(alpha));
+
+    // Identify the exclusive workspace that ensure_active_views created for beta.
+    let beta_ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| {
+            ws.activities().len() == 1
+                && ws.activities().contains(&beta)
+                && !ws.has_windows()
+                && ws.name().is_none()
+        })
+        .expect("ensure_active_views must have created an exclusive empty workspace for beta")
+        .id();
+
+    let pool_size_before = layout.workspaces.len();
+
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("removing active with exclusive ws must succeed");
+
+    // Cascade: alpha is now active.
+    assert_eq!(
+        layout.active_activity_id(),
+        alpha,
+        "cascade must land on alpha (previous)",
+    );
+    assert_eq!(
+        layout.activities.previous_id(),
+        None,
+        "previous pointed at the removed beta and must be cleared",
+    );
+
+    // Destruction: beta's exclusive workspace must be gone; alpha's ws survives.
+    assert!(
+        !layout.workspaces.contains_key(&beta_ws_id),
+        "exclusive unnamed-empty ws must be destroyed",
+    );
+    assert!(
+        layout.workspaces.contains_key(&alpha_ws_id),
+        "alpha's workspace must survive",
+    );
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_before - 1,
+        "workspace count must decrease by one (the destroyed beta ws)",
+    );
+
+    assert!(!layout.activities.contains(beta), "beta removed from pool");
+    assert_eq!(layout.activities.len(), 1);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_multiple_exclusive_workspaces_all_destroyed() {
+    // Target activity owns TWO unnamed-empty exclusive workspaces (N > 1
+    // path through the destroy_ids loop). Both must be removed from the pool.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta = beta_activity.id();
+    layout.activities.insert(beta_activity);
+
+    let pool_size_baseline = layout.workspaces.len();
+
+    let output = layout.monitors[0].output.clone();
+
+    // Allocate two exclusive unnamed empty workspaces for beta.
+    let beta_ws1 = Workspace::new(
+        &output,
+        HashSet::from([beta]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let beta_ws1_id = beta_ws1.id();
+
+    let beta_ws2 = Workspace::new(
+        &output,
+        HashSet::from([beta]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let beta_ws2_id = beta_ws2.id();
+
+    assert!(
+        layout.workspaces.insert(beta_ws1_id, beta_ws1).is_none(),
+        "beta_ws1 id must be unique",
+    );
+    assert!(
+        layout.workspaces.insert(beta_ws2_id, beta_ws2).is_none(),
+        "beta_ws2 id must be unique",
+    );
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_baseline + 2,
+        "two workspaces allocated",
+    );
+
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("remove beta with two exclusive workspaces must succeed");
+
+    assert!(!layout.activities.contains(beta), "beta removed");
+    assert!(
+        !layout.workspaces.contains_key(&beta_ws1_id),
+        "beta_ws1 must be destroyed",
+    );
+    assert!(
+        !layout.workspaces.contains_key(&beta_ws2_id),
+        "beta_ws2 must be destroyed",
+    );
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_baseline,
+        "workspace count must return to pre-allocation baseline",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_success_via_name_reference() {
+    // Successful removal resolved by name rather than id. Exercises the Name
+    // arm of `resolve_activity_ref` on the happy path.
+    let mut layout = Layout::<TestWindow>::default();
+    let alpha = layout.active_activity_id();
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    assert_eq!(layout.activities.len(), 2);
+
+    layout
+        .remove_activity(&ActivityReferenceArg::Name("Beta".to_owned()))
+        .expect("remove by name must succeed");
+
+    assert!(!layout.activities.contains(beta), "beta removed");
+    assert!(layout.activities.contains(alpha), "alpha intact");
     assert_eq!(layout.activities.len(), 1);
 
     layout.verify_invariants();
