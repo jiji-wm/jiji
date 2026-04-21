@@ -4598,6 +4598,164 @@ fn build_activities_ipc_mirrors_seed_state() {
 }
 
 #[test]
+fn backwards_compat_default_config_seeds_single_implicit_default_activity() {
+    // Backwards-compat pin for DD §6.5: when no `activity` blocks appear in
+    // the config, exactly one implicit runtime "Default" activity is seeded,
+    // it is active, it is not config-declared, and no previous activity exists.
+    //
+    // Uses `Layout::new` (not `Layout::default`) to exercise the
+    // `with_options_and_workspaces` path that calls
+    // `Activities::from_config_or_default`.
+    let layout = Layout::<TestWindow>::new(Clock::with_time(Duration::ZERO), &Config::default());
+
+    assert_eq!(
+        layout.activities.len(),
+        1,
+        "empty config must seed exactly one implicit Default activity",
+    );
+    assert_eq!(
+        layout.activities.active().name(),
+        super::DEFAULT_ACTIVITY_NAME,
+        "seeded activity must carry the DEFAULT_ACTIVITY_NAME string",
+    );
+    assert!(
+        !layout.activities.active().is_config_declared(),
+        "seeded default must be a runtime activity, not a config-declared one",
+    );
+    assert_eq!(
+        layout.activities.previous_id(),
+        None,
+        "no previous activity on a fresh single-activity layout",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn backwards_compat_workspaces_stamped_with_default_activity_on_empty_config() {
+    // Backwards-compat pin for DD §6.5: when there are workspace config blocks
+    // but no `activity` blocks, every workspace must be stamped with the
+    // implicit Default activity id, must be visible (idx >= 1) on a connected
+    // monitor, and must not be sticky.
+    let config = Config {
+        workspaces: vec![
+            WorkspaceConfig {
+                name: WorkspaceName("main".to_owned()),
+                open_on_output: None,
+                layout: None,
+                activities: Vec::new(),
+                sticky: None,
+            },
+            WorkspaceConfig {
+                name: WorkspaceName("side".to_owned()),
+                open_on_output: None,
+                layout: None,
+                activities: Vec::new(),
+                sticky: None,
+            },
+        ],
+        ..Config::default()
+    };
+
+    let mut layout = Layout::<TestWindow>::new(Clock::with_time(Duration::ZERO), &config);
+    let default_id = layout.active_activity_id();
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+
+    // Pool-level: every workspace carries exactly {default_id} and is not sticky.
+    for ws in layout.workspaces.values() {
+        assert_eq!(
+            ws.activities(),
+            &HashSet::from([default_id]),
+            "workspace {:?} must be stamped with exactly the default activity id",
+            ws.id(),
+        );
+        assert!(
+            !ws.is_sticky(),
+            "workspace {:?} must not be sticky when config has no sticky block",
+            ws.id(),
+        );
+    }
+
+    // IPC wire: every workspace in the snapshot must have is_in_active_activity
+    // = true and idx matching its view position + 1.
+    let mon_out = layout.monitors[0].output_id();
+    let view = layout.active_view(&mon_out);
+    let view_ids: Vec<WorkspaceId> = view.ids().to_vec();
+
+    let snapshot =
+        crate::ipc::server::build_workspace_snapshot(&layout, None, test_window_id_of);
+
+    assert_eq!(
+        snapshot.len(),
+        view_ids.len(),
+        "snapshot must contain exactly one entry per view position (no duplicate emission)",
+    );
+
+    for (pos, id) in view_ids.iter().enumerate() {
+        let expected_idx = u8::try_from(pos + 1).unwrap_or(u8::MAX);
+        let ws = snapshot
+            .iter()
+            .find(|ws| ws.id == id.get())
+            .unwrap_or_else(|| panic!("workspace {:?} must appear in the snapshot", id));
+        assert_eq!(
+            ws.idx, expected_idx,
+            "workspace at view position {pos} must have idx = {expected_idx}",
+        );
+        assert!(
+            ws.is_in_active_activity,
+            "workspace at view position {pos} must have is_in_active_activity = true",
+        );
+        assert_eq!(
+            ws.activities,
+            vec![default_id.get()],
+            "workspace at view position {pos} must list exactly the default activity id",
+        );
+        assert!(
+            !ws.is_sticky,
+            "workspace at view position {pos} must have is_sticky = false",
+        );
+    }
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn backwards_compat_switch_activity_self_and_previous_are_noops_with_only_default() {
+    // Backwards-compat pin for DD §6.5: with only the seeded Default activity,
+    // both switch_activity(default_id) and switch_activity_previous() are
+    // pure no-ops — active and previous remain unchanged.
+    //
+    // This consolidates the single-activity no-op contract in one visible
+    // place for a future reader of the backwards-compat story, even though
+    // the individual paths are also covered by
+    // `layout_switch_activity_no_op_on_same_target` and
+    // `layout_switch_activity_previous_no_op_when_no_previous`.
+    let mut layout = Layout::<TestWindow>::new(Clock::with_time(Duration::ZERO), &Config::default());
+    let default_id = layout.active_activity_id();
+    assert_eq!(layout.activities.len(), 1);
+
+    // switch_activity to the already-active id: no-op.
+    layout.switch_activity(default_id);
+    assert_eq!(layout.active_activity_id(), default_id);
+    assert_eq!(
+        layout.activities.previous_id(),
+        None,
+        "switch_activity no-op must not record a previous activity",
+    );
+    layout.verify_invariants();
+
+    // switch_activity_previous with no previous: no-op.
+    layout.switch_activity_previous();
+    assert_eq!(layout.active_activity_id(), default_id);
+    assert_eq!(
+        layout.activities.previous_id(),
+        None,
+        "switch_activity_previous with no previous must not change state",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
 fn active_activity_views_populated_on_add_output() {
     let ops = [Op::AddOutput(1)];
     let layout = check_ops(ops);
