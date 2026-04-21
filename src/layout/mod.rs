@@ -56,7 +56,7 @@ use tile::{Tile, TileRenderElement};
 use workspace::{WorkspaceAddWindowTarget, WorkspaceId};
 
 use self::activity::{Activities, Activity, ActivityId, WorkspaceView};
-pub use self::activity::CreateActivityError;
+pub use self::activity::{CreateActivityError, RemoveActivityError};
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{Monitor, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
@@ -4020,6 +4020,166 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
         Ok(id)
+    }
+
+    /// Remove the runtime activity identified by `reference`, returning its id
+    /// on success.
+    ///
+    /// Rejection rules (all evaluated before any mutation — see DD §5.14):
+    ///
+    /// - Unknown reference → [`RemoveActivityError::NotFound`].
+    /// - Target is `is_config_declared` → [`RemoveActivityError::ConfigDeclared`].
+    /// - Target is the only activity in the pool →
+    ///   [`RemoveActivityError::LastRemaining`].
+    /// - Any exclusive workspace (one whose `activities` set is `{target}`)
+    ///   has windows → [`RemoveActivityError::ExclusiveWorkspaceHasWindows`].
+    /// - Any exclusive workspace is named →
+    ///   [`RemoveActivityError::ExclusiveNamedWorkspace`].
+    ///
+    /// Precedence on simultaneous violations:
+    /// `ConfigDeclared` > `LastRemaining` > `ExclusiveWorkspaceHasWindows` >
+    /// `ExclusiveNamedWorkspace`. The exclusive-workspace walk classifies
+    /// every candidate before choosing an error, so the result does not depend
+    /// on `HashMap` iteration order (non-deterministic across runs).
+    ///
+    /// On success, the mutation sequence is:
+    ///
+    /// 1. **Cascade the active cursor** if the target was active, via
+    ///    [`Self::switch_activity`] to `previous_id()` (or, failing that, to
+    ///    the first other live activity in declaration order). This is the
+    ///    only path that snaps in-flight workspace-switch animations and
+    ///    lazy-populates views on the new active activity.
+    /// 2. **Destroy exclusive unnamed-empty workspaces** — drop each from the
+    ///    pool, and from every activity's per-output `views`. A view with a
+    ///    single entry pointing at the removed id drops entirely (see DD §5.3
+    ///    "View removal when empty"); otherwise [`WorkspaceView::remove_at`]
+    ///    shifts the active / previous cursors.
+    /// 3. **Prune shared workspaces** — drop the target id from every
+    ///    workspace's `activities` set where it still appears. At least one
+    ///    other activity id remains in each set (those are shared by
+    ///    definition), preserving the non-empty-activities invariant.
+    /// 4. **Remove the activity from the pool** via [`Activities::remove`].
+    ///    That call also clears `previous` if it pointed at the removed id —
+    ///    covering both the post-cascade case (where step 1 just set
+    ///    `previous = Some(target)`) and the non-active case where `previous`
+    ///    already equaled the target.
+    pub(crate) fn remove_activity(
+        &mut self,
+        reference: &ActivityReferenceArg,
+    ) -> Result<ActivityId, RemoveActivityError> {
+        let target = self
+            .resolve_activity_ref(reference)
+            .ok_or(RemoveActivityError::NotFound)?;
+
+        // Validation pass — read-only. No field on `self` is mutated until
+        // every error class has been ruled out; this mirrors the atomicity
+        // contract that `create_activity` inherits from `create_runtime`.
+        {
+            let target_act = self
+                .activities
+                .get(target)
+                .expect("resolve_activity_ref returned a live id");
+            if target_act.is_config_declared() {
+                return Err(RemoveActivityError::ConfigDeclared);
+            }
+        }
+        if self.activities.len() == 1 {
+            return Err(RemoveActivityError::LastRemaining);
+        }
+
+        // Walk all workspaces once, classifying exclusive candidates. Both
+        // error conditions are accumulated before we choose which to return,
+        // because `HashMap::values()` iteration is non-deterministic — an
+        // early-return on the first named-empty would mask a has-windows
+        // violation encountered later and flip the user-facing error based on
+        // hash order.
+        let mut has_windows_violation = false;
+        let mut named_violation = false;
+        let mut destroy_ids: Vec<WorkspaceId> = Vec::new();
+        for ws in self.workspaces.values() {
+            if ws.activities().len() == 1 && ws.activities().contains(&target) {
+                if ws.has_windows() {
+                    has_windows_violation = true;
+                } else if ws.name().is_some() {
+                    named_violation = true;
+                } else {
+                    destroy_ids.push(ws.id());
+                }
+            }
+        }
+        if has_windows_violation {
+            return Err(RemoveActivityError::ExclusiveWorkspaceHasWindows);
+        }
+        if named_violation {
+            return Err(RemoveActivityError::ExclusiveNamedWorkspace);
+        }
+
+        // Mutation phase. Order matters: cascade first (so `switch_activity`'s
+        // hard-block `debug_assert!` is satisfied by the same outer gate as
+        // the keybinding dispatcher), then workspace destruction, then pool
+        // prune, then the activity-pool removal.
+        if target == self.activities.active_id() {
+            let cascade_target = self
+                .activities
+                .previous_id()
+                .or_else(|| {
+                    self.activities
+                        .iter()
+                        .map(|a| a.id())
+                        .find(|id| *id != target)
+                })
+                .expect("LastRemaining was rejected above, so at least one other id exists");
+            self.switch_activity(cascade_target);
+        }
+
+        // Destroy exclusive unnamed-empty workspaces. The `retain` guard drops
+        // the view entry entirely when removing would empty it — `WorkspaceView`
+        // cannot be zero-sized, and §5.3 "View removal when empty" specifies
+        // the entry is dropped in that case. Otherwise `remove_at` patches
+        // `active` / `previous` and shifts the id list.
+        for ws_id in destroy_ids {
+            for activity in self.activities.iter_mut() {
+                activity.views_mut().retain(|_output_id, view| {
+                    let Some(pos) = view.position_of(ws_id) else {
+                        return true;
+                    };
+                    if view.len() == 1 {
+                        return false;
+                    }
+                    view.remove_at(pos);
+                    true
+                });
+            }
+            assert!(
+                self.workspaces.remove(&ws_id).is_some(),
+                "destroy id {ws_id:?} must be a live pool key",
+            );
+        }
+
+        // Prune shared workspaces — ones where the target coexists with at
+        // least one other activity. Exclusives were destroyed or errored out
+        // above, so every remaining membership is shared and the set stays
+        // non-empty after the remove.
+        for ws in self.workspaces.values_mut() {
+            if ws.activities().contains(&target) {
+                debug_assert!(
+                    ws.activities().len() > 1,
+                    "exclusive workspaces were destroyed or errored in the validation pass",
+                );
+                ws.activities.remove(&target);
+            }
+        }
+
+        // Remove from the pool. `Activities::remove` clears `previous` when it
+        // pointed at `target`, covering both the post-cascade case (step 1 set
+        // previous = Some(target)) and any non-active case where previous
+        // happened to already equal target.
+        let _ = self.activities.remove(target);
+
+        #[cfg(debug_assertions)]
+        self.verify_invariants();
+
+        Ok(target)
     }
 
     /// Resolve an [`ActivityReferenceArg`] to an [`ActivityId`] if the pool

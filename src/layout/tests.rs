@@ -6177,3 +6177,459 @@ fn create_activity_verify_invariants_empty_pool() {
 
     layout.verify_invariants();
 }
+
+#[test]
+fn remove_activity_unknown_reference_errs_not_found() {
+    // Unknown name → NotFound; pool unchanged, invariants preserved.
+    let mut layout = Layout::<TestWindow>::default();
+    let size_before = layout.activities.len();
+
+    let err = layout
+        .remove_activity(&ActivityReferenceArg::Name("Ghost".to_owned()))
+        .expect_err("unknown reference must err");
+    assert_eq!(err, RemoveActivityError::NotFound);
+    assert_eq!(
+        layout.activities.len(),
+        size_before,
+        "pool must not shrink on NotFound",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_config_declared_errs() {
+    // A config-declared activity cannot be removed at runtime (DD §5.14
+    // bullet 1). Seed a config-declared "Alpha" as the first activity, create
+    // a runtime "Beta", then attempt to remove Alpha → ConfigDeclared.
+    let cfg = vec![niri_config::Activity {
+        name: niri_config::ActivityName("Alpha".to_owned()),
+    }];
+    // Swap in a config-declared seed pool after the default construction.
+    // `Layout` has no public builder that takes a pool; this is a test-only
+    // shortcut. clippy's `field_reassign_with_default` flags the combined
+    // construct-and-assign pattern even when it's the intent, hence the
+    // scoped `#[allow]`.
+    #[allow(clippy::field_reassign_with_default)]
+    let mut layout = {
+        let mut layout = Layout::<TestWindow>::default();
+        layout.activities = super::activity::Activities::from_config_or_default(&cfg);
+        layout
+    };
+    let alpha_id = layout.active_activity_id();
+
+    layout
+        .create_activity("Beta".to_owned())
+        .expect("runtime create must succeed");
+    let size_before = layout.activities.len();
+
+    let err = layout
+        .remove_activity(&ActivityReferenceArg::Id(alpha_id.get()))
+        .expect_err("config-declared removal must err");
+    assert_eq!(err, RemoveActivityError::ConfigDeclared);
+    assert_eq!(
+        layout.activities.len(),
+        size_before,
+        "pool must not shrink on ConfigDeclared",
+    );
+    assert!(
+        layout.activities.contains(alpha_id),
+        "alpha must still be in the pool after a rejected remove",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_last_remaining_errs() {
+    // Fresh default layout has exactly one activity; removing it must fail
+    // with LastRemaining (DD §5.14 bullet 3).
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+    assert_eq!(layout.activities.len(), 1);
+
+    let err = layout
+        .remove_activity(&ActivityReferenceArg::Id(seed_id.get()))
+        .expect_err("last-remaining removal must err");
+    assert_eq!(err, RemoveActivityError::LastRemaining);
+    assert_eq!(
+        layout.activities.len(),
+        1,
+        "pool size must stay at 1 after LastRemaining",
+    );
+}
+
+#[test]
+fn remove_activity_exclusive_workspace_with_windows_errs() {
+    // Exclusive (activities == {beta}) workspace carrying windows must block
+    // removal (DD §5.14 bullet 2). Test that the pool is untouched after the
+    // rejection — no partial mutation.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(42),
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta = beta_activity.id();
+    layout.activities.insert(beta_activity);
+
+    // Pick the window-carrying workspace and flip its activities set to
+    // {beta} exclusively.
+    let window_ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.has_windows())
+        .expect("window was added")
+        .id();
+    layout
+        .workspaces
+        .get_mut(&window_ws_id)
+        .expect("window_ws_id must be a live pool key")
+        .activities = std::iter::once(beta).collect();
+
+    let size_before = layout.activities.len();
+    let pool_before = layout.workspaces.len();
+
+    let err = layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect_err("exclusive-with-windows must err");
+    assert_eq!(err, RemoveActivityError::ExclusiveWorkspaceHasWindows);
+    assert_eq!(layout.activities.len(), size_before, "pool unchanged");
+    assert_eq!(layout.workspaces.len(), pool_before, "workspaces unchanged");
+    assert!(layout.activities.contains(beta), "beta still present");
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_exclusive_named_workspace_errs() {
+    // Exclusive named workspace blocks removal even when empty (DD §5.14
+    // "Exclusive workspace destruction semantics" — named-empty is preserved
+    // specifically because the user gave it a name).
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 7,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta = beta_activity.id();
+    layout.activities.insert(beta_activity);
+
+    // Find the named workspace and flip it to exclusively beta.
+    let named_ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"ws7".to_owned()))
+        .expect("named workspace was added")
+        .id();
+    layout
+        .workspaces
+        .get_mut(&named_ws_id)
+        .expect("named_ws_id must be a live pool key")
+        .activities = std::iter::once(beta).collect();
+
+    let size_before = layout.activities.len();
+
+    let err = layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect_err("exclusive-named must err");
+    assert_eq!(err, RemoveActivityError::ExclusiveNamedWorkspace);
+    assert_eq!(layout.activities.len(), size_before, "pool unchanged");
+    assert!(
+        layout.workspaces.contains_key(&named_ws_id),
+        "named workspace must survive a rejected remove",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_runtime_non_active_with_shared_only_prunes() {
+    // Non-active runtime target; only shared workspaces reference it. Remove
+    // must succeed, and every shared workspace must drop the target id from
+    // its `activities` set while keeping every other id.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta = beta_activity.id();
+    layout.activities.insert(beta_activity);
+
+    // Union beta into the alpha workspace (making it shared {alpha, beta}).
+    let shared_ws_id = layout
+        .workspaces
+        .values()
+        .map(|ws| ws.id())
+        .next()
+        .expect("AddOutput allocated a seed workspace");
+    layout
+        .workspaces
+        .get_mut(&shared_ws_id)
+        .expect("shared_ws_id must be a live pool key")
+        .activities = [alpha, beta].into_iter().collect();
+
+    let pool_size_before = layout.workspaces.len();
+
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("non-active shared-only remove must succeed");
+
+    assert_eq!(layout.activities.len(), 1, "beta dropped from pool");
+    assert!(!layout.activities.contains(beta), "beta no longer live");
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_before,
+        "shared workspace is retained, not destroyed",
+    );
+    let shared_ws = layout
+        .workspaces
+        .get(&shared_ws_id)
+        .expect("shared workspace must still exist");
+    assert_eq!(
+        shared_ws.activities(),
+        &HashSet::from([alpha]),
+        "shared workspace must have beta pruned, alpha retained",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_runtime_non_active_destroys_empty_unnamed_exclusives() {
+    // Non-active target with an empty unnamed exclusive workspace: the
+    // workspace must be destroyed (removed from the pool and from every
+    // activity's views). Baseline pool size returns to pre-allocation.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta = beta_activity.id();
+    layout.activities.insert(beta_activity);
+
+    let pool_size_baseline = layout.workspaces.len();
+
+    // Allocate a fresh exclusive unnamed workspace tagged to beta.
+    let mon_out = layout.monitors[0].output_id();
+    let output = layout.monitors[0].output.clone();
+    let beta_ws = Workspace::new(
+        &output,
+        HashSet::from([beta]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let beta_ws_id = beta_ws.id();
+    assert!(
+        layout.workspaces.insert(beta_ws_id, beta_ws).is_none(),
+        "fresh id is unique",
+    );
+    // Sanity: our fresh workspace is on the output and exclusively beta's.
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&beta_ws_id)
+            .expect("just inserted")
+            .output_id(),
+        Some(&mon_out),
+    );
+
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("non-active empty-unnamed-exclusive remove must succeed");
+
+    assert!(!layout.activities.contains(beta), "beta dropped");
+    assert!(
+        !layout.workspaces.contains_key(&beta_ws_id),
+        "exclusive empty unnamed workspace must be destroyed",
+    );
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_baseline,
+        "workspace count must return to pre-allocation baseline",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_active_cascades_to_previous() {
+    // Active target with a non-None previous: cascade to previous, then
+    // remove. After the cascade, previous points at the now-removed target;
+    // `Activities::remove` must clear previous to None.
+    let mut layout = Layout::<TestWindow>::default();
+    let alpha = layout.active_activity_id();
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    layout.switch_activity(beta);
+    assert_eq!(layout.active_activity_id(), beta);
+    assert_eq!(layout.activities.previous_id(), Some(alpha));
+
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("removing the active, with previous set, must cascade");
+
+    assert_eq!(
+        layout.active_activity_id(),
+        alpha,
+        "cascade target was previous (alpha)",
+    );
+    assert_eq!(
+        layout.activities.previous_id(),
+        None,
+        "previous pointed at the removed target and must be cleared",
+    );
+    assert_eq!(layout.activities.len(), 1);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_active_cascades_to_first_remaining_when_no_previous() {
+    // Active target with previous == None: cascade to the first other
+    // activity in declaration order. Here alpha is active with no previous,
+    // and beta is the only other entry.
+    let mut layout = Layout::<TestWindow>::default();
+    let alpha = layout.active_activity_id();
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    // No switch — previous is None.
+    assert_eq!(layout.active_activity_id(), alpha);
+    assert_eq!(layout.activities.previous_id(), None);
+
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(alpha.get()))
+        .expect("removing active with no previous must cascade to first remaining");
+
+    assert_eq!(
+        layout.active_activity_id(),
+        beta,
+        "cascade target was the first other activity in declaration order",
+    );
+    assert_eq!(
+        layout.activities.previous_id(),
+        None,
+        "post-cascade previous pointed at the removed alpha and must be cleared",
+    );
+    assert_eq!(layout.activities.len(), 1);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_clears_previous_pointer_at_target() {
+    // Non-active target, but `previous` already points at it. The pool
+    // mutator must clear `previous` when it points at the id being removed,
+    // not just on the cascade branch.
+    let mut layout = Layout::<TestWindow>::default();
+    let alpha = layout.active_activity_id();
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    // switch to beta (active=beta, previous=alpha), then back (active=alpha,
+    // previous=beta). Now beta is NOT active, but previous points at it.
+    layout.switch_activity(beta);
+    layout.switch_activity(alpha);
+    assert_eq!(layout.active_activity_id(), alpha);
+    assert_eq!(layout.activities.previous_id(), Some(beta));
+
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("non-active remove of previous-pointed id must succeed");
+
+    assert_eq!(layout.active_activity_id(), alpha);
+    assert_eq!(
+        layout.activities.previous_id(),
+        None,
+        "previous pointed at the removed beta and must be cleared",
+    );
+    assert_eq!(layout.activities.len(), 1);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_sticky_workspace_pruned_not_destroyed() {
+    // A sticky workspace carries every activity id by definition. Creating
+    // beta via `create_activity` expands its set to {alpha, beta}. Removing
+    // beta must prune the set to {alpha} and leave the workspace intact —
+    // including its is_sticky flag.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let sticky_id = {
+        let mut bound: Vec<WorkspaceId> = layout
+            .workspaces
+            .values()
+            .filter(|ws| ws.output_id() == Some(&mon_out))
+            .map(|ws| ws.id())
+            .collect();
+        bound.sort_by_key(|id| id.get());
+        let sticky_id = *bound.first().expect("at least one workspace is bound");
+        let sticky = layout
+            .workspaces
+            .get_mut(&sticky_id)
+            .expect("sticky_id must be a live pool key");
+        sticky.is_sticky = true;
+        sticky.activities = HashSet::from([alpha]);
+        sticky_id
+    };
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    // Post-expansion sanity: sticky set carries both ids.
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&sticky_id)
+            .expect("sticky must survive create")
+            .activities(),
+        &HashSet::from([alpha, beta]),
+    );
+
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("non-active remove with sticky-shared workspace must succeed");
+
+    let sticky_ws = layout
+        .workspaces
+        .get(&sticky_id)
+        .expect("sticky workspace must survive remove");
+    assert!(
+        sticky_ws.is_sticky(),
+        "is_sticky flag must be preserved across remove",
+    );
+    assert_eq!(
+        sticky_ws.activities(),
+        &HashSet::from([alpha]),
+        "sticky workspace must have beta pruned",
+    );
+    assert_eq!(layout.activities.len(), 1);
+
+    layout.verify_invariants();
+}

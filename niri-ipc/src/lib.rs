@@ -981,9 +981,14 @@ pub enum Action {
     ///
     /// Errors if this is the last remaining activity (at least one must exist).
     ///
-    /// **Phase 1a stub:** not yet implemented — currently logs and returns
-    /// `Response::Handled` without removing an activity or emitting an event.
-    /// The full implementation lands with the lifecycle box in Phase 1a.
+    /// Removal is runtime-only: the activity is dropped from the live pool,
+    /// exclusive unnamed-empty workspaces are destroyed, shared workspaces
+    /// have the id pruned from their `activities` set, and if the target was
+    /// active the compositor cascades to `previous` (or the first other
+    /// activity in declaration order) before removing. The validation rules
+    /// above map to a runtime error enum; handler-side mapping is currently
+    /// a single `warn!` log — a per-connection reply wiring lands with the
+    /// IPC surface in Phase 1b.
     RemoveActivity {
         /// Activity to remove.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]

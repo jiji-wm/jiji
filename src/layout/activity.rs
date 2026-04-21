@@ -300,6 +300,54 @@ impl fmt::Display for CreateActivityError {
 
 impl std::error::Error for CreateActivityError {}
 
+/// Validation failure for runtime activity removal via [`Activities::remove`] /
+/// `Layout::remove_activity`. Each variant corresponds to one of the rejection
+/// rules the outer `Layout::remove_activity` evaluates before any mutation
+/// (DD §5.14). Callers surface them as log messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveActivityError {
+    /// No activity in the pool matches the supplied reference.
+    NotFound,
+    /// Target is flagged `is_config_declared` — config-declared activities are
+    /// removed by editing the config file and reloading, not via the runtime
+    /// action (DD §5.14 bullet 1).
+    ConfigDeclared,
+    /// Target is the only activity in the pool; at least one activity must
+    /// always exist (DD §5.14 bullet 3).
+    LastRemaining,
+    /// At least one workspace exclusively belonging to this activity still has
+    /// windows. The caller must close / move those windows first (DD §5.14
+    /// bullet 2).
+    ExclusiveWorkspaceHasWindows,
+    /// At least one workspace exclusively belonging to this activity is named
+    /// (even if empty). Named-empty exclusive workspaces are preserved: the
+    /// caller must unname them first (DD §5.14 "Exclusive workspace
+    /// destruction semantics").
+    ExclusiveNamedWorkspace,
+}
+
+impl fmt::Display for RemoveActivityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("activity not found"),
+            Self::ConfigDeclared => {
+                f.write_str("activity is config-declared; edit config and reload to remove")
+            }
+            Self::LastRemaining => {
+                f.write_str("cannot remove the last remaining activity")
+            }
+            Self::ExclusiveWorkspaceHasWindows => f.write_str(
+                "activity owns an exclusive workspace with windows; close or move them first",
+            ),
+            Self::ExclusiveNamedWorkspace => f.write_str(
+                "activity owns a named exclusive workspace (even if empty); unname it first",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RemoveActivityError {}
+
 /// Ordered pool of [`Activity`]s plus active / previous cursors.
 ///
 /// Invariants:
@@ -452,6 +500,14 @@ impl Activities {
         self.map.values()
     }
 
+    /// Mutable view over every [`Activity`] in declaration order. Mirrors
+    /// [`Self::iter`] for the shared case. Used by `Layout::remove_activity`
+    /// to patch per-activity `views` during exclusive-workspace destruction,
+    /// so every activity's stale `WorkspaceView` entries drop in the same pass.
+    pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Activity> + '_ {
+        self.map.values_mut()
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -517,6 +573,56 @@ impl Activities {
             self.previous != Some(self.active),
             "set_active must preserve previous != Some(active) distinctness",
         );
+    }
+
+    /// Remove the activity identified by `id` from the pool, returning the
+    /// extracted [`Activity`].
+    ///
+    /// Pure pool mutator: the caller owns all upstream sequencing
+    /// (`Layout::remove_activity` cascades the active cursor via
+    /// [`Layout::switch_activity`], destroys exclusive workspaces, and prunes
+    /// shared ones before calling here).
+    ///
+    /// Uses `IndexMap::shift_remove` (not `swap_remove`) so declaration order
+    /// is preserved — matches the insertion contract of
+    /// [`Self::from_config_or_default`] / [`Self::insert`].
+    ///
+    /// Clears [`Self::previous_id`] if it pointed at the removed id. This
+    /// covers both the cascade case (where `Layout::remove_activity` calls
+    /// `switch_activity` away from the target, leaving `previous == Some(id)`)
+    /// and any non-active case where `previous` already equaled `id`. The
+    /// post-condition after this call is that `previous`, if `Some`, is still
+    /// a live key in the map and is still `!= active` — preserving the pool
+    /// invariants in every branch.
+    ///
+    /// Panics (debug only) if `id == active_id()` (the caller must cascade
+    /// first), if `id` is not a live key in the map, or if removal would
+    /// leave the pool empty.
+    pub(super) fn remove(&mut self, id: ActivityId) -> Activity {
+        debug_assert!(
+            id != self.active,
+            "Activities::remove: caller must cascade off the target before removing \
+             (active == {:?})",
+            id,
+        );
+        debug_assert!(
+            self.map.contains_key(&id),
+            "Activities::remove: id {:?} is not a live key in the map",
+            id,
+        );
+        debug_assert!(
+            self.map.len() > 1,
+            "Activities::remove: cannot empty the pool (len == 1)",
+        );
+
+        let activity = self
+            .map
+            .shift_remove(&id)
+            .expect("Activities::remove: id must be a live key (precondition: caller validates before calling)");
+        if self.previous == Some(id) {
+            self.previous = None;
+        }
+        activity
     }
 
     #[cfg(debug_assertions)]

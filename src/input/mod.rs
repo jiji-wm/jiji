@@ -1590,8 +1590,31 @@ impl State {
                     }
                 }
             }
-            Action::RemoveActivity(_reference) => {
-                warn!("RemoveActivity: not yet implemented (Phase 1a, DD line 1818)");
+            Action::RemoveActivity(reference) => {
+                // Per DD §5.11 / §5.14 "Animation blocking", keybinding-triggered
+                // removes are silently dropped while hard-blocked — the cascade
+                // branch calls `switch_activity` which debug-asserts the same
+                // gate, so we must filter before dispatch. IPC per-connection
+                // queueing is Phase 1b scope.
+                if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
+                    debug!(
+                        "remove_activity: hard-blocked by {block:?}, ignoring (DD §5.11)"
+                    );
+                    return;
+                }
+                let arg: ActivityReferenceArg = reference.into();
+                match self.niri.layout.remove_activity(&arg) {
+                    Ok(id) => {
+                        debug!("RemoveActivity: removed {id:?} ({arg:?})");
+                        // The cascade branch may have flipped the active
+                        // activity; mirror SwitchActivity's focus / redraw
+                        // invalidation so the next frame rebinds cleanly.
+                        self.maybe_warp_cursor_to_focus();
+                        self.niri.layer_shell_on_demand_focus = None;
+                        self.niri.queue_redraw_all();
+                    }
+                    Err(e) => warn!("remove_activity: {e}: {arg:?}"),
+                }
             }
             Action::MoveWorkspaceDown => {
                 self.niri.layout.move_workspace_down();
