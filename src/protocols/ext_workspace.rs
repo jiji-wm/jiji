@@ -494,6 +494,48 @@ impl ExtWorkspaceManagerState {
             workspaces: HashMap::new(),
         }
     }
+
+    /// Snapshot of the [`WorkspaceId`] keys currently tracked by this protocol
+    /// state. Test-only helper that pins the §5.21 projection contract: the
+    /// set returned here must equal the set of ids produced by
+    /// [`Layout::workspaces`](crate::layout::Layout::workspaces) at the same
+    /// observation point (i.e. immediately after [`refresh`] has run).
+    #[cfg(test)]
+    pub(crate) fn workspaces_snapshot(&self) -> std::collections::HashSet<WorkspaceId> {
+        self.workspaces.keys().copied().collect()
+    }
+
+    /// Protocol state flag cache for the given workspace id, or `None` if the
+    /// id is not currently tracked. Test-only helper used to assert the
+    /// `Active` bit surfaced via `ext-workspace-handle-v1` (`Urgent` in a
+    /// later sub-phase).
+    #[cfg(test)]
+    pub(crate) fn workspace_state(
+        &self,
+        id: WorkspaceId,
+    ) -> Option<ext_workspace_handle_v1::State> {
+        self.workspaces.get(&id).map(|ws| ws.state)
+    }
+
+    /// Set of workspace ids whose cached protocol `State` currently has the
+    /// `Active` flag set. Test-only helper used to pin that `Active` is held
+    /// by exactly the id surfaced by `layout.active_view(&output_id).active()`.
+    #[cfg(test)]
+    pub(crate) fn ids_with_active_flag(&self) -> std::collections::HashSet<WorkspaceId> {
+        self.workspaces
+            .iter()
+            .filter(|(_, ws)| ws.state.contains(ext_workspace_handle_v1::State::Active))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Count of workspace-group entries (one per output the protocol has
+    /// surfaced). Test-only helper used to assert parity with
+    /// `state.niri.sorted_outputs`.
+    #[cfg(test)]
+    pub(crate) fn workspace_groups_len(&self) -> usize {
+        self.workspace_groups.len()
+    }
 }
 
 impl<D> GlobalDispatch<ExtWorkspaceManagerV1, ExtWorkspaceGlobalData, D>

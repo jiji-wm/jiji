@@ -152,3 +152,32 @@ impl State {
         self.clients.iter_mut().find(|c| c.id == id).unwrap()
     }
 }
+
+/// Build a [`Config`] with two top-level activities (`"alpha"`, `"beta"`) and
+/// one `workspace` per entry in the two slices, each tagged with its matching
+/// activity. `"alpha"` is first-declared, so it is the default / seed activity
+/// the `Layout` starts on.
+///
+/// Used by the `ext_workspace` integration tests to exercise §5.21's
+/// activity-filtered projection through `ext_workspace::refresh`. The helper
+/// goes through `Config::parse_mem` (rather than field-by-field construction)
+/// to match every other `Config`-building test site and to stay robust against
+/// future additions to `Config`.
+#[cfg(test)]
+pub(super) fn config_with_two_activities(
+    alpha_workspaces: &[&str],
+    beta_workspaces: &[&str],
+) -> Config {
+    use std::fmt::Write as _;
+
+    let mut src = String::new();
+    src.push_str("activity \"alpha\"\n");
+    src.push_str("activity \"beta\"\n");
+    for ws in alpha_workspaces {
+        writeln!(src, "workspace \"{ws}\" {{ activity \"alpha\"; }}").unwrap();
+    }
+    for ws in beta_workspaces {
+        writeln!(src, "workspace \"{ws}\" {{ activity \"beta\"; }}").unwrap();
+    }
+    Config::parse_mem(&src).expect("parse_mem must succeed on the generated KDL template")
+}
