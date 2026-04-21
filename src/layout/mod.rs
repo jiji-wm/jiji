@@ -1123,7 +1123,7 @@ impl<W: LayoutElement> Layout<W> {
         self.last_active_workspace_id
             .insert(monitor.output_name().clone(), view.active());
 
-        let workspace_ids = self.take_workspace_ids(&monitor, &view);
+        let (workspace_ids, doomed_ids) = self.take_workspace_ids(&monitor, &view);
 
         if self.monitors.is_empty() {
             // Removed the last monitor. Values already live in the pool; just reset their options
@@ -1138,6 +1138,11 @@ impl<W: LayoutElement> Layout<W> {
             self.disconnected_workspace_ids = workspace_ids;
             self.primary_idx = 0;
             self.active_monitor_idx = 0;
+            Self::destroy_workspaces_cross_activity(
+                &mut self.activities,
+                &mut self.workspaces,
+                doomed_ids,
+            );
             return;
         }
 
@@ -1154,6 +1159,11 @@ impl<W: LayoutElement> Layout<W> {
 
         let primary_idx = self.primary_idx;
         self.append_workspaces_to_monitor(primary_idx, workspace_ids);
+        Self::destroy_workspaces_cross_activity(
+            &mut self.activities,
+            &mut self.workspaces,
+            doomed_ids,
+        );
     }
 
     pub fn add_column_by_idx(
@@ -2497,17 +2507,26 @@ impl<W: LayoutElement> Layout<W> {
 
     /// Detach the workspaces owned by `monitor` from its output.
     ///
-    /// Non-empty workspaces stay in the pool with `output` unbound; empty unnamed workspaces
-    /// (typically the bookends added by `Monitor::new`) are removed from the pool since no caller
-    /// needs them back. Returns the retained ids in view order. Used when the output is
-    /// disconnecting and `monitor` has already been removed from `self.monitors`.
+    /// Non-empty workspaces stay in the pool with `output` unbound; empty unnamed
+    /// workspaces (typically the bookends added by `Monitor::new`) are accumulated into
+    /// the second tuple element rather than removed inline, so the caller can flush
+    /// them through [`Layout::destroy_workspaces_cross_activity`] once any remaining
+    /// `&mut self` work has finished.
+    ///
+    /// Returns `(kept, doomed)`. The caller MUST flush `doomed` through
+    /// [`Layout::destroy_workspaces_cross_activity`] before the next `refresh`; until
+    /// then both the pool and every activity view referencing those ids are out of sync.
+    ///
+    /// Used when the output is disconnecting and `monitor` has already been removed
+    /// from `self.monitors`.
     fn take_workspace_ids(
         &mut self,
         monitor: &Monitor<W>,
         view: &WorkspaceView,
-    ) -> Vec<WorkspaceId> {
+    ) -> (Vec<WorkspaceId>, Vec<WorkspaceId>) {
         let pool = &mut self.workspaces;
         let mut kept = Vec::with_capacity(view.ids().len());
+        let mut doomed: Vec<WorkspaceId> = Vec::new();
         for id in view.ids() {
             let ws = pool
                 .get_mut(id)
@@ -2516,14 +2535,10 @@ impl<W: LayoutElement> Layout<W> {
                 ws.unbind_output(&monitor.output);
                 kept.push(*id);
             } else {
-                // Empty bookends: drop from the pool.
-                assert!(
-                    pool.remove(id).is_some(),
-                    "monitor id must be a key in the pool",
-                );
+                doomed.push(*id);
             }
         }
-        kept
+        (kept, doomed)
     }
 
     // --- Row-2 leaf structural methods (workspace insert/remove/cleanup).
