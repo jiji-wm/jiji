@@ -10,7 +10,7 @@ This file covers **fork-specific coding conventions** that are enforced in revie
 
 - `cargo check --workspace` — fast compile feedback.
 - `cargo test --all --exclude niri-visual-tests` — full suite.
-  - **Expected pass count: 321 + 21 + 14 + 1.** If this number changes, the active DD must be updated in the same commit.
+  - **Expected pass count: 323 + 21 + 15 + 1.** If this number changes, the active DD must be updated in the same commit.
 - `RUN_SLOW_TESTS=1 cargo test random_operations_dont_panic` — proptest corpus (slow; off by default).
 - `cargo clippy --all --all-targets` — **baseline: 5 pre-existing warnings at `src/layout/floating.rs:492`.** Any new warning must be fixed before commit.
 - `cargo build --release` — sanity-check release profile after any `#[cfg(debug_assertions)]` edit.
