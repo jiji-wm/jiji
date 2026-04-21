@@ -968,6 +968,11 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
 
+        // Empty bookends peeled off the primary view are flushed through
+        // `destroy_workspaces_cross_activity` after the split-borrow scope closes
+        // and the new monitor's view is installed in the active activity.
+        let mut doomed_ids: Vec<WorkspaceId> = Vec::new();
+
         let primary_idx = self.primary_idx;
         let primary_output_id = self.monitors[primary_idx].output_id();
         let (monitors, pool, primary_view) = self.monitors_pool_view_mut(&primary_output_id);
@@ -1008,11 +1013,9 @@ impl<W: LayoutElement> Layout<W> {
                 if ws.has_windows_or_name() {
                     workspace_ids.push(id);
                 } else {
-                    // Empty unnamed workspaces don't come along — drop from the pool.
-                    assert!(
-                        pool.remove(&id).is_some(),
-                        "view id must be a key in the pool",
-                    );
+                    // Empty unnamed workspaces don't come along — accumulate for a
+                    // cross-activity destroy flush after the scope closes.
+                    doomed_ids.push(id);
                 }
 
                 // Without this exception, the first monitor to connect can end up
@@ -1080,6 +1083,16 @@ impl<W: LayoutElement> Layout<W> {
             "output must not already have a view in the active activity",
         );
         self.monitors.push(monitor);
+
+        // Flush doomed empty bookends now that the new monitor's view is installed in
+        // the active activity: views ↔ pool ↔ monitors parity is intact so
+        // `verify_invariants` would pass at this suspend point, and the helper can
+        // patch any other activities' views that still reference these ids.
+        Self::destroy_workspaces_cross_activity(
+            &mut self.activities,
+            &mut self.workspaces,
+            doomed_ids,
+        );
     }
 
     pub fn remove_output(&mut self, output: &Output) {
