@@ -1546,17 +1546,19 @@ pub struct Workspace {
     pub is_focused: bool,
     /// Id of the active window on this workspace, if any.
     pub active_window_id: Option<u64>,
-    /// Activity IDs this workspace belongs to, sorted ascending by ID. Always non-empty: every
-    /// workspace belongs to at least one activity.
+    /// Activity IDs this workspace belongs to, sorted ascending by ID. Non-empty for all workspaces
+    /// emitted by niri (every workspace belongs to at least one activity); an empty slice is only
+    /// possible with hand-constructed or test values.
     pub activities: Vec<u64>,
-    /// Whether this workspace is sticky (auto-tagged with all activities).
+    /// Whether this workspace is sticky (auto-tagged with all activities). The distinction between
+    /// sticky and non-sticky workspaces is only observable when multiple activities exist.
     pub is_sticky: bool,
     /// Whether this workspace belongs to the active activity.
     ///
-    /// When `true`, this workspace is eligible to be placed on an output (monitor). In niri's
-    /// Phase-1a model there is exactly one activity and every workspace belongs to it, so this
-    /// field is always `true` for reachable workspaces. The field is exposed now so that IPC
-    /// clients can be written activity-aware from the start.
+    /// When `true`, this workspace is eligible to be placed on an output (monitor). Currently,
+    /// niri supports one activity, so this field is `true` for all workspaces visible to
+    /// clients. The field is exposed explicitly so IPC clients can be written activity-aware and
+    /// remain correct as multi-activity support lands.
     ///
     /// **`idx` contract:** the `idx` field on this workspace is only meaningful when
     /// `is_in_active_activity` is `true`; clients must ignore `idx` for workspaces where this
