@@ -4972,6 +4972,136 @@ fn switch_activity_tagged_workspace_output_affinity() {
 }
 
 #[test]
+fn switch_activity_focus_follows_active_activity_view() {
+    // `Layout::focus()` reads the active activity's view for the active monitor and
+    // selects the window via that workspace's own active_column_idx / active_tile_idx.
+    // Pin that the read path naturally tracks the active activity after a switch — no
+    // explicit activate_workspace / focus-poke from switch_activity is required.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+
+    // Seed starts focused on window 1.
+    assert_eq!(layout.focus().map(|w| *w.id()), Some(1));
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    layout.switch_activity(beta_id);
+    assert_eq!(layout.active_activity_id(), beta_id);
+    // Beta bootstrapped with a fresh empty workspace on this output, so no window.
+    assert!(
+        layout.focus().is_none(),
+        "beta has no windows; focus read must be None without any activate_workspace call",
+    );
+    layout.verify_invariants();
+
+    layout.switch_activity_previous();
+    assert_eq!(layout.active_activity_id(), seed_id);
+    assert_eq!(
+        layout.focus().map(|w| *w.id()),
+        Some(1),
+        "focus returns to the seed's window via the read path — no explicit refocus needed",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn switch_activity_preserves_active_monitor_idx_in_range() {
+    // Multi-output: make output2 the active monitor, switch activities, and confirm
+    // active_monitor_idx is preserved and still in range. Pins the post-condition end-to-end.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+    ];
+    let mut layout = check_ops(ops);
+    let mon_idx_before = layout.active_monitor_idx;
+    assert!(mon_idx_before < layout.monitors.len());
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    layout.switch_activity(beta_id);
+
+    assert_eq!(
+        layout.active_monitor_idx, mon_idx_before,
+        "switch_activity must not mutate active_monitor_idx",
+    );
+    assert!(
+        layout.active_monitor_idx < layout.monitors.len(),
+        "active_monitor_idx must remain in range after the switch",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn switch_activity_view_active_remains_in_ids_after_switch() {
+    // Seed with ≥2 workspaces on one output, activate the second workspace so
+    // view.active is off position 0, round-trip through beta, and confirm seed's
+    // view.active is still in view.ids (the post-condition pin that verify_invariants
+    // alone doesn't check, since WorkspaceView enforces it structurally).
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let out_id = layout.monitors[0].output_id();
+
+    // Expect ≥2 ids in the seed's view (the named ws and the default trailing empty).
+    assert!(
+        layout.active_view(&out_id).ids().len() >= 2,
+        "setup expects a seed view with multiple workspaces",
+    );
+
+    // Move off position 0 so view.active is a non-first id — the drift-exposing shape
+    // for the post-condition walk.
+    layout.switch_workspace(1);
+    let seed_active_before = layout.active_view(&out_id).active();
+    assert_ne!(
+        seed_active_before,
+        layout.active_view(&out_id).ids()[0],
+        "switch_workspace(1) must have moved view.active off position 0",
+    );
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    layout.switch_activity(beta_id);
+    layout.verify_invariants();
+
+    layout.switch_activity(seed_id);
+    layout.verify_invariants();
+
+    let seed_view_after = &layout.activities.active().views()[&out_id];
+    assert!(
+        seed_view_after.ids().contains(&seed_view_after.active()),
+        "view.active must remain a member of view.ids after the round-trip switch",
+    );
+    assert_eq!(
+        seed_view_after.active(),
+        seed_active_before,
+        "round-trip switch preserves seed's previously-active workspace id",
+    );
+    // active_position() .expects the membership relation — resolving without panic
+    // is the direct pin of the post-condition.
+    let _ = seed_view_after.active_position();
+}
+
+#[test]
 fn resolve_activity_ref_by_id_and_name() {
     let layout = Layout::<TestWindow>::default();
     let seed_id = layout.active_activity_id();

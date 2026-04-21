@@ -3790,6 +3790,27 @@ impl<W: LayoutElement> Layout<W> {
     ///    forward-compat safety belt.
     /// 5. Lazily populate the target activity's per-output views via
     ///    [`Self::ensure_active_views`] — see §5.3 step 3.
+    ///
+    /// # Focus restoration
+    ///
+    /// No focus is poked directly from here; the read path picks it up on the
+    /// next `State::refresh`. [`Self::focus`] reads the active activity's view
+    /// for the active monitor, and each workspace's own persisted
+    /// `active_column_idx` / `active_tile_idx` selects the window. Global
+    /// keyboard focus is reassigned by `State::refresh` →
+    /// `update_keyboard_focus` before rendering; `active_monitor_idx` is not
+    /// mutated by the switch, so focus returns to the output that held it.
+    ///
+    /// At the end of the switch, two post-conditions are pinned as
+    /// `debug_assert!`s (release builds pay nothing):
+    ///
+    /// - `view.active ∈ view.ids()` for every entry in the active activity's
+    ///   `views()`. Today [`WorkspaceView`] upholds this at construction and
+    ///   in every mutator; the assertion documents the contract that the only
+    ///   public entry point flipping activities is required to preserve.
+    /// - `active_monitor_idx < monitors.len()` when monitors are non-empty.
+    ///   Monitors don't mutate during a switch, so this is also a pin, not a
+    ///   fix — a drift would be a caller-side bug.
     pub fn switch_activity(&mut self, target: ActivityId) {
         if target == self.activities.active_id() {
             return;
@@ -3806,6 +3827,29 @@ impl<W: LayoutElement> Layout<W> {
             mon.workspace_switch = None;
         }
         self.ensure_active_views();
+
+        // Post-condition pins. See the "Focus restoration" rustdoc paragraph for rationale.
+        #[cfg(debug_assertions)]
+        {
+            for (output_id, view) in self.activities.active().views() {
+                debug_assert!(
+                    view.ids().contains(&view.active()),
+                    "switch_activity post-condition: view.active ({:?}) must be in view.ids \
+                     for output {:?}",
+                    view.active(),
+                    output_id,
+                );
+            }
+            if !self.monitors.is_empty() {
+                debug_assert!(
+                    self.active_monitor_idx < self.monitors.len(),
+                    "switch_activity post-condition: active_monitor_idx {} out of range \
+                     (monitors.len() = {})",
+                    self.active_monitor_idx,
+                    self.monitors.len(),
+                );
+            }
+        }
     }
 
     // Make the newly-active activity's `views` map cover every connected monitor.
