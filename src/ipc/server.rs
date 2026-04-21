@@ -14,6 +14,7 @@ use calloop::io::Async;
 use directories::BaseDirs;
 use futures_util::io::{AsyncReadExt, BufReader};
 use futures_util::{select_biased, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, FutureExt as _};
+use indexmap::IndexMap;
 use niri_config::OutputName;
 use niri_ipc::state::{EventStreamState, EventStreamStatePart as _};
 use niri_ipc::{
@@ -34,6 +35,7 @@ use crate::backend::IpcOutputMap;
 use crate::input::pick_window_grab::PickWindowGrab;
 use crate::layout::activity::ActivityId;
 use crate::layout::workspace::WorkspaceId;
+use crate::utils::id::IdCounter;
 use crate::layout::{format_activity_switch_block_err, ActivitySwitchBlock, Layout, LayoutElement};
 use crate::niri::State;
 use crate::utils::{version, with_toplevel_role};
@@ -42,6 +44,47 @@ use crate::window::Mapped;
 // If an event stream client fails to read events fast enough that we accumulate more than this
 // number in our buffer, we drop that event stream client.
 const EVENT_STREAM_BUFFER_SIZE: usize = 64;
+
+/// Process-unique monotonic id for an IPC connection.
+///
+/// Mirrors the [`WorkspaceId`] / [`ActivityId`] precedent: the counter starts
+/// at 1 and is never reused. Used as the key into
+/// [`IpcServer::blocked_action_waiters`] so a drain site can identify which
+/// connection an entry belongs to without holding a reference to the
+/// connection's async task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct IpcConnId(u64);
+
+static IPC_CONN_ID_COUNTER: IdCounter = IdCounter::new();
+
+impl IpcConnId {
+    fn next() -> Self {
+        Self(IPC_CONN_ID_COUNTER.next())
+    }
+
+    #[cfg(test)]
+    fn specific(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+/// Entry in [`IpcServer::blocked_action_waiters`].
+///
+/// Holds the owned [`niri_config::Action`] so the drain site can re-dispatch
+/// without cloning from caller state, plus the send half of the response
+/// channel the async `process` task is awaiting on. On drain:
+///
+/// - Send `Ok(())` once the action lands → `process` returns
+///   `Response::Handled`.
+/// - On re-block mid-drain: re-insert the entry and leave `tx` untouched;
+///   the sender is not dropped, so the `process` task stays parked.
+/// - Drop without sending on a closed receiver (client gone between enqueue
+///   and drain). `process`'s `rx.recv().await` has already been dropped in
+///   that case.
+struct BlockedWaiter {
+    action: niri_config::Action,
+    tx: async_channel::Sender<Result<(), ActivitySwitchBlock>>,
+}
 
 pub struct IpcServer {
     /// Path to the IPC socket.
@@ -62,6 +105,11 @@ pub struct IpcServer {
     /// corresponding `ActivitiesState` on `EventStreamState` is Phase 1b
     /// scope. Main-thread calloop only — no cross-thread access.
     last_active_activity_id: Cell<Option<ActivityId>>,
+    /// Per-connection depth-1 queue for blocked [`Request::Action`]s. One
+    /// entry per connection (admission rejects a second enqueue). `IndexMap`
+    /// preserves FIFO insertion order; [`drain_blocked_action_waiters`] walks
+    /// it in order. Main-thread only — `Rc` is sufficient.
+    blocked_action_waiters: Rc<RefCell<IndexMap<IpcConnId, BlockedWaiter>>>,
 }
 
 struct ClientCtx {
@@ -70,6 +118,14 @@ struct ClientCtx {
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
     event_streams: Rc<RefCell<Vec<EventStreamSender>>>,
     event_stream_state: Rc<RefCell<EventStreamState>>,
+    /// Identity of this connection for keying into
+    /// [`IpcServer::blocked_action_waiters`]. Assigned in
+    /// [`on_new_ipc_client`] and never reused across connections.
+    conn_id: IpcConnId,
+    /// Shared handle to [`IpcServer::blocked_action_waiters`]; the
+    /// `Request::Action` arm inserts on block, the drain site reads and
+    /// wakes. See [`drain_blocked_action_waiters`].
+    blocked_action_waiters: Rc<RefCell<IndexMap<IpcConnId, BlockedWaiter>>>,
 }
 
 struct EventStreamClient {
@@ -124,6 +180,7 @@ impl IpcServer {
             event_streams: Rc::new(RefCell::new(Vec::new())),
             event_stream_state: Rc::new(RefCell::new(EventStreamState::default())),
             last_active_activity_id: Cell::new(None),
+            blocked_action_waiters: Rc::new(RefCell::new(IndexMap::new())),
         })
     }
 
@@ -159,6 +216,126 @@ impl Drop for IpcServer {
     }
 }
 
+/// Drain the per-connection blocked-action queue, re-dispatching each waiter
+/// in FIFO order and waking its `process` task on success.
+///
+/// Invoked as the last step of [`State::refresh`] (after all other
+/// `ipc_refresh_*` sites) so any state-change events produced by the
+/// re-dispatched actions ride the next refresh tick in the correct order
+/// — observable state is updated before the corresponding `Response::Handled`
+/// is surfaced to the IPC client.
+///
+/// # Invariants
+///
+/// - **`Handled` ≡ performed**: a waiter is only signalled `Ok(())` after its
+///   `do_action_inner` call returned `Ok(())`. The send half is dropped
+///   without signalling on silent-prune paths (closed receiver).
+/// - **FIFO preserved across re-block**: if `do_action_inner` re-raises a
+///   hard block mid-drain (no current action reaches this; forward-compat
+///   for future gating widening), the waiter is re-inserted at its index at
+///   removal via `shift_insert(original_idx, …)` and the walk **breaks** —
+///   continuing past a re-blocked waiter would promote later waiters ahead
+///   of it. The `// FIFO pin` breadcrumb on the `break` pins this semantic
+///   against accidental refactor.
+/// - **Closed-receiver prune**: if the client disconnected between enqueue
+///   and drain (`tx.is_closed()`), the entry is dropped without dispatch.
+///   No side effects, no replay.
+/// - **No registry borrow across `do_action_inner`**: the walk grabs and
+///   drops the registry `RefCell` borrow per iteration so a nested
+///   `IpcServer` access inside action dispatch can't deadlock.
+pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
+    let _span = tracy_client::span!("drain_blocked_action_waiters");
+
+    // Fast-path: no server → nothing to drain.
+    let Some(server) = state.niri.ipc_server.as_ref() else {
+        return;
+    };
+
+    // Fast-path: empty registry → skip the hard-block check entirely.
+    let conn_ids: Vec<IpcConnId> = {
+        let waiters = server.blocked_action_waiters.borrow();
+        if waiters.is_empty() {
+            return;
+        }
+        waiters.keys().copied().collect()
+    };
+
+    // Fast-path: still hard-blocked → don't walk waiters; they'll drain on a
+    // later tick. Checked after the empty-registry short-circuit so the hot
+    // path (no queue) pays nothing.
+    if state.niri.layout.is_activity_switch_hard_blocked().is_some() {
+        return;
+    }
+
+    for conn_id in conn_ids {
+        // Grab-and-drop the registry borrow per iteration: `do_action_inner`
+        // below may reach back into `state.niri.ipc_server` (for events,
+        // etc.) and must not collide with a live borrow.
+        let (original_idx, waiter) = {
+            let server = state
+                .niri
+                .ipc_server
+                .as_ref()
+                .expect("ipc_server present — drain pre-checked non-empty registry");
+            let mut waiters = server.blocked_action_waiters.borrow_mut();
+            match waiters.get_index_of(&conn_id) {
+                Some(idx) => {
+                    let w = waiters
+                        .shift_remove(&conn_id)
+                        .expect("get_index_of succeeded for conn_id immediately prior");
+                    if w.tx.is_closed() {
+                        // Client gone — drop the waiter without dispatch.
+                        continue;
+                    }
+                    (idx, w)
+                }
+                None => continue,
+            }
+        };
+
+        let result = state.do_action_inner(waiter.action.clone(), false);
+        match result {
+            Ok(()) => {
+                // Receiver may have dropped between wake and send; safe to
+                // ignore because the action already executed with no state
+                // loss (same contract as the initial-dispatch success path).
+                let _ = waiter.tx.send_blocking(Ok(()));
+            }
+            Err(block) => {
+                // Re-block mid-drain: re-insert at its index at removal so
+                // later waiters don't promote past this one. Today's
+                // `do_action_inner` surface cannot produce this; forward-
+                // compat against future widening of hard-block gating.
+                let server = state
+                    .niri
+                    .ipc_server
+                    .as_ref()
+                    .expect("ipc_server present — re-block path, registry still alive");
+                let prev = server.blocked_action_waiters.borrow_mut().shift_insert(
+                    original_idx,
+                    conn_id,
+                    BlockedWaiter {
+                        action: waiter.action,
+                        tx: waiter.tx,
+                    },
+                );
+                debug_assert!(
+                    prev.is_none(),
+                    "shift_insert on re-block must not overwrite: conn_id={conn_id:?} original_idx={original_idx}",
+                );
+                let _ = block;
+                // FIFO pin — see DD §5.11 Part 2.
+                //
+                // Do NOT convert this `break` to `continue`: walking past a
+                // re-blocked waiter promotes later waiters ahead of it and
+                // violates FIFO. The drain-re-block invariant is pinned by
+                // `blocked_action_waiters_reblock_leaves_entry`.
+                break;
+            }
+        }
+    }
+}
+
 fn socket_dir() -> PathBuf {
     BaseDirs::new()
         .as_ref()
@@ -187,6 +364,8 @@ fn on_new_ipc_client(state: &mut State, stream: UnixStream) {
         ipc_outputs: state.backend.ipc_outputs(),
         event_streams: ipc_server.event_streams.clone(),
         event_stream_state: ipc_server.event_stream_state.clone(),
+        conn_id: IpcConnId::next(),
+        blocked_action_waiters: ipc_server.blocked_action_waiters.clone(),
     };
 
     let future = async move {
@@ -415,35 +594,62 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             Response::PickedColor(color)
         }
         Request::Action(action) => {
+            // Forward-compat against a future pipelined `handle_client`; unreachable under today's sequential dispatch.
+            if ctx
+                .blocked_action_waiters
+                .borrow()
+                .contains_key(&ctx.conn_id)
+            {
+                return Err("request already queued".into());
+            }
+
             validate_action(&action)?;
 
             let (tx, rx) = async_channel::bounded::<Result<(), ActivitySwitchBlock>>(1);
 
             let action = niri_config::Action::from(action);
+            let waiters = ctx.blocked_action_waiters.clone();
+            let conn_id = ctx.conn_id;
             ctx.event_loop.insert_idle(move |state| {
                 // Make sure some logic like workspace clean-up has a chance to run before doing
                 // actions.
                 state.niri.advance_animations();
-                // TODO(§5.11 Part 2): per-connection depth-1 queue for hard-blocked
-                // activity actions. Today we surface Err(block) immediately; Part 2
-                // replaces that with queue-and-await so `Handled` means "performed".
-                let result = state.do_action_inner(action, false);
-                // Connection may have closed between enqueue and action completion.
-                // Safe to drop the send: on Ok the action already executed with
-                // no state loss; on Err(block) the action was rejected without
-                // performing any side effect, so dropping the result is harmless.
-                let _ = tx.send_blocking(result);
+                // Clone so the waiter entry owns the original if do_action_inner hard-blocks (the drain site re-dispatches from it).
+                let result = state.do_action_inner(action.clone(), false);
+                match result {
+                    Ok(()) => {
+                        // Connection may have closed between enqueue and action
+                        // completion. Safe to drop the send: on Ok the action
+                        // already executed with no state loss.
+                        let _ = tx.send_blocking(Ok(()));
+                    }
+                    Err(block) => {
+                        // Park; drain on next refresh preserves Handled ≡ performed.
+                        let _ = block;
+                        let prev = waiters
+                            .borrow_mut()
+                            .insert(conn_id, BlockedWaiter { action, tx });
+                        debug_assert!(
+                            prev.is_none(),
+                            "depth-1 admission must keep the registry empty for conn_id={conn_id:?} at insert_idle execution time",
+                        );
+                    }
+                }
             });
 
             // Wait until the action has been processed before returning. This is important for a
             // few actions, for instance for DoScreenTransition this wait ensures that the screen
-            // contents were sampled into the texture.
+            // contents were sampled into the texture. Under a hard block, the
+            // receiver parks here until the drain site wakes it.
             match rx.recv().await {
                 Ok(Ok(())) => Response::Handled,
                 Ok(Err(block)) => {
                     return Err(format_activity_switch_block_err(block));
                 }
-                Err(_) => return Err("action dispatch channel closed".into()),
+                Err(err) => {
+                    warn!("action dispatch channel closed unexpectedly: {err:?}");
+                    return Err("action dispatch channel closed".into());
+                }
             }
         }
         Request::Output { output, action } => {
@@ -1188,6 +1394,185 @@ fn diff_workspaces(previous: &HashMap<u64, Workspace>, current: &[Workspace]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Pins the blocked-action waiter registry primitives: FIFO order,
+    // depth-1 admission, closed-receiver prune, and re-block FIFO pin.
+    // Full `State::refresh` drain wiring is unreachable from unit tests.
+
+    fn dummy_action() -> niri_config::Action {
+        // `Spawn` is the cheapest `Action` variant to construct by hand and
+        // has trivial equality semantics. The drain path only clones the
+        // action; the specific variant is irrelevant to the registry
+        // invariants these tests pin.
+        niri_config::Action::Spawn(vec![])
+    }
+
+    fn make_waiter() -> (
+        BlockedWaiter,
+        async_channel::Receiver<Result<(), ActivitySwitchBlock>>,
+    ) {
+        let (tx, rx) = async_channel::bounded::<Result<(), ActivitySwitchBlock>>(1);
+        (
+            BlockedWaiter {
+                action: dummy_action(),
+                tx,
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn blocked_action_waiters_push_and_drain_ok() {
+        // Push a single waiter, drain it by `shift_remove` + `send_blocking`
+        // mirroring the happy-path branch of `drain_blocked_action_waiters`,
+        // and verify the receiver observes `Ok(())`. Pins the
+        // `Handled ≡ performed` contract: the send only fires once the
+        // registry entry is removed.
+        let mut waiters: IndexMap<IpcConnId, BlockedWaiter> = IndexMap::new();
+        let conn = IpcConnId::specific(1);
+        let (waiter, rx) = make_waiter();
+        waiters.insert(conn, waiter);
+
+        assert_eq!(waiters.len(), 1);
+        let drained = waiters.shift_remove(&conn).expect("waiter inserted just now");
+        assert!(waiters.is_empty());
+        drained.tx.send_blocking(Ok(())).expect("receiver is alive");
+
+        let observed = rx
+            .recv_blocking()
+            .expect("sender alive until send_blocking returned");
+        assert!(matches!(observed, Ok(())));
+    }
+
+    #[test]
+    fn blocked_action_waiters_closed_tx_pruned() {
+        // A client that disconnects between enqueue and drain: `rx` is
+        // dropped, so `tx.is_closed()` must report `true` and the drain
+        // site treats the entry as prune-and-drop. Pins the prune branch
+        // inside `drain_blocked_action_waiters`.
+        let mut waiters: IndexMap<IpcConnId, BlockedWaiter> = IndexMap::new();
+        let conn = IpcConnId::specific(1);
+        let (waiter, rx) = make_waiter();
+        waiters.insert(conn, waiter);
+
+        drop(rx);
+
+        let drained = waiters
+            .shift_remove(&conn)
+            .expect("waiter inserted just now");
+        assert!(
+            drained.tx.is_closed(),
+            "receiver dropped → sender must report closed",
+        );
+        // Mirrors the `continue` branch: drop the waiter without attempting
+        // to re-dispatch.
+        drop(drained);
+        assert!(waiters.is_empty());
+    }
+
+    #[test]
+    fn blocked_action_waiters_fifo_across_connections() {
+        // Two connections block in order A, B. The drain walk must wake A
+        // before B. `IndexMap` iteration order *is* the FIFO contract here
+        // (there is no separate `VecDeque`); this test would regress if a
+        // future refactor swapped to a plain `HashMap`.
+        let mut waiters: IndexMap<IpcConnId, BlockedWaiter> = IndexMap::new();
+        let a = IpcConnId::specific(1);
+        let b = IpcConnId::specific(2);
+        let (waiter_a, rx_a) = make_waiter();
+        let (waiter_b, rx_b) = make_waiter();
+        waiters.insert(a, waiter_a);
+        waiters.insert(b, waiter_b);
+
+        // Snapshot keys in iteration order — this is what `drain_blocked_action_waiters`
+        // does before walking.
+        let order: Vec<IpcConnId> = waiters.keys().copied().collect();
+        assert_eq!(order, vec![a, b]);
+
+        for conn in order {
+            let w = waiters.shift_remove(&conn).expect("inserted just now");
+            w.tx.send_blocking(Ok(())).expect("receivers alive");
+        }
+
+        // Pull each response: A first, B second.
+        let first = rx_a.recv_blocking().expect("sent above");
+        let second = rx_b.recv_blocking().expect("sent above");
+        assert!(matches!(first, Ok(())));
+        assert!(matches!(second, Ok(())));
+    }
+
+    #[test]
+    fn blocked_action_waiters_reblock_leaves_entry() {
+        // Three waiters [A, B, C] in FIFO. Walk re-blocks the *middle* one
+        // (B, index 1). This makes `shift_insert(original_idx, …)` vs
+        // `shift_insert(0, …)` observably different:
+        //   - naive `shift_insert(0, …)` → [B, A, C]
+        //   - correct `shift_insert(original_idx=1, …)` → [A, B, C]
+        // Using B makes the discrimination impossible to accidentally pass.
+        let mut waiters: IndexMap<IpcConnId, BlockedWaiter> = IndexMap::new();
+        let a = IpcConnId::specific(1);
+        let b = IpcConnId::specific(2);
+        let c = IpcConnId::specific(3);
+        let (waiter_a, _rx_a) = make_waiter();
+        let (waiter_b, _rx_b) = make_waiter();
+        let (waiter_c, _rx_c) = make_waiter();
+        waiters.insert(a, waiter_a);
+        waiters.insert(b, waiter_b);
+        waiters.insert(c, waiter_c);
+
+        // Simulate the re-block branch for B (the middle entry).
+        let original_idx = waiters
+            .get_index_of(&b)
+            .expect("b inserted second, must be at index 1");
+        assert_eq!(original_idx, 1);
+        let removed = waiters.shift_remove(&b).expect("b present");
+        assert_eq!(
+            waiters.keys().copied().collect::<Vec<_>>(),
+            vec![a, c],
+            "after shift_remove(b), only a and c remain",
+        );
+        let prev = waiters.shift_insert(original_idx, b, removed);
+        assert!(
+            prev.is_none(),
+            "shift_insert at an unoccupied slot must not overwrite",
+        );
+
+        // Post-condition: key order restored to [A, B, C].
+        // A bug using `shift_insert(0, …)` would produce [B, A, C] instead.
+        assert_eq!(
+            waiters.keys().copied().collect::<Vec<_>>(),
+            vec![a, b, c],
+            "re-block at its index at removal must restore FIFO order",
+        );
+    }
+
+    #[test]
+    fn blocked_action_waiters_depth_one_rejects_second_enqueue() {
+        // Depth-1 admission: the `Request::Action` arm rejects a second
+        // enqueue by the same connection with the literal error string
+        // `"request already queued"`. This test exercises the
+        // `contains_key` primitive the arm is built on — the only thing
+        // between a pipelined handler and a corrupted queue.
+        let mut waiters: IndexMap<IpcConnId, BlockedWaiter> = IndexMap::new();
+        let conn = IpcConnId::specific(1);
+        let (waiter, _rx) = make_waiter();
+        waiters.insert(conn, waiter);
+
+        // First enqueue landed; `contains_key` now reports `true`. Any
+        // subsequent admission check by the same `conn_id` must bail.
+        assert!(
+            waiters.contains_key(&conn),
+            "initial insert must make contains_key true for the same conn_id",
+        );
+
+        // Different connection — admission must succeed. Pins that the
+        // rejection is keyed on `conn_id`, not a global flag.
+        let other = IpcConnId::specific(2);
+        assert!(
+            !waiters.contains_key(&other),
+            "depth-1 is per-connection, not global",
+        );
+    }
 
     fn ws(id: u64, idx: u8, output: &str) -> Workspace {
         Workspace {

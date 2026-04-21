@@ -834,6 +834,9 @@ impl State {
         // Needs to be called after updating the keyboard focus.
         #[cfg(feature = "dbus")]
         self.niri.refresh_a11y();
+
+        // Last step; ordering rationale on drain_blocked_action_waiters.
+        crate::ipc::server::drain_blocked_action_waiters(self);
     }
 
     fn notify_blocker_cleared(&mut self) {
