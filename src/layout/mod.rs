@@ -1809,6 +1809,20 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Locate a window by its `wl_surface` across the entire workspace pool
+    /// (not only the active activity). The interactive-move tile is checked
+    /// first; otherwise every workspace's scrolling and floating children
+    /// are scanned. The returned `Option<&Output>` is resolved from the
+    /// workspace's bound output id via `monitor_for_output_id`. Returns
+    /// `Some((window, None))` when the winning workspace's bound `OutputId`
+    /// is absent (workspace never attached to any output), OR when the bound
+    /// id is present but not currently in `self.monitors` (disconnected
+    /// output).
+    ///
+    /// This widen (pool-spanning instead of active-activity-only) is
+    /// required for correct surface-event routing to windows on dormant
+    /// activities — their surface commits, ack_configures and popups must
+    /// still reach the layout after an activity switch.
     pub fn find_window_and_output(&self, wl_surface: &WlSurface) -> Option<(&W, Option<&Output>)> {
         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
             if move_.tile.window().is_wl_surface(wl_surface) {
@@ -1816,29 +1830,30 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let pool = &self.workspaces;
-        for mon in &self.monitors {
-            for id in self.active_view(&mon.output_id()).ids() {
-                let ws = pool
-                    .get(id)
-                    .expect("workspace id must be a key in the pool");
-                if let Some(window) = ws.find_wl_surface(wl_surface) {
-                    return Some((window, Some(&mon.output)));
-                }
-            }
-        }
-        for id in &self.disconnected_workspace_ids {
-            let ws = pool
-                .get(id)
-                .expect("workspace id must be a key in the pool");
+        for ws in self.workspaces.values() {
             if let Some(window) = ws.find_wl_surface(wl_surface) {
-                return Some((window, None));
+                let output = ws
+                    .output_id()
+                    .and_then(|oid| self.monitor_for_output_id(oid))
+                    .map(|m| &m.output);
+                return Some((window, output));
             }
         }
 
         None
     }
 
+    /// Mutable twin of [`Self::find_window_and_output`]. Uses the same
+    /// pool-spanning scan. The two-phase borrow pattern (shared-scan to
+    /// locate `(id, output_id)`, then `workspaces.get_mut(&id)`) is
+    /// preserved deliberately — a single-phase `values_mut()` scan would
+    /// conflict with the `monitor_for_output_id` lookup needed to resolve
+    /// `&Output` from the winning workspace's bound output id.
+    ///
+    /// Returns `Some((&mut W, None))` when the winning workspace is not
+    /// currently bound to any connected monitor — either no `OutputId` (the
+    /// workspace was never attached to any output), or the bound `OutputId`
+    /// is present but not found in `self.monitors` (disconnected output).
     pub fn find_window_and_output_mut(
         &mut self,
         wl_surface: &WlSurface,
@@ -1849,57 +1864,32 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // First find the (monitor_idx, id) that matches; then borrow mut from pool.
-        let pool = &self.workspaces;
-        let views = self.activities.active().views();
-        let mut matching: Option<(usize, WorkspaceId)> = None;
-        for (mi, mon) in self.monitors.iter().enumerate() {
-            let view = views
-                .get(&OutputId::new(&mon.output))
-                .expect("connected output must have a view in the active activity");
-            for id in view.ids() {
-                if pool
-                    .get(id)
-                    .expect("workspace id must be a key in the pool")
-                    .find_wl_surface(wl_surface)
-                    .is_some()
-                {
-                    matching = Some((mi, *id));
-                    break;
-                }
-            }
-            if matching.is_some() {
-                break;
-            }
-        }
-        if let Some((mi, id)) = matching {
-            let output = &self.monitors[mi].output;
-            let ws = self
-                .workspaces
-                .get_mut(&id)
-                .expect("workspace id must be a key in the pool");
-            return ws
-                .find_wl_surface_mut(wl_surface)
-                .map(|w| (w, Some(output)));
-        }
+        // Phase 1 (shared): find the matching workspace id and remember its
+        // bound output id, if any. `OutputId` is owned/cheap; copying it
+        // here lets the shared borrow of the pool drop before phase 2.
+        let matching: Option<(WorkspaceId, Option<OutputId>)> = self
+            .workspaces
+            .iter()
+            .find(|(_, ws)| ws.find_wl_surface(wl_surface).is_some())
+            .map(|(id, ws)| (*id, ws.output_id().cloned()));
 
-        let matching_id = self.disconnected_workspace_ids.iter().copied().find(|id| {
-            self.workspaces
-                .get(id)
-                .expect("workspace id must be a key in the pool")
-                .find_wl_surface(wl_surface)
-                .is_some()
+        let (id, output_id) = matching?;
+        // Phase 2 (exclusive + disjoint shared): `self.monitors` and
+        // `self.workspaces` are disjoint fields, so the borrow checker
+        // permits a shared borrow of one concurrent with a mutable borrow
+        // of the other — provided we reach each through the field directly
+        // (not via `self.monitor_for_output_id(...)` which takes `&self`).
+        let output: Option<&Output> = output_id.as_ref().and_then(|oid| {
+            self.monitors
+                .iter()
+                .find(|m| m.output_id() == *oid)
+                .map(|m| &m.output)
         });
-        if let Some(id) = matching_id {
-            return self
-                .workspaces
-                .get_mut(&id)
-                .unwrap()
-                .find_wl_surface_mut(wl_surface)
-                .map(|w| (w, None));
-        }
-
-        None
+        let ws = self
+            .workspaces
+            .get_mut(&id)
+            .expect("workspace id must be a key in the pool (located in phase 1)");
+        ws.find_wl_surface_mut(wl_surface).map(|w| (w, output))
     }
 
     /// Computes the window-geometry-relative target rect for popup unconstraining.
@@ -2268,6 +2258,65 @@ impl<W: LayoutElement> Layout<W> {
                 .expect("workspace id must be a key in the pool");
             for win in ws.windows_mut() {
                 f(win, None);
+            }
+        }
+    }
+
+    /// Cross-activity twin of [`Self::with_windows`]. Iterates every
+    /// workspace in the pool directly (not via the active activity's views),
+    /// yielding the interactive-move window first. For each window the
+    /// closure receives the owning workspace id (`None` only for the
+    /// interactive-move tile, which is not attached to a workspace) and
+    /// the bound `&Output` (`None` for pool workspaces whose bound output
+    /// is disconnected or who have no bound output).
+    ///
+    /// Iteration order among pool workspaces is pool order (undefined —
+    /// the pool is a `HashMap<WorkspaceId, Workspace<W>>`). Callers that
+    /// need stable order must sort.
+    pub fn with_windows_all(
+        &self,
+        mut f: impl FnMut(&W, Option<&Output>, Option<WorkspaceId>, WindowLayout),
+    ) {
+        if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+            let layout = move_.tile.ipc_layout_template();
+            f(move_.tile.window(), Some(&move_.output), None, layout);
+        }
+
+        for ws in self.workspaces.values() {
+            let output = ws
+                .output_id()
+                .and_then(|oid| self.monitor_for_output_id(oid))
+                .map(|m| &m.output);
+            for (tile, layout) in ws.tiles_with_ipc_layouts() {
+                f(tile.window(), output, Some(ws.id()), layout);
+            }
+        }
+    }
+
+    /// Cross-activity twin of [`Self::with_windows_mut`]. Same iteration
+    /// shape as [`Self::with_windows_all`] but passes each window by
+    /// `&mut W`. The interactive-move window is yielded first.
+    ///
+    /// Borrow recipe: the monitor lookup (`&Output` for each workspace)
+    /// is pre-hoisted into an `OutputId → Output` map so the closure can
+    /// hold `&mut self.workspaces` without conflicting with an immutable
+    /// borrow of `self.monitors`. `Output` is `Clone` and cheap (wraps an
+    /// `Arc`); this fires at the existing `refresh_mapped_cast_*` cadence.
+    pub fn with_windows_all_mut(&mut self, mut f: impl FnMut(&mut W, Option<&Output>)) {
+        if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
+            f(move_.tile.window_mut(), Some(&move_.output));
+        }
+
+        let mon_by_id: HashMap<OutputId, Output> = self
+            .monitors
+            .iter()
+            .map(|m| (m.output_id(), m.output.clone()))
+            .collect();
+
+        for ws in self.workspaces.values_mut() {
+            let output = ws.output_id().and_then(|oid| mon_by_id.get(oid));
+            for win in ws.windows_mut() {
+                f(win, output);
             }
         }
     }
@@ -7651,6 +7700,22 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Workspaces visible in the currently-active activity: for each connected
+    /// monitor, the ordered view-id list is flattened into `(monitor, idx,
+    /// workspace)` tuples, followed by disconnected-pool entries.
+    ///
+    /// This is the activity-filtered default — callers that iterate "all
+    /// workspaces the user can see right now" use this. Consumers that must
+    /// cross activity boundaries (IPC projections that advertise hidden
+    /// workspaces, sticky-expansion, `FocusWindow { id }` against a window on
+    /// a dormant activity) use [`Self::workspaces_all`] instead.
+    ///
+    /// `WindowMru::new` at `src/ui/mru.rs` is a key dependent on the
+    /// activity-scope invariant: it iterates `layout.workspaces()` (and
+    /// equivalently `layout.windows()`) to build the per-activity MRU list,
+    /// ensuring windows on dormant activities are excluded. Cross-activity MRU
+    /// is a deliberate future opt-in (DD §5.13 `MruScope::AllActivities`), not
+    /// an accidental widen.
     pub fn workspaces(
         &self,
     ) -> impl Iterator<Item = (Option<&Monitor<W>>, usize, &Workspace<W>)> + '_ {
@@ -7733,6 +7798,16 @@ impl<W: LayoutElement> Layout<W> {
         })
     }
 
+    /// Windows visible in the currently-active activity: the interactive-move
+    /// window (if any) first, then every window on every workspace returned
+    /// by [`Self::workspaces`] paired with the owning monitor.
+    ///
+    /// This is the activity-filtered default — callers that iterate "all
+    /// windows the user can see right now" use this. Consumers that must
+    /// cross activity boundaries (IPC event-stream projections, foreign-
+    /// toplevel advertising, screencasting bookkeeping, surface-event
+    /// routing for windows on dormant activities) use [`Self::windows_all`]
+    /// or [`Self::with_windows_all`] instead.
     pub fn windows(&self) -> impl Iterator<Item = (Option<&Monitor<W>>, &W)> {
         let moving_window = self
             .interactive_move
@@ -7744,6 +7819,56 @@ impl<W: LayoutElement> Layout<W> {
         let rest = self
             .workspaces()
             .flat_map(|(mon, _, ws)| ws.windows().map(move |win| (mon, win)));
+
+        moving_window.chain(rest)
+    }
+
+    /// Every window in the pool, crossing activity boundaries. Pairs each
+    /// window with the bound output id of its owning workspace. `None` means
+    /// the workspace has no bound `OutputId` at all (pool workspaces that
+    /// were never attached to any output); a workspace whose bound output is
+    /// currently disconnected still yields `Some(&oid)`. The interactive-move
+    /// window is yielded first (mirrors [`Self::windows`]); its paired output
+    /// id is borrowed from whichever bound workspace currently lives on the
+    /// move's output, or `None` if no live monitor matches the move's output
+    /// (an edge case during output reconfiguration — a `warn!` is emitted).
+    ///
+    /// Iteration order is pool order (undefined — the pool is a
+    /// `HashMap<WorkspaceId, Workspace<W>>`). Callers that need a stable
+    /// order must sort the result.
+    ///
+    /// Use this for cross-activity surface-routing, IPC event-stream
+    /// projections, foreign-toplevel advertising, and screencasting
+    /// bookkeeping — anywhere a window on a dormant activity must remain
+    /// observable.
+    pub fn windows_all(&self) -> impl Iterator<Item = (Option<&OutputId>, &W)> + '_ {
+        let moving = self.interactive_move.as_ref().and_then(|x| x.moving());
+        // Borrow a `&OutputId` from a pool workspace bound to the move's output.
+        // `Monitor` does not store an `OutputId` field — `OutputId::new(&output)`
+        // constructs fresh — so there is no reference to borrow from the monitor
+        // directly. Instead, first verify the live-monitor exists (emit `warn!` if
+        // not, since that's a genuine invariant break during output reconfiguration),
+        // then borrow the id from any pool workspace bound to that monitor.
+        let moving_oid = moving.and_then(|move_| {
+            let needle = OutputId::new(&move_.output);
+            if self.monitor_for_output_id(&needle).is_none() {
+                warn!(
+                    "windows_all: interactive-move output {:?} has no live monitor",
+                    needle,
+                );
+                return None;
+            }
+            self.workspaces.values().find_map(|ws| {
+                let ws_oid = ws.output_id()?;
+                (*ws_oid == needle).then_some(ws_oid)
+            })
+        });
+        let moving_window = moving.map(|move_| (moving_oid, move_.tile.window())).into_iter();
+
+        let rest = self
+            .workspaces
+            .values()
+            .flat_map(|ws| ws.windows().map(move |win| (ws.output_id(), win)));
 
         moving_window.chain(rest)
     }

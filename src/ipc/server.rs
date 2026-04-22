@@ -951,7 +951,7 @@ impl State {
         // Check for window changes.
         let mut seen = HashSet::new();
         let mut focused_id = None;
-        layout.with_windows(|mapped, _, ws_id, window_layout| {
+        layout.with_windows_all(|mapped, _, ws_id, window_layout| {
             let id = mapped.id().get();
             seen.insert(id);
 

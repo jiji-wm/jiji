@@ -7945,3 +7945,330 @@ fn advance_animations_destroy_flushes_after_loop_scope() {
     }
     layout.verify_invariants();
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1b Part 1 — cross-activity window iteration helpers.
+// Pin the activity-scoped default of `Layout::windows()` / `Layout::workspaces()`
+// against the pool-spanning `windows_all()` / `with_windows_all` /
+// `with_windows_all_mut`. The `WindowMru::new` call site at
+// `src/ui/mru.rs:587` iterates `layout.workspaces()` and is activity-scoped
+// by the same contract these tests pin — see the rustdoc on
+// `Layout::workspaces` / `Layout::windows` for the consumer-facing statement.
+// ---------------------------------------------------------------------------
+
+/// Seeds a two-activity layout with one window on each activity:
+/// - seed activity gets window id 1 on a single connected output;
+/// - beta activity gets window id 2 on the same output (after switching to
+///   beta so `Op::AddWindow` lands on beta's active workspace).
+///
+/// Returns the layout with the active activity switched back to `seed`.
+fn seed_two_activities_with_one_window_each() -> (Layout<TestWindow>, ActivityId, ActivityId) {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    layout.switch_activity(beta_id);
+    check_ops_on_layout(
+        &mut layout,
+        [Op::AddWindow {
+            params: TestWindowParams::new(2),
+        }],
+    );
+
+    layout.switch_activity(seed_id);
+    layout.verify_invariants();
+    (layout, seed_id, beta_id)
+}
+
+#[test]
+fn windows_activity_scoped_excludes_hidden_activity_windows() {
+    // Pins the "activity-filtered default" contract of `Layout::windows()` —
+    // the call site `input/mod.rs:882` (`Action::FocusWindowPrevious`) and
+    // `ui/mru.rs:587` (`WindowMru::new` iterating `layout.workspaces()`)
+    // both rely on this scoping to restrict focus-cycling and MRU display
+    // to the active activity.
+    let (layout, _seed_id, _beta_id) = seed_two_activities_with_one_window_each();
+
+    let visible_ids: Vec<usize> = layout.windows().map(|(_, w)| *w.id()).collect();
+    assert_eq!(
+        visible_ids,
+        vec![1],
+        "windows() must be activity-scoped: beta's window (id=2) is hidden",
+    );
+
+    // Corollary at the workspaces-iterator level (pins the MRU scope
+    // contract from `ui/mru.rs:587`): `layout.workspaces()` walks only the
+    // active activity's views.
+    let visible_ws_windows: Vec<usize> = layout
+        .workspaces()
+        .flat_map(|(_, _, ws)| ws.windows().map(|w| *w.id()))
+        .collect();
+    assert_eq!(
+        visible_ws_windows,
+        vec![1],
+        "workspaces() must be activity-scoped: the MRU builder only sees the \
+         active activity's windows",
+    );
+}
+
+#[test]
+fn windows_all_spans_pool_across_activities() {
+    // Pool-spanning iteration: every window in the pool must be reachable
+    // via `windows_all()`, regardless of which activity owns its workspace.
+    let (layout, _seed_id, _beta_id) = seed_two_activities_with_one_window_each();
+
+    let mut all_ids: Vec<usize> = layout.windows_all().map(|(_, w)| *w.id()).collect();
+    all_ids.sort_unstable();
+    assert_eq!(
+        all_ids,
+        vec![1, 2],
+        "windows_all() must yield every window in the pool, including \
+         windows on dormant activities",
+    );
+
+    // Count matches the pool total — no hidden windows dropped silently.
+    let pool_total: usize = layout
+        .workspace_pool()
+        .values()
+        .map(|ws| ws.windows().count())
+        .sum();
+    assert_eq!(layout.windows_all().count(), pool_total);
+}
+
+#[test]
+fn windows_all_output_id_follows_workspace_binding() {
+    // The `Option<&OutputId>` paired with each window must be the
+    // owning workspace's bound output id; a hidden-activity window on a
+    // connected output is therefore `Some(oid)`, not `None`.
+    let (layout, _seed_id, _beta_id) = seed_two_activities_with_one_window_each();
+    let expected_oid = layout.monitors[0].output_id();
+
+    for (oid, win) in layout.windows_all() {
+        let oid = oid.expect("all pool workspaces here are bound to the single connected output");
+        assert_eq!(
+            *oid, expected_oid,
+            "windows_all must pair each window with its owning workspace's \
+             bound output id (window id {:?})",
+            win.id(),
+        );
+    }
+}
+
+#[test]
+fn with_windows_all_yields_hidden_activity_windows() {
+    // The closure API must visit every pool window, including those on a
+    // dormant activity's workspaces. Pins the IPC event-stream /
+    // foreign-toplevel / screencasting consumer contract.
+    let (layout, _seed_id, _beta_id) = seed_two_activities_with_one_window_each();
+    let expected_output = layout.monitors[0].output.clone();
+
+    let mut seen: Vec<(usize, bool, bool)> = Vec::new();
+    layout.with_windows_all(|win, output, ws_id, _| {
+        let has_output = output.is_some_and(|o| *o == expected_output);
+        let has_ws_id = ws_id.is_some();
+        seen.push((*win.id(), has_output, has_ws_id));
+    });
+    seen.sort_by_key(|(id, _, _)| *id);
+
+    assert_eq!(
+        seen,
+        vec![(1, true, true), (2, true, true)],
+        "with_windows_all must yield both seed's and beta's windows with a \
+         resolved &Output and a populated workspace id",
+    );
+}
+
+#[test]
+fn with_windows_all_mut_yields_hidden_activity_windows() {
+    // Mutable twin: the two-phase borrow recipe (pre-hoisted monitor map,
+    // then `values_mut()`) must still reach every pool window. Asserts the
+    // closure observes both windows with `&mut W` and pairs each with the
+    // bound `&Output` resolved through the hoisted map.
+    let (mut layout, _seed_id, _beta_id) = seed_two_activities_with_one_window_each();
+    let expected_output = layout.monitors[0].output.clone();
+
+    let mut seen: Vec<(usize, bool)> = Vec::new();
+    layout.with_windows_all_mut(|win, output| {
+        let has_output = output.is_some_and(|o| *o == expected_output);
+        // `win` is taken as `&mut`; we only record the id, which is enough
+        // to confirm the exclusive-borrow signature and that every pool
+        // window is reachable.
+        seen.push((*win.id(), has_output));
+    });
+    seen.sort_by_key(|(id, _)| *id);
+
+    assert_eq!(
+        seen,
+        vec![(1, true), (2, true)],
+        "with_windows_all_mut must yield both activities' windows, each \
+         paired with the bound &Output resolved through the pre-hoisted \
+         monitor map",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn with_windows_all_mut_mutation_persists() {
+    // Pins that `&mut W` received in the closure actually reaches the stored
+    // window — i.e. mutations land, not just that the window is visited.
+    // Uses `set_activated(true)` as the observable mutation, then re-iterates
+    // via `windows_all()` to confirm every window reports the flipped state.
+    let (mut layout, _seed_id, _beta_id) = seed_two_activities_with_one_window_each();
+
+    // Flip every window to activated = true via the mutable iterator.
+    layout.with_windows_all_mut(|win, _output| {
+        win.set_activated(true);
+    });
+
+    // Re-iterate via the immutable path and assert the mutation persisted.
+    let not_activated: Vec<usize> = layout
+        .windows_all()
+        .filter_map(|(_, w)| {
+            if w.0.pending_activated.get() {
+                None
+            } else {
+                Some(*w.id())
+            }
+        })
+        .collect();
+
+    assert!(
+        not_activated.is_empty(),
+        "all windows must have pending_activated = true after with_windows_all_mut flip; \
+         these ids were not activated: {not_activated:?}",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn windows_all_interactive_move_first() {
+    // The interactive-move window must be the first item yielded by
+    // `windows_all()`, `with_windows_all`, and `with_windows_all_mut` once
+    // the move is in `Moving` state (Begin + Update transitions the state
+    // machine from `Starting` to `Moving`, which is when iterators prepend).
+    // Seeds two activities with one window each (ids 1 and 2), arms an
+    // interactive move on window 1, and verifies first-yield ordering.
+    let (mut layout, _seed_id, _beta_id) = seed_two_activities_with_one_window_each();
+
+    // Arm a move: Begin + Update to reach `InteractiveMoveState::Moving`.
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::InteractiveMoveBegin {
+                window: 1,
+                output_idx: 1,
+                px: 0.,
+                py: 0.,
+            },
+            Op::InteractiveMoveUpdate {
+                window: 1,
+                dx: 10.,
+                dy: 0.,
+                output_idx: 1,
+                px: 10.,
+                py: 0.,
+            },
+        ],
+    );
+
+    // windows_all() — first element must be the moving window.
+    let first_all = layout
+        .windows_all()
+        .next()
+        .map(|(_, w)| *w.id())
+        .expect("windows_all must yield at least one element during interactive move");
+    assert_eq!(
+        first_all, 1,
+        "windows_all must yield the interactive-move window first",
+    );
+
+    // with_windows_all — first callback arg must be the moving window.
+    let mut first_with_all: Option<usize> = None;
+    layout.with_windows_all(|win, _output, _ws_id, _layout| {
+        if first_with_all.is_none() {
+            first_with_all = Some(*win.id());
+        }
+    });
+    assert_eq!(
+        first_with_all,
+        Some(1),
+        "with_windows_all must yield the interactive-move window first",
+    );
+
+    // with_windows_all_mut — first callback arg must be the moving window.
+    let mut first_with_all_mut: Option<usize> = None;
+    layout.with_windows_all_mut(|win, _output| {
+        if first_with_all_mut.is_none() {
+            first_with_all_mut = Some(*win.id());
+        }
+    });
+    assert_eq!(
+        first_with_all_mut,
+        Some(1),
+        "with_windows_all_mut must yield the interactive-move window first",
+    );
+
+    layout.interactive_move_end(&1);
+    layout.verify_invariants();
+}
+
+#[test]
+fn windows_all_disconnected_pool_yields_stale_output_id() {
+    // After `RemoveOutput`, the workspace moves to `disconnected_workspace_ids`
+    // but retains its bound `output_id` (needed for reconnect routing). The
+    // corrected rustdoc for `windows_all` says: `None` is only for workspaces
+    // never attached to any output; a workspace whose bound output is
+    // disconnected still yields `Some(&oid)` with the stale OutputId.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    // Capture the output id before removal.
+    let stale_oid = layout.monitors[0].output_id();
+
+    // Remove the only output — workspace goes to disconnected_workspace_ids.
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
+
+    assert!(
+        layout.monitors.is_empty(),
+        "no monitors must remain after RemoveOutput",
+    );
+
+    // The window should still appear in windows_all(), paired with Some(stale_oid).
+    let mut found = false;
+    for (oid, win) in layout.windows_all() {
+        if *win.id() == 1 {
+            found = true;
+            let oid = oid.expect(
+                "disconnected workspace retains its bound output_id; \
+                 windows_all must yield Some(stale_oid), not None",
+            );
+            assert_eq!(
+                *oid, stale_oid,
+                "disconnected workspace's output id must match the stale OutputId \
+                 of the removed output (window id 1)",
+            );
+        }
+    }
+    assert!(
+        found,
+        "window 1 must be reachable via windows_all after RemoveOutput",
+    );
+
+    layout.verify_invariants();
+}
