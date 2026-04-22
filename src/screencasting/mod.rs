@@ -172,14 +172,20 @@ impl State {
         // Use a loop {} so we can break instead of early-return.
         #[allow(clippy::never_loop)]
         loop {
-            let mut windows = self.niri.layout.windows();
+            let mut windows = self.niri.layout.windows_all();
             let Some((_, mapped)) = windows.find(|(_, mapped)| mapped.id().get() == id) else {
+                warn!(stream_id = stream_id.get(), window_id = id, "redraw_cast: window not found");
                 break;
             };
 
             // Use the cached output since it will be present even if the output was
             // currently disconnected.
             let Some(output) = self.niri.casting.mapped_cast_output.get(&mapped.window) else {
+                warn!(
+                    stream_id = stream_id.get(),
+                    window_id = id,
+                    "redraw_cast: no cached output for window"
+                );
                 break;
             };
 
@@ -268,7 +274,7 @@ impl State {
                 }
             }
             CastTarget::Window { id } => {
-                let mut windows = self.niri.layout.windows();
+                let mut windows = self.niri.layout.windows_all();
                 if let Some((_, mapped)) = windows.find(|(_, mapped)| mapped.id().get() == *id) {
                     if let Some(output) = self.niri.casting.mapped_cast_output.get(&mapped.window) {
                         refresh = Some(output.current_mode().unwrap().refresh as u32);
@@ -773,7 +779,7 @@ impl Niri {
     fn cast_params_for_window(&self, window_id: u64) -> Option<(Size<i32, Physical>, u32)> {
         let (_, mapped) = self
             .layout
-            .windows()
+            .windows_all()
             .find(|(_, m)| m.id().get() == window_id)?;
         let output = self.casting.mapped_cast_output.get(&mapped.window)?;
         let scale = Scale::from(output.current_scale().fractional_scale());

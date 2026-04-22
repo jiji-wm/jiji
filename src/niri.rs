@@ -3625,9 +3625,13 @@ impl Niri {
         Some((target_output.cloned(), target_workspace_index))
     }
 
+    /// Looks up a mapped window by id across the whole workspace pool,
+    /// including windows on dormant activities. Caller must not assume
+    /// the returned window belongs to the active activity's view.
+    /// See DD §5.13 for the future `MruScope::AllActivities` extension.
     pub fn find_window_by_id(&self, id: MappedId) -> Option<Window> {
         self.layout
-            .windows()
+            .windows_all()
             .find(|(_, m)| m.id() == id)
             .map(|(_, m)| m.window.clone())
     }

@@ -1911,9 +1911,11 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        self.workspaces()
-            .find_map(|(_, _, ws)| ws.popup_target_rect(window))
-            .unwrap()
+        self.workspaces_all()
+            .find_map(|(_, ws)| ws.popup_target_rect(window))
+            .expect(
+                "popup_target_rect called for window not in any pool workspace",
+            )
     }
 
     pub fn update_output_size(&mut self, output: &Output) {
@@ -6077,7 +6079,12 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn toggle_windowed_fullscreen(&mut self, id: &W::Id) {
-        let (_, window) = self.windows().find(|(_, win)| win.id() == id).unwrap();
+        let (_, window) = self
+            .windows_all()
+            .find(|(_, win)| win.id() == id)
+            .expect(
+                "toggle_windowed_fullscreen called with window id not present in the workspace pool",
+            );
         if window.pending_sizing_mode().is_fullscreen() {
             // Remove the real fullscreen.
             for ws in self.workspaces_mut() {
@@ -6088,8 +6095,10 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        // Walk the full pool (not just the active activity) so the windowed-fullscreen
+        // flip reaches a window left behind on a dormant activity's workspace.
         // This will switch is_pending_fullscreen() to false right away.
-        self.with_windows_mut(|window, _| {
+        self.with_windows_all_mut(|window, _| {
             if window.id() == id {
                 window.request_windowed_fullscreen(!window.is_pending_windowed_fullscreen());
             }
@@ -7873,8 +7882,12 @@ impl<W: LayoutElement> Layout<W> {
         moving_window.chain(rest)
     }
 
+    /// Returns `true` if the window id exists anywhere in the workspace pool,
+    /// including on workspaces bound to dormant activities. For the narrower
+    /// active-activity check (monitor-ordered view plus disconnected entries),
+    /// use [`Self::windows`].
     pub fn has_window(&self, window: &W::Id) -> bool {
-        self.windows().any(|(_, win)| win.id() == window)
+        self.windows_all().any(|(_, win)| win.id() == window)
     }
 
     pub fn is_overview_open(&self) -> bool {
