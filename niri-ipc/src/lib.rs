@@ -1504,7 +1504,9 @@ pub struct Activity {
     pub is_active: bool,
     /// Whether this activity has any urgent windows.
     ///
-    /// **Phase 1a note**: always `false`. Urgency tracking lands in Phase 1b.
+    /// Bubbles up from window urgency via workspace membership: `true` iff some
+    /// workspace belonging to this activity has an urgent window. See
+    /// [`Event::ActivityUrgencyChanged`] for the change-notification form.
     pub is_urgent: bool,
 }
 
@@ -1783,6 +1785,24 @@ pub enum Event {
         id: u64,
         /// ID of the previously active activity, if any.
         previous_id: Option<u64>,
+    },
+    /// Activity urgency changed.
+    ///
+    /// Emitted when a window on a workspace belonging to this activity becomes
+    /// urgent or clears urgency, causing the activity's aggregate urgency to
+    /// change.
+    ///
+    /// Urgency events fire inside-out: [`Event::WindowUrgencyChanged`] first,
+    /// then [`Event::WorkspaceUrgencyChanged`] if the workspace's aggregate
+    /// flipped, then `ActivityUrgencyChanged` if any containing activity's
+    /// aggregate flipped. Clients processing events in order see consistent
+    /// state at each layer (the window/workspace update is already applied
+    /// when the activity aggregate event arrives).
+    ActivityUrgencyChanged {
+        /// ID of the activity.
+        id: u64,
+        /// Whether this activity now has any urgent windows.
+        urgent: bool,
     },
     /// The window configuration has changed.
     WindowsChanged {
@@ -2464,6 +2484,56 @@ mod tests {
         };
         assert_eq!(parsed_id2, 7);
         assert_eq!(parsed_prev2, None);
+    }
+
+    #[test]
+    fn activity_urgency_changed_event_roundtrips_serde() {
+        // Pin wire form for both the `true` and `false` paths in one test,
+        // mirroring `activity_switched_event_roundtrips_serde`'s handling of
+        // `Some` / `None`.
+        let event_true = Event::ActivityUrgencyChanged {
+            id: 7,
+            urgent: true,
+        };
+        let json_true = serde_json::to_string(&event_true)
+            .expect("serialize Event::ActivityUrgencyChanged (true)");
+        assert_eq!(
+            json_true,
+            r#"{"ActivityUrgencyChanged":{"id":7,"urgent":true}}"#
+        );
+        let parsed_true: Event = serde_json::from_str(&json_true)
+            .expect("deserialize Event::ActivityUrgencyChanged (true)");
+        let Event::ActivityUrgencyChanged {
+            id: parsed_id,
+            urgent: parsed_urgent,
+        } = parsed_true
+        else {
+            panic!("expected ActivityUrgencyChanged variant");
+        };
+        assert_eq!(parsed_id, 7);
+        assert!(parsed_urgent);
+
+        let event_false = Event::ActivityUrgencyChanged {
+            id: 7,
+            urgent: false,
+        };
+        let json_false = serde_json::to_string(&event_false)
+            .expect("serialize Event::ActivityUrgencyChanged (false)");
+        assert_eq!(
+            json_false,
+            r#"{"ActivityUrgencyChanged":{"id":7,"urgent":false}}"#
+        );
+        let parsed_false: Event = serde_json::from_str(&json_false)
+            .expect("deserialize Event::ActivityUrgencyChanged (false)");
+        let Event::ActivityUrgencyChanged {
+            id: parsed_id2,
+            urgent: parsed_urgent2,
+        } = parsed_false
+        else {
+            panic!("expected ActivityUrgencyChanged variant");
+        };
+        assert_eq!(parsed_id2, 7);
+        assert!(!parsed_urgent2);
     }
 
     #[test]

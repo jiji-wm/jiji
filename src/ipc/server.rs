@@ -105,6 +105,23 @@ pub struct IpcServer {
     /// corresponding `ActivitiesState` on `EventStreamState` is Phase 1b
     /// scope. Main-thread calloop only — no cross-thread access.
     last_active_activity_id: Cell<Option<ActivityId>>,
+    /// Most recently observed urgency snapshot keyed by [`ActivityId`], used
+    /// to diff against the current aggregate on each refresh tick and emit
+    /// [`Event::ActivityUrgencyChanged`] for every transition.
+    ///
+    /// `None` before the first observation: the first call to
+    /// [`State::ipc_refresh_activity_urgency`] seeds this field from the
+    /// current aggregate without emitting, so clients do not see spurious
+    /// `ActivityUrgencyChanged` events on server startup (same seeding posture
+    /// as [`Self::last_active_activity_id`]).
+    ///
+    /// Deliberately on `IpcServer` directly (not part of `EventStreamState`):
+    /// the corresponding `ActivitiesState` on `EventStreamState` is Phase 1b
+    /// scope (DD box 1949) and subsumes both this tracker and
+    /// [`Self::last_active_activity_id`] in one piece. Main-thread calloop
+    /// only — no cross-thread access. `RefCell` (not `Cell`) because the
+    /// value is a `HashMap` that we mutate in place on each tick.
+    last_activity_urgency: RefCell<Option<HashMap<ActivityId, bool>>>,
     /// Per-connection depth-1 queue for blocked [`Request::Action`]s. One
     /// entry per connection (admission rejects a second enqueue). `IndexMap`
     /// preserves FIFO insertion order; [`drain_blocked_action_waiters`] walks
@@ -180,6 +197,7 @@ impl IpcServer {
             event_streams: Rc::new(RefCell::new(Vec::new())),
             event_stream_state: Rc::new(RefCell::new(EventStreamState::default())),
             last_active_activity_id: Cell::new(None),
+            last_activity_urgency: RefCell::new(None),
             blocked_action_waiters: Rc::new(RefCell::new(IndexMap::new())),
         })
     }
@@ -722,27 +740,26 @@ pub(crate) fn build_activities_ipc<W: LayoutElement>(
     layout
         .activities()
         .iter()
-        .map(|a| to_ipc_activity(a, active_id))
+        .map(|a| to_ipc_activity(a, active_id, layout))
         .collect()
 }
 
 pub(crate) fn build_focused_activity_ipc<W: LayoutElement>(layout: &Layout<W>) -> niri_ipc::Activity {
     let active_id = layout.active_activity_id();
-    to_ipc_activity(layout.activities().active(), active_id)
+    to_ipc_activity(layout.activities().active(), active_id, layout)
 }
 
-fn to_ipc_activity(
+fn to_ipc_activity<W: LayoutElement>(
     a: &crate::layout::activity::Activity,
     active_id: ActivityId,
+    layout: &Layout<W>,
 ) -> niri_ipc::Activity {
     niri_ipc::Activity {
         id: a.id().get(),
         name: a.name().to_owned(),
         is_config_declared: a.is_config_declared(),
         is_active: a.id() == active_id,
-        // Phase 1b: internal `is_urgent` + `ActivityUrgencyChanged` event land
-        // together; wire through here then.
-        is_urgent: false,
+        is_urgent: layout.activity_is_urgent(a.id()),
     }
 }
 
@@ -875,6 +892,14 @@ impl State {
         // after `ipc_refresh_workspaces`.
         self.ipc_refresh_active_activity();
         self.ipc_refresh_workspaces();
+        // Urgency ordering is inside-out: `WindowUrgencyChanged` fires as the
+        // window updates; `WorkspaceUrgencyChanged` fires from
+        // `ipc_refresh_workspaces` above; `ActivityUrgencyChanged` is the
+        // outermost layer and must fire after workspace urgency so clients
+        // see workspace-level state settled before the activity aggregate
+        // arrives (niri-ipc `Event::ActivityUrgencyChanged` rustdoc). Do not
+        // move `ipc_refresh_activity_urgency` before `ipc_refresh_workspaces`.
+        self.ipc_refresh_activity_urgency();
         self.ipc_refresh_windows();
         self.ipc_refresh_overview();
     }
@@ -909,6 +934,37 @@ impl State {
         // returned `Some`, and regardless of the seeding branch above. Never
         // move this into the `if let Some(event)` body.
         server.last_active_activity_id.set(Some(current_id));
+    }
+
+    fn ipc_refresh_activity_urgency(&mut self) {
+        let Some(server) = &self.niri.ipc_server else {
+            return;
+        };
+
+        let _span = tracy_client::span!("State::ipc_refresh_activity_urgency");
+
+        let layout = &self.niri.layout;
+        let current: HashMap<ActivityId, bool> = layout
+            .activities()
+            .iter()
+            .map(|a| (a.id(), layout.activity_is_urgent(a.id())))
+            .collect();
+
+        // Clone out the previous snapshot inside a narrow shared-borrow scope
+        // so the unconditional `borrow_mut` at function exit cannot alias an
+        // outstanding shared borrow.
+        let previous = server.last_activity_urgency.borrow().clone();
+        let (events, snapshot) = step_activity_urgency(previous.as_ref(), current);
+        for event in events {
+            server.send_event(event);
+        }
+
+        // Tracker-update discipline (mirrors `ipc_refresh_active_activity`): unconditional set at
+        // function exit so the "emitted == tracked" invariant holds whether
+        // or not `step_activity_urgency` emitted events, and regardless of
+        // the seeding branch above. Never move this into the event-emission
+        // branch.
+        *server.last_activity_urgency.borrow_mut() = Some(snapshot);
     }
 
     fn ipc_refresh_workspaces(&mut self) {
@@ -1208,6 +1264,73 @@ fn diff_active_activity(previous: Option<u64>, current: u64) -> Option<Event> {
         id: current,
         previous_id: previous,
     })
+}
+
+/// Pure step over the activity-urgency tracker: given the prior snapshot
+/// (`None` before first observation) and the current snapshot, return the
+/// events to emit and the snapshot to store.
+///
+/// Seeding (`previous == None`) returns an empty event list regardless of the
+/// current state — the first observation silently seeds the tracker. Once
+/// seeded, emission is delegated to [`diff_activity_urgency`].
+///
+/// Callers handle the `RefCell` mechanics and event dispatch; this function
+/// owns the decision of *what* to emit for a given (previous, current) pair.
+/// See [`State::ipc_refresh_activity_urgency`] for the thin wrapper.
+fn step_activity_urgency(
+    previous: Option<&HashMap<ActivityId, bool>>,
+    current: HashMap<ActivityId, bool>,
+) -> (Vec<Event>, HashMap<ActivityId, bool>) {
+    let events = match previous {
+        Some(prev) => diff_activity_urgency(prev, &current),
+        None => Vec::new(),
+    };
+    (events, current)
+}
+
+/// Diff two activity-urgency snapshots and produce the list of
+/// [`Event::ActivityUrgencyChanged`] events to emit.
+///
+/// Emission rules:
+/// - For every id present in both snapshots whose boolean flipped: emit the
+///   transition.
+/// - For every id present in `current` but not in `previous` (newly-tracked
+///   activity): emit only if `current` reports `true`. A new activity that
+///   starts non-urgent is silent — its initial `false` rides the
+///   `ActivityCreated` event (future; see DD §4.6).
+/// - Ids that dropped out of `current` emit nothing here; lifecycle fires
+///   through the future `ActivityRemoved` event (future; see DD §4.6).
+///
+/// Events are sorted by [`ActivityId`] for determinism so clients writing
+/// tests against the event stream aren't exposed to `HashMap` iteration-order
+/// flake.
+fn diff_activity_urgency(
+    previous: &HashMap<ActivityId, bool>,
+    current: &HashMap<ActivityId, bool>,
+) -> Vec<Event> {
+    let mut transitions: Vec<(ActivityId, bool)> = Vec::new();
+    for (&id, &urgent) in current {
+        match previous.get(&id) {
+            Some(&prev_urgent) => {
+                if prev_urgent != urgent {
+                    transitions.push((id, urgent));
+                }
+            }
+            None => {
+                if urgent {
+                    transitions.push((id, urgent));
+                }
+            }
+        }
+    }
+    transitions.sort_by_key(|(id, _)| id.get());
+    transitions
+        .into_iter()
+        .map(|(id, urgent)| Event::ActivityUrgencyChanged {
+            id: id.get(),
+            urgent,
+        })
+        .collect()
 }
 
 /// Builds the full per-refresh workspace snapshot sent to IPC clients.
@@ -1819,6 +1942,149 @@ mod tests {
                 id: 7,
                 previous_id: Some(3),
             })
+        ));
+    }
+
+    fn urgency_snapshot(pairs: &[(u64, bool)]) -> HashMap<ActivityId, bool> {
+        pairs
+            .iter()
+            .map(|&(id, urgent)| (ActivityId::specific(id), urgent))
+            .collect()
+    }
+
+    #[test]
+    fn diff_activity_urgency_no_change_emits_nothing() {
+        // Dominant hot-path case: equal snapshots short-circuit to an empty
+        // vec with no event allocation.
+        let prev = urgency_snapshot(&[(1, false), (2, true)]);
+        let curr = urgency_snapshot(&[(1, false), (2, true)]);
+        assert!(diff_activity_urgency(&prev, &curr).is_empty());
+    }
+
+    #[test]
+    fn diff_activity_urgency_single_flip_to_true_emits_event() {
+        let prev = urgency_snapshot(&[(5, false)]);
+        let curr = urgency_snapshot(&[(5, true)]);
+        let events = diff_activity_urgency(&prev, &curr);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            Event::ActivityUrgencyChanged {
+                id: 5,
+                urgent: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn diff_activity_urgency_single_flip_to_false_emits_event() {
+        let prev = urgency_snapshot(&[(5, true)]);
+        let curr = urgency_snapshot(&[(5, false)]);
+        let events = diff_activity_urgency(&prev, &curr);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            Event::ActivityUrgencyChanged {
+                id: 5,
+                urgent: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn diff_activity_urgency_multiple_flips_emit_all_sorted_by_id() {
+        // Sort-by-id contract: emitted events are deterministic regardless of
+        // `HashMap` iteration order.  Five ids inserted in a shuffled order
+        // (`9, 3, 7, 1, 5`) so that no HashMap seed can accidentally produce
+        // sorted output and make an unsorted implementation appear correct.
+        // Assert both the id order and the per-entry urgent flag together so
+        // neither can regress independently.
+        let prev = urgency_snapshot(&[(9, true), (3, true), (7, false), (1, false), (5, true)]);
+        let curr = urgency_snapshot(&[(9, false), (3, false), (7, true), (1, true), (5, false)]);
+        let events = diff_activity_urgency(&prev, &curr);
+        // Expected: sorted by id asc, urgent flag from `curr`.
+        let expected: &[(u64, bool)] = &[(1, true), (3, false), (5, false), (7, true), (9, false)];
+        assert_eq!(
+            events.len(),
+            expected.len(),
+            "all 5 flipped ids must emit exactly once",
+        );
+        for (event, &(exp_id, exp_urgent)) in events.iter().zip(expected) {
+            let Event::ActivityUrgencyChanged { id, urgent } = event else {
+                panic!("expected ActivityUrgencyChanged, got {event:?}");
+            };
+            assert_eq!(*id, exp_id, "id must be sorted ascending");
+            assert_eq!(*urgent, exp_urgent, "id {id}: urgent flag must match current");
+        }
+    }
+
+    #[test]
+    fn diff_activity_urgency_newly_present_activity_emits_only_if_true() {
+        // Newly-inserted keys (ids in `current` but not `previous`): a `true`
+        // state fires an event; a `false` state is silent — its initial
+        // value rides on `ActivityCreated` (not in this sub-phase).
+        let prev = urgency_snapshot(&[]);
+        let curr = urgency_snapshot(&[(1, false), (2, true)]);
+        let events = diff_activity_urgency(&prev, &curr);
+        assert_eq!(events.len(), 1, "only the urgent newcomer emits");
+        assert!(matches!(
+            events[0],
+            Event::ActivityUrgencyChanged {
+                id: 2,
+                urgent: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn diff_activity_urgency_removed_id_emits_nothing() {
+        // Ids that drop out of `current` (removed activities) must emit
+        // nothing: the loop iterates `current`, not `previous`, so prev-only
+        // keys are silently skipped.  Lifecycle for removed activities fires
+        // through the future `ActivityRemoved` event (see DD §4.6).
+        let prev = urgency_snapshot(&[(1, true), (2, true)]);
+        let curr = urgency_snapshot(&[(1, true)]); // id 2 dropped
+        assert!(
+            diff_activity_urgency(&prev, &curr).is_empty(),
+            "removed activity must not emit an urgency event",
+        );
+    }
+
+    #[test]
+    fn step_activity_urgency_seeds_without_emit() {
+        // First observation (`previous == None`) seeds the tracker silently
+        // even when activities are already urgent. This pins the
+        // orchestration-level seeding discipline at the pure-function tier,
+        // so `State::ipc_refresh_activity_urgency` can remain a thin
+        // wrapper. Also pins the "hidden-activity urgency emission" risk
+        // surface — the newcomer-urgent `42` activity would otherwise fire
+        // against an implicit empty snapshot, which is wrong for
+        // startup-seeding.
+        let current = urgency_snapshot(&[(1, false), (42, true)]);
+        let (events, snapshot) = step_activity_urgency(None, current.clone());
+        assert!(
+            events.is_empty(),
+            "seeding must be silent, got {events:?}",
+        );
+        assert_eq!(
+            snapshot, current,
+            "snapshot must be stored exactly as observed",
+        );
+
+        // Once seeded, a subsequent tick with no changes emits nothing.
+        let (events2, _) = step_activity_urgency(Some(&snapshot), current.clone());
+        assert!(events2.is_empty());
+
+        // A subsequent flip emits, confirming seed-then-track behaviour.
+        let next = urgency_snapshot(&[(1, true), (42, true)]);
+        let (events3, _) = step_activity_urgency(Some(&snapshot), next);
+        assert_eq!(events3.len(), 1);
+        assert!(matches!(
+            events3[0],
+            Event::ActivityUrgencyChanged {
+                id: 1,
+                urgent: true,
+            }
         ));
     }
 }

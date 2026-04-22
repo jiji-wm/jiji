@@ -43,6 +43,11 @@ struct TestWindowInner {
     animate_next_configure: Cell<bool>,
     animation_snapshot: RefCell<Option<LayoutElementRenderSnapshot>>,
     rules: ResolvedWindowRules,
+    /// Test-only urgency flag. Production `Mapped` derives urgency from the
+    /// xdg-activation protocol; tests toggle it directly via
+    /// [`TestWindow::set_urgent`] to exercise urgency-propagation paths
+    /// (`Workspace::is_urgent` → `Layout::activity_is_urgent`).
+    is_urgent: Cell<bool>,
     // Per-output `output_enter` count, matching Smithay's `Window::output_enter` semantics.
     // Incremented on `output_enter`, decremented on `output_leave`; entries are dropped at zero.
     // Used by `verify_output_bindings` to catch bind/unbind symmetry violations in the layout.
@@ -99,8 +104,13 @@ impl TestWindow {
             animate_next_configure: Cell::new(false),
             animation_snapshot: RefCell::new(None),
             rules: params.rules.unwrap_or_default(),
+            is_urgent: Cell::new(false),
             bound_outputs: RefCell::new(HashMap::new()),
         }))
+    }
+
+    fn set_urgent(&self, urgent: bool) {
+        self.0.is_urgent.set(urgent);
     }
 
     fn bound_outputs(&self) -> Vec<Output> {
@@ -306,7 +316,7 @@ impl LayoutElement for TestWindow {
     }
 
     fn is_urgent(&self) -> bool {
-        false
+        self.0.is_urgent.get()
     }
 }
 
@@ -4552,7 +4562,7 @@ fn layout_seed_unknown_activity_name_falls_back_to_default() {
 fn build_activities_ipc_mirrors_seed_state() {
     // A fresh layout has exactly one seed activity. Pin the IPC-projection
     // helpers against accidental drift in field wiring (active-id comparison,
-    // `is_urgent` placeholder, name / config-declared flags).
+    // `is_urgent` aggregation, name / config-declared flags).
     let mut layout = Layout::<TestWindow>::default();
     let seed_id = layout.active_activity_id();
 
@@ -4564,7 +4574,10 @@ fn build_activities_ipc_mirrors_seed_state() {
     // `new_runtime` → `is_config_declared == false`.
     assert_eq!(only.name, "Default");
     assert!(only.is_active);
-    assert!(!only.is_urgent, "Phase 1a hardcodes is_urgent = false");
+    assert!(
+        !only.is_urgent,
+        "no urgent windows → aggregate is_urgent is false",
+    );
     assert!(!only.is_config_declared);
 
     let focused = crate::ipc::server::build_focused_activity_ipc(&layout);
@@ -6139,6 +6152,100 @@ fn workspaces_with_activity_includes_sticky() {
     );
 
     layout.verify_invariants();
+}
+
+#[test]
+fn layout_activity_is_urgent_aggregates_workspace_urgency() {
+    // Aggregation rule pin (DD §3.1 bubble: window → workspace → activity).
+    // Build two activities that share a workspace and one activity that does
+    // not; flip window urgency on the shared workspace and assert the two
+    // sharing activities report urgent, while the unrelated one does not.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+
+    // Mint and insert a second activity `beta` and tag the (single) workspace
+    // with both seed and beta — a shared workspace.
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta_activity.id();
+    layout.activities.insert(beta_activity);
+
+    // Mint and insert a third activity `gamma` that does NOT get tagged on
+    // any workspace — its aggregate urgency must remain `false` no matter
+    // what happens on the shared workspace.
+    let gamma_activity = super::activity::Activity::new_runtime("gamma".to_owned());
+    let gamma_id = gamma_activity.id();
+    layout.activities.insert(gamma_activity);
+
+    // Find the workspace holding the window and tag it with seed + beta.
+    let ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.windows().any(|w| *w.id() == 1usize))
+        .expect("workspace holding the test window must exist")
+        .id();
+    layout
+        .workspaces
+        .get_mut(&ws_id)
+        .expect("ws_id must be a pool key")
+        .activities = [seed_id, beta_id].into_iter().collect();
+
+    // Initially no urgent windows → every activity reports `false`.
+    assert!(!layout.activity_is_urgent(seed_id));
+    assert!(!layout.activity_is_urgent(beta_id));
+    assert!(!layout.activity_is_urgent(gamma_id));
+
+    // Flip the window urgent → seed and beta aggregate to `true`; gamma
+    // stays `false` (its membership set is empty).
+    let win = layout
+        .workspaces
+        .get(&ws_id)
+        .expect("ws_id must be a pool key")
+        .windows()
+        .next()
+        .expect("workspace must have the window")
+        .clone();
+    win.set_urgent(true);
+
+    assert!(
+        layout.activity_is_urgent(seed_id),
+        "seed activity shares the workspace with the urgent window",
+    );
+    assert!(
+        layout.activity_is_urgent(beta_id),
+        "beta activity shares the workspace with the urgent window",
+    );
+    assert!(
+        !layout.activity_is_urgent(gamma_id),
+        "gamma has no workspaces → aggregate stays false",
+    );
+
+    // Clear urgency → aggregate flips back symmetrically.
+    win.set_urgent(false);
+    assert!(!layout.activity_is_urgent(seed_id));
+    assert!(!layout.activity_is_urgent(beta_id));
+    assert!(!layout.activity_is_urgent(gamma_id));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn layout_activity_is_urgent_unknown_id_returns_false() {
+    // Pin silent-no-match behavior: an ActivityId that was never inserted
+    // must yield `false` rather than panicking. Mirrors the
+    // `workspaces_with_activity_unknown_activity_yields_empty` precedent.
+    let ops = [Op::AddOutput(1)];
+    let layout = check_ops(ops);
+
+    assert!(
+        !layout.activity_is_urgent(super::activity::ActivityId::specific(99999)),
+        "unknown activity id must yield false, not panic",
+    );
 }
 
 #[test]

@@ -2352,6 +2352,17 @@ impl<W: LayoutElement> Layout<W> {
         &self.activities
     }
 
+    /// Aggregate urgency for an activity: `true` iff some workspace in the pool
+    /// whose `activities` set contains `id` is itself urgent (DD §3.1 bubble:
+    /// window → workspace → activity). Returns `false` for an unknown
+    /// `ActivityId` (silent no-match — no workspaces will satisfy the filter).
+    pub(crate) fn activity_is_urgent(&self, id: ActivityId) -> bool {
+        self.workspaces
+            .values()
+            .filter(|ws| ws.activities().contains(&id))
+            .any(|ws| ws.is_urgent())
+    }
+
     /// Split-borrow helper: return `(&mut monitors, &mut pool)` for external callers that iterate
     /// monitors and call mutating `Monitor` methods threading `&mut pool`. Returns `(&mut [], ...)`
     /// if no outputs are connected.
