@@ -5017,9 +5017,24 @@ fn switch_activity_with_tagged_workspace_builds_view_from_pool() {
         "beta's view must include the pre-tagged workspace",
     );
     assert_eq!(
+        beta_view.len(),
+        2,
+        "lift branch shape: [pick, fresh bottom_empty]",
+    );
+    assert_eq!(
+        beta_view.ids()[0],
+        pick,
+        "lift branch puts pick at position 0",
+    );
+    assert_eq!(
+        beta_view.active_position(),
+        0,
+        "active stays on pick, not bottom_empty",
+    );
+    assert_eq!(
         layout.workspaces.len(),
-        pool_size_before,
-        "pre-tagged candidate means no fresh workspace is created",
+        pool_size_before + 1,
+        "lift branch appends one fresh trailing empty so monitor invariants hold",
     );
 
     // Widened pool-keys union includes `pick` once (HashSet dedupes it across seed's
@@ -5103,11 +5118,27 @@ fn switch_activity_tagged_workspace_output_affinity() {
 
     let beta_views = layout.activities.active().views();
 
-    // output2: must contain the pre-tagged id — lift-from-pool, no allocation.
+    // output2: must contain the pre-tagged id with a fresh trailing empty appended
+    // (lift branch — see `ensure_active_views`).
     let out2_view = beta_views.get(&out2).expect("beta must have a view for out2");
     assert!(
         out2_view.ids().contains(&pick),
         "beta's out2 view must include the pre-tagged workspace",
+    );
+    assert_eq!(
+        out2_view.len(),
+        2,
+        "lift branch shape on out2: [pick, fresh bottom_empty]",
+    );
+    assert_eq!(
+        out2_view.ids()[0],
+        pick,
+        "lift branch puts pick at position 0 on out2",
+    );
+    assert_eq!(
+        out2_view.active_position(),
+        0,
+        "active stays on pick, not bottom_empty, on out2",
     );
 
     // output1: must contain exactly one freshly-minted id — allocation branch.
@@ -5119,11 +5150,426 @@ fn switch_activity_tagged_workspace_output_affinity() {
         "out1's bootstrap id must be freshly allocated",
     );
 
-    // Pool grows by exactly one: the fresh workspace for output1.
+    // Pool grows by exactly two: out1's fresh empty + out2's lift-branch trailing empty.
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_before + 2,
+        "fresh empty for out1 + lift-branch trailing empty for out2",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn switch_activity_lift_branch_appends_bottom_empty_for_named_tagged_workspace() {
+    // The lift branch must allocate a fresh trailing empty even when the only
+    // pre-tagged candidate is named — otherwise `Monitor::verify_invariants` trips
+    // "monitor must have an empty workspace in the end" (monitor.rs:1724) the moment
+    // `Layout::verify_invariants` walks the new view. Pre-fix `ensure_active_views`
+    // produced `[named_pick]` (len=1) and panicked on the very first invariant chain.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: Some(1),
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let out_id = layout.monitors[0].output_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    // Tag the named workspace with beta.
+    let pick = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"ws1".to_owned()))
+        .map(|ws| ws.id())
+        .expect("ws1 must exist after AddNamedWorkspace");
+    layout
+        .workspaces
+        .get_mut(&pick)
+        .expect("pick must be a pool key")
+        .activities
+        .insert(beta_id);
+
+    layout.switch_activity(beta_id);
+
+    let beta_view = &layout.activities.active().views()[&out_id];
+    assert_eq!(
+        beta_view.len(),
+        2,
+        "lift branch must append a bottom empty: [named_pick, bottom_empty]",
+    );
+    assert_eq!(
+        beta_view.ids()[0],
+        pick,
+        "the named pre-tagged workspace stays at position 0",
+    );
+    assert_eq!(
+        beta_view.active_position(),
+        0,
+        "active index points at the named pick (no top-empty without EWAF)",
+    );
+    let bottom_id = beta_view.ids()[1];
+    let bottom = layout
+        .workspaces
+        .get(&bottom_id)
+        .expect("bottom id must be a pool key");
+    assert!(!bottom.has_windows(), "trailing bottom must be empty");
+    assert!(bottom.name().is_none(), "trailing bottom must be unnamed");
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn switch_activity_lift_branch_named_tagged_with_ewaf_adds_top_and_bottom_empty() {
+    // When `empty_workspace_above_first` is enabled globally, the lift branch must
+    // bookend the pre-tagged candidate with both a fresh top-empty (to satisfy
+    // monitor.rs:1739-1751 "first must be empty + unnamed" and the "1 or 3+" rule)
+    // and a fresh bottom-empty. The active index must shift to 1 so the named pick
+    // remains selected after switching — landing on the top-empty would be a silent
+    // focus regression.
+    let options = Options {
+        layout: niri_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: Some(1),
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+    let out_id = layout.monitors[0].output_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    let pick = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"ws1".to_owned()))
+        .map(|ws| ws.id())
+        .expect("ws1 must exist after AddNamedWorkspace");
+    layout
+        .workspaces
+        .get_mut(&pick)
+        .expect("pick must be a pool key")
+        .activities
+        .insert(beta_id);
+
+    layout.switch_activity(beta_id);
+
+    let beta_view = &layout.activities.active().views()[&out_id];
+    assert_eq!(
+        beta_view.len(),
+        3,
+        "EWAF lift shape: [top_empty, named_pick, bottom_empty]",
+    );
+    assert_eq!(
+        beta_view.ids()[1],
+        pick,
+        "named pick sits at position 1 between the two fresh empties",
+    );
+    assert_eq!(
+        beta_view.active_position(),
+        1,
+        "active index must shift to 1 so the named pick stays focused under EWAF",
+    );
+    let top = layout
+        .workspaces
+        .get(&beta_view.ids()[0])
+        .expect("top id must be a pool key");
+    assert!(!top.has_windows(), "EWAF top must be empty");
+    assert!(top.name().is_none(), "EWAF top must be unnamed");
+    let bottom = layout
+        .workspaces
+        .get(&beta_view.ids()[2])
+        .expect("bottom id must be a pool key");
+    assert!(!bottom.has_windows(), "trailing bottom must be empty");
+    assert!(bottom.name().is_none(), "trailing bottom must be unnamed");
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn switch_activity_lift_branch_reads_ewaf_from_monitor_not_layout() {
+    // Per-monitor `Rc<Options>` discriminator: the global `self.options` keeps EWAF
+    // disabled, but the monitor's `layout_config` flips it on. `ensure_active_views`
+    // must read `monitors[i].options.layout.empty_workspace_above_first`, not
+    // `self.options.layout.empty_workspace_above_first`. If it reads the global, the
+    // view comes back as `[named_pick, bottom_empty]` (len=2) and trips
+    // monitor.rs:1746-1751 "1 or 3+" the moment `verify_invariants` runs.
+    let layout_part = niri_config::LayoutPart {
+        empty_workspace_above_first: Some(Flag(true)),
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddScaledOutput {
+            id: 1,
+            scale: 1.0,
+            layout_config: Some(Box::new(layout_part)),
+        },
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: Some(1),
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let out_id = layout.monitors[0].output_id();
+
+    // Sanity: global options must NOT have EWAF enabled. Otherwise this test is
+    // vacuous — it would pass whether the implementation reads global or per-monitor.
+    assert!(
+        !layout.options.layout.empty_workspace_above_first,
+        "global EWAF must stay false so the per-monitor capture is what's exercised",
+    );
+    assert!(
+        layout.monitors[0].options.layout.empty_workspace_above_first,
+        "per-monitor EWAF must be true via layout_config merge",
+    );
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    let pick = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"ws1".to_owned()))
+        .map(|ws| ws.id())
+        .expect("ws1 must exist after AddNamedWorkspace");
+    layout
+        .workspaces
+        .get_mut(&pick)
+        .expect("pick must be a pool key")
+        .activities
+        .insert(beta_id);
+
+    layout.switch_activity(beta_id);
+
+    let beta_view = &layout.activities.active().views()[&out_id];
+    assert_eq!(
+        beta_view.len(),
+        3,
+        "per-monitor EWAF must yield [top_empty, named_pick, bottom_empty]",
+    );
+    assert_eq!(
+        beta_view.ids()[1],
+        pick,
+        "named pick sits at position 1 under per-monitor EWAF",
+    );
+    assert_eq!(
+        beta_view.active_position(),
+        1,
+        "active index reflects per-monitor EWAF top-empty prepend",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn switch_activity_lift_branch_per_monitor_ewaf_two_monitors_mixed() {
+    // Two monitors: out1 has EWAF on (via per-monitor layout_config), out2 has EWAF off
+    // (uses default options). Both have a named workspace pre-tagged with beta. Structural
+    // risk: if `ensure_active_views` hoists `mon_options` outside the loop and reads the
+    // first monitor's value for all monitors, the second monitor's view is built with the
+    // wrong bookend discipline — either over-bookending (3 for out2 when 2 is correct) or
+    // under-bookending (2 for out1 when 3 is correct, tripping monitor.rs:1746 "1 or 3+").
+    let layout_part = niri_config::LayoutPart {
+        empty_workspace_above_first: Some(Flag(true)),
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddScaledOutput {
+            id: 1,
+            scale: 1.0,
+            layout_config: Some(Box::new(layout_part)),
+        },
+        Op::AddScaledOutput {
+            id: 2,
+            scale: 1.0,
+            layout_config: None,
+        },
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: Some(1),
+            layout_config: None,
+        },
+        Op::AddNamedWorkspace {
+            ws_name: 2,
+            output_name: Some(2),
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let out1 = layout.monitors[0].output_id();
+    let out2 = layout.monitors[1].output_id();
+
+    // Discriminator sanity: out1 has EWAF on, out2 has EWAF off.
+    assert!(
+        layout.monitors[0].options.layout.empty_workspace_above_first,
+        "out1 must have per-monitor EWAF enabled",
+    );
+    assert!(
+        !layout.monitors[1].options.layout.empty_workspace_above_first,
+        "out2 must have EWAF disabled so the two monitors differ",
+    );
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    // Tag ws1 (bound to out1) and ws2 (bound to out2) with beta.
+    let pick1 = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"ws1".to_owned()))
+        .map(|ws| ws.id())
+        .expect("ws1 must exist");
+    let pick2 = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"ws2".to_owned()))
+        .map(|ws| ws.id())
+        .expect("ws2 must exist");
+    layout
+        .workspaces
+        .get_mut(&pick1)
+        .expect("pick1 must be a pool key")
+        .activities
+        .insert(beta_id);
+    layout
+        .workspaces
+        .get_mut(&pick2)
+        .expect("pick2 must be a pool key")
+        .activities
+        .insert(beta_id);
+
+    layout.switch_activity(beta_id);
+
+    let beta_views = layout.activities.active().views();
+    let view1 = beta_views.get(&out1).expect("beta must have a view for out1");
+    let view2 = beta_views.get(&out2).expect("beta must have a view for out2");
+
+    // out1 (EWAF on): must be [top_empty, pick1, bottom_empty] — len 3, active at 1.
+    assert_eq!(
+        view1.len(),
+        3,
+        "out1 with EWAF: lift shape must be [top_empty, pick1, bottom_empty]",
+    );
+    assert_eq!(
+        view1.ids()[1],
+        pick1,
+        "pick1 sits at position 1 under per-monitor EWAF",
+    );
+    assert_eq!(
+        view1.active_position(),
+        1,
+        "active index must be 1 (top-empty prepended) for out1",
+    );
+
+    // out2 (EWAF off): must be [pick2, bottom_empty] — len 2, active at 0.
+    assert_eq!(
+        view2.len(),
+        2,
+        "out2 without EWAF: lift shape must be [pick2, bottom_empty]",
+    );
+    assert_eq!(
+        view2.ids()[0],
+        pick2,
+        "pick2 sits at position 0 (no top-empty on out2)",
+    );
+    assert_eq!(
+        view2.active_position(),
+        0,
+        "active index must be 0 for out2 (no top-empty prepend)",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn switch_activity_lift_branch_sticky_workspace_is_lifted() {
+    // `create_activity` (mod.rs:4194-4205) auto-tags every sticky workspace with the
+    // new activity's id, making sticky workspaces permanent lift candidates. Switching
+    // to that activity must lift the sticky workspace into its view with correct bookends,
+    // not skip it. Structural risk: a filter bug that excludes sticky workspaces from the
+    // `tagged` collection would make the lift branch silently fall through to the fresh
+    // branch, producing a single empty view instead of [sticky_ws, bottom_empty].
+    //
+    // Note: we use direct pool mutation (`is_sticky` is pub(super)) instead of
+    // `create_activity` to isolate the `ensure_active_views` lift-branch path from the
+    // `create_activity` auto-tagging path.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: Some(1),
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let out_id = layout.monitors[0].output_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    // Mark ws1 as sticky and tag it with beta — simulating what create_activity does
+    // for sticky workspaces, but exercising ensure_active_views in isolation.
+    let pick = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"ws1".to_owned()))
+        .map(|ws| ws.id())
+        .expect("ws1 must exist after AddNamedWorkspace");
+    {
+        let ws = layout
+            .workspaces
+            .get_mut(&pick)
+            .expect("pick must be a pool key");
+        ws.is_sticky = true;
+        ws.activities.insert(beta_id);
+    }
+
+    let pool_size_before = layout.workspaces.len();
+
+    layout.switch_activity(beta_id);
+
+    let beta_view = &layout.activities.active().views()[&out_id];
+
+    // Lift branch must include the sticky workspace and append a fresh bottom empty.
+    assert_eq!(
+        beta_view.len(),
+        2,
+        "sticky lift shape: [sticky_ws1, bottom_empty]",
+    );
+    assert_eq!(
+        beta_view.ids()[0],
+        pick,
+        "sticky workspace sits at position 0",
+    );
+    assert_eq!(
+        beta_view.active_position(),
+        0,
+        "active index points at the sticky workspace (no EWAF)",
+    );
     assert_eq!(
         layout.workspaces.len(),
         pool_size_before + 1,
-        "exactly one new pool entry for the fresh out1 workspace",
+        "lift branch appends exactly one fresh trailing empty",
     );
 
     layout.verify_invariants();

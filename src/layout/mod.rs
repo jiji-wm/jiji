@@ -4085,20 +4085,25 @@ impl<W: LayoutElement> Layout<W> {
     // output reconnected while the activity was dormant. We either lift pre-tagged
     // workspaces from the pool into a fresh view, or allocate a single empty workspace.
     //
-    // Borrow discipline: we read `&self.monitors` once into a Vec (pairs of OutputId +
-    // cloned `Output`), drop that borrow, and only then take `&mut self.activities`
-    // (and occasionally `&mut self.workspaces` when allocating). No overlapping borrows.
+    // Borrow discipline: we read `&self.monitors` once into a Vec of triples
+    // (OutputId, cloned `Output`, cloned per-monitor `Rc<Options>`), drop that borrow,
+    // and only then take `&mut self.activities` (and occasionally `&mut self.workspaces`
+    // when allocating). The `Rc<Options>` is captured per-monitor because the lift branch
+    // below mirrors `Monitor::new`'s bookend allocation discipline (monitor.rs:286-381) —
+    // both reads of `empty_workspace_above_first` and every `Workspace::new` ctor must
+    // see the per-monitor merged options, not the global `self.options`. Using
+    // `self.options` would silently violate `verify_invariants`'s EWAF first/last-empty
+    // checks for outputs whose `layout_config` flips the flag. No overlapping borrows.
     pub(super) fn ensure_active_views(&mut self) {
-        let connected: Vec<(OutputId, Output)> = self
+        let connected: Vec<(OutputId, Output, Rc<Options>)> = self
             .monitors
             .iter()
-            .map(|m| (m.output_id(), m.output.clone()))
+            .map(|m| (m.output_id(), m.output.clone(), m.options.clone()))
             .collect();
         let clock = self.clock.clone();
-        let options = self.options.clone();
         let target = self.activities.active_id();
 
-        for (output_id, output) in connected {
+        for (output_id, output, mon_options) in connected {
             if self
                 .activities
                 .active()
@@ -4123,13 +4128,17 @@ impl<W: LayoutElement> Layout<W> {
             // (Phase 1b/2). See DD §5.3 step 3.
             tagged.sort_by_key(|id| id.get());
 
+            let ewaf = mon_options.layout.empty_workspace_above_first;
+
             let view = if tagged.is_empty() {
-                // Mirrors Monitor::new trailing-empty allocation at monitor.rs:286-381.
+                // Fresh branch: a single trailing empty satisfies all EWAF invariants at
+                // len=1. Mirrors `Monitor::new`'s trailing-empty allocation
+                // (monitor.rs:286-381).
                 let ws = Workspace::new(
                     &output,
                     HashSet::from([target]),
                     clock.clone(),
-                    options.clone(),
+                    mon_options.clone(),
                 );
                 let id = ws.id();
                 assert!(
@@ -4138,7 +4147,46 @@ impl<W: LayoutElement> Layout<W> {
                 );
                 WorkspaceView::new(vec![id], 0)
             } else {
-                WorkspaceView::new(tagged, 0)
+                // Lift branch: pre-tagged candidates form the body. Append a fresh trailing
+                // empty so the "last must be empty" (monitor.rs:1724) and "last must be
+                // unnamed" (monitor.rs:1735) invariants hold. Under EWAF for this monitor,
+                // also prepend a fresh leading empty so the "first must be empty" (1728),
+                // "first must be unnamed" (1739), and "1 or 3+" (1746) invariants hold;
+                // the active index becomes 1 so the first lifted workspace stays selected.
+                let bottom = Workspace::new(
+                    &output,
+                    HashSet::from([target]),
+                    clock.clone(),
+                    mon_options.clone(),
+                );
+                let bottom_id = bottom.id();
+                assert!(
+                    self.workspaces.insert(bottom_id, bottom).is_none(),
+                    "fresh id must be unique",
+                );
+
+                let mut ids = tagged;
+                let mut active_idx = 0usize;
+
+                if ewaf {
+                    let top = Workspace::new(
+                        &output,
+                        HashSet::from([target]),
+                        clock.clone(),
+                        mon_options.clone(),
+                    );
+                    let top_id = top.id();
+                    assert!(
+                        self.workspaces.insert(top_id, top).is_none(),
+                        "fresh id must be unique",
+                    );
+                    ids.insert(0, top_id);
+                    active_idx = 1;
+                }
+
+                ids.push(bottom_id);
+
+                WorkspaceView::new(ids, active_idx)
             };
 
             // Explicit contains_key → insert rather than `.entry().or_insert_with()`: the
