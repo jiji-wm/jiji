@@ -3858,17 +3858,29 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         let mon_idx = if let Some(window) = window {
+            // The id-based action lookup in `input/mod.rs` uses the
+            // pool-spanning `windows_all()`, so `window` may name a
+            // window on a workspace bound to a dormant activity. This
+            // active-view walk can't reach it; silently drop with a
+            // `warn!` — real cross-activity move semantics are
+            // designed in DD §5.18.
             let views = self.activities.active().views();
             let pool = &self.workspaces;
-            self.monitors
-                .iter()
-                .position(|mon| {
-                    let view = views
-                        .get(&OutputId::new(&mon.output))
-                        .expect("connected output must have a view in the active activity");
-                    mon.has_window(pool, view, window)
-                })
-                .unwrap()
+            let Some(mon_idx) = self.monitors.iter().position(|mon| {
+                let view = views
+                    .get(&OutputId::new(&mon.output))
+                    .expect("connected output must have a view in the active activity");
+                mon.has_window(pool, view, window)
+            }) else {
+                warn!(
+                    "move_to_workspace: window {:?} is not on the active activity; \
+                     cross-activity move-by-id semantics are deferred (DD §5.18). \
+                     Dropping action.",
+                    window,
+                );
+                return;
+            };
+            mon_idx
         } else {
             self.active_monitor_idx
         };
@@ -5777,11 +5789,15 @@ impl<W: LayoutElement> Layout<W> {
             .unwrap();
 
         let (mon_idx, ws_idx) = if let Some(window) = window {
+            // Mirrors the gate in `move_to_workspace`: the id-based
+            // action lookup may resolve a window on a workspace bound
+            // to a dormant activity, which this active-view-only
+            // walk cannot reach. Silently drop with a `warn!` —
+            // cross-activity move-by-id semantics are designed in DD
+            // §5.18.
             let views = self.activities.active().views();
-            self.monitors
-                .iter()
-                .enumerate()
-                .find_map(|(mon_idx, mon)| {
+            let Some((mon_idx, ws_idx)) =
+                self.monitors.iter().enumerate().find_map(|(mon_idx, mon)| {
                     views
                         .get(&OutputId::new(&mon.output))
                         .expect("connected output must have a view in the active activity")
@@ -5794,7 +5810,16 @@ impl<W: LayoutElement> Layout<W> {
                         })
                         .map(|ws_idx| (mon_idx, ws_idx))
                 })
-                .unwrap()
+            else {
+                warn!(
+                    "move_to_output: window {:?} is not on the active activity; \
+                     cross-activity move-by-id semantics are deferred (DD §5.18). \
+                     Dropping action.",
+                    window,
+                );
+                return;
+            };
+            (mon_idx, ws_idx)
         } else {
             let mon_idx = self.active_monitor_idx;
             let mon = &self.monitors[mon_idx];

@@ -11,6 +11,8 @@ mod find_window_cross_activity;
 mod floating;
 mod fullscreen;
 mod layer_shell;
+mod move_window_to_monitor_by_id_cross_activity;
+mod move_window_to_workspace_by_id_cross_activity;
 mod remove_output;
 mod toggle_windowed_fullscreen_cross_activity;
 mod transactions;
