@@ -7368,6 +7368,103 @@ fn destroy_workspaces_cross_activity_drops_single_entry_view() {
     );
 }
 
+// Regression: `remove_output` must flush doomed empty bookends through
+// `destroy_workspaces_cross_activity` so that other activities' views that
+// reference those bookends are also patched. Without the flush the pool and
+// view fall out of sync and `verify_invariants` trips.
+#[test]
+fn take_workspace_ids_doomed_flushed_from_other_activity_view_on_remove_output() {
+    // One output, one window. Alpha's view: `[W1 (active, pos 0), E_bottom]`.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let mon_out = layout.monitors[0].output_id();
+    let mon_output = layout.monitors[0].output.clone();
+
+    // Grab the trailing empty bookend id — this is what `take_workspace_ids`
+    // will peel off as a doomed id when the output disconnects.
+    let alpha_view = layout.active_view(&mon_out);
+    let e_bottom_id = *alpha_view.ids().last().expect("view must have a trailing bookend");
+    assert!(
+        !layout
+            .workspaces
+            .get(&e_bottom_id)
+            .expect("bookend in pool")
+            .has_windows_or_name(),
+        "bookend must be empty and unnamed",
+    );
+
+    // Create Beta and seed its view with [extra_spare, e_bottom_id] so the
+    // bookend appears in a second activity's view. The extra spare keeps Beta's
+    // view length >= 2 so the doomed path hits remove_at, not the single-entry
+    // drop (that branch is covered by the `drops_single_entry_view` test).
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    let beta_spare_id = {
+        let spare = Workspace::<TestWindow>::new_no_outputs(
+            HashSet::from([beta_id]),
+            layout.clock.clone(),
+            layout.options.clone(),
+        );
+        let id = spare.id();
+        layout.workspaces.insert(id, spare);
+        layout
+            .workspaces
+            .get_mut(&id)
+            .expect("spare must be in pool")
+            .bind_output(&mon_output);
+        id
+    };
+    // Add Beta membership to the bookend so destroy_workspaces_cross_activity
+    // can remove it from the pool cleanly (the pool.remove assert fires on
+    // workspaces without any remaining owner).
+    layout
+        .workspaces
+        .get_mut(&e_bottom_id)
+        .expect("bookend in pool")
+        .activities
+        .insert(beta_id);
+    layout
+        .activities
+        .get_mut(beta_id)
+        .expect("beta must exist")
+        .views_mut()
+        .insert(
+            mon_out.clone(),
+            WorkspaceView::new(vec![beta_spare_id, e_bottom_id], 0),
+        );
+
+    // Disconnect the output. `remove_output` → `take_workspace_ids` returns
+    // `e_bottom_id` as a doomed bookend and must flush it through
+    // `destroy_workspaces_cross_activity`, which patches Beta's view.
+    layout.remove_output(&mon_output);
+
+    // Pool must not contain the doomed bookend.
+    assert!(
+        !layout.workspace_pool().contains_key(&e_bottom_id),
+        "doomed bookend must be gone from the pool after remove_output",
+    );
+    // Beta's view must have e_bottom_id patched out.
+    let beta_view_ids: Vec<_> = layout
+        .activities
+        .get(beta_id)
+        .expect("beta must exist")
+        .views()
+        .values()
+        .flat_map(|v| v.ids().iter().copied())
+        .collect();
+    assert!(
+        !beta_view_ids.contains(&e_bottom_id),
+        "beta's view must not contain the doomed bookend after remove_output",
+    );
+    layout.verify_invariants();
+}
+
 // `advance_animations` runs `clean_up_workspaces_on` inside a triple-borrow
 // scope and must flush all pruned ids through `destroy_workspaces_cross_activity`
 // after the scope closes — not inline per iteration, which would re-borrow
