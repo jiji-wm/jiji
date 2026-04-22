@@ -851,7 +851,7 @@ impl State {
                 }
             }
             Action::CloseWindowById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 if let Some((_, mapped)) = window {
                     mapped.toplevel().send_close();
                 }
@@ -865,7 +865,7 @@ impl State {
                 }
             }
             Action::FullscreenWindowById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_fullscreen(&window);
@@ -882,7 +882,7 @@ impl State {
                 }
             }
             Action::ToggleWindowedFullscreenById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_windowed_fullscreen(&window);
@@ -1057,7 +1057,7 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::ConsumeOrExpelWindowLeftById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.consume_or_expel_window_left(Some(&window));
@@ -1073,7 +1073,7 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::ConsumeOrExpelWindowRightById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri
@@ -1371,7 +1371,7 @@ impl State {
                 reference,
                 focus,
             } => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     if let Some((output, index)) =
@@ -1725,14 +1725,14 @@ impl State {
                 self.niri.layout.toggle_window_width(None, false);
             }
             Action::SwitchPresetWindowWidthById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_width(Some(&window), true);
                 }
             }
             Action::SwitchPresetWindowWidthBackById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_width(Some(&window), false);
@@ -1745,14 +1745,14 @@ impl State {
                 self.niri.layout.toggle_window_height(None, false);
             }
             Action::SwitchPresetWindowHeightById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_height(Some(&window), true);
                 }
             }
             Action::SwitchPresetWindowHeightBackById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_height(Some(&window), false);
@@ -1769,7 +1769,7 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::CenterWindowById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.center_window(Some(&window));
@@ -1794,7 +1794,7 @@ impl State {
                 }
             }
             Action::MaximizeWindowToEdgesById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_maximized(&window);
@@ -1979,7 +1979,7 @@ impl State {
             }
             Action::MoveWindowToMonitorById { id, output } => {
                 if let Some(output) = self.niri.output_by_name_match(&output).cloned() {
-                    let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                    let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                     let window = window.map(|(_, m)| m.window.clone());
 
                     if let Some(window) = window {
@@ -2125,7 +2125,7 @@ impl State {
                 }
             }
             Action::SetWindowWidthById { id, change } => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_width(Some(&window), change);
@@ -2142,7 +2142,7 @@ impl State {
                 }
             }
             Action::SetWindowHeightById { id, change } => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_height(Some(&window), change);
@@ -2152,7 +2152,7 @@ impl State {
                 self.niri.layout.reset_window_height(None);
             }
             Action::ResetWindowHeightById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.reset_window_height(Some(&window));
@@ -2254,7 +2254,7 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::ToggleWindowFloatingById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_floating(Some(&window));
@@ -2268,7 +2268,7 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::MoveWindowToFloatingById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_floating(Some(&window), true);
@@ -2282,7 +2282,7 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::MoveWindowToTilingById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_floating(Some(&window), false);
@@ -2310,7 +2310,7 @@ impl State {
             }
             Action::MoveFloatingWindowById { id, x, y } => {
                 let window = if let Some(id) = id {
-                    let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                    let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
                     let window = window.map(|(_, m)| m.window.clone());
                     if window.is_none() {
                         return Ok(());
@@ -2367,7 +2367,7 @@ impl State {
             }
             Action::SetDynamicCastWindowById(id) => {
                 let layout = &self.niri.layout;
-                if layout.windows().any(|(_, mapped)| mapped.id().get() == id) {
+                if layout.windows_all().any(|(_, mapped)| mapped.id().get() == id) {
                     self.set_dynamic_cast_target(CastTarget::Window { id });
                 }
             }
