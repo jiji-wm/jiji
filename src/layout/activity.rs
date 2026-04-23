@@ -348,6 +348,41 @@ impl fmt::Display for RemoveActivityError {
 
 impl std::error::Error for RemoveActivityError {}
 
+/// Validation failure for runtime activity rename via [`Activities::rename_runtime`]
+/// / `Layout::rename_activity`. Each variant corresponds to one of the rejection
+/// rules the outer `Layout::rename_activity` and `rename_runtime` evaluate before
+/// any mutation (DD §5.14). Callers surface them as log messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameActivityError {
+    /// No activity in the pool matches the supplied reference.
+    NotFound,
+    /// Target is flagged `is_config_declared` — config-declared activities are
+    /// renamed by editing the config file and reloading, not via the runtime
+    /// action.
+    ConfigDeclared,
+    /// The requested new name was empty after trimming whitespace.
+    EmptyName,
+    /// The requested new name collides (case-insensitively) with a *different*
+    /// activity's name. Renaming to a case variant of the target's own
+    /// current name succeeds.
+    DuplicateName,
+}
+
+impl fmt::Display for RenameActivityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("activity not found"),
+            Self::ConfigDeclared => {
+                f.write_str("activity is config-declared; edit config and reload to rename")
+            }
+            Self::EmptyName => f.write_str("activity name must not be empty"),
+            Self::DuplicateName => f.write_str("activity name already exists"),
+        }
+    }
+}
+
+impl std::error::Error for RenameActivityError {}
+
 /// Ordered pool of [`Activity`]s plus active / previous cursors.
 ///
 /// Invariants:
@@ -416,9 +451,9 @@ impl Activities {
 
     /// Insert an additional activity into the pool, preserving the
     /// id-equals-key invariant. The only other inserter is [`Self::new`]
-    /// (seed); runtime multi-activity population will later arrive via the
-    /// `CreateActivity` action (Phase 1b scope), and config-declared
-    /// multi-activity population arrives via [`Self::from_config_or_default`].
+    /// (seed); runtime multi-activity population arrives via the
+    /// `CreateActivity` action, and config-declared multi-activity population
+    /// arrives via [`Self::from_config_or_default`].
     ///
     /// Panics if `activity.id()` is already present in the pool — ids are
     /// monotonic and minted by `ActivityId::next()`, so a collision indicates
@@ -466,6 +501,50 @@ impl Activities {
         let id = activity.id();
         self.insert(activity);
         Ok(id)
+    }
+
+    /// Validate `name` and rename the activity identified by `id` in place.
+    ///
+    /// Rejection rules (both are pure inspections; on either error the pool is
+    /// left untouched):
+    ///
+    /// - `name.trim().is_empty()` → [`RenameActivityError::EmptyName`]. Mirrors
+    ///   the trim-then-check rule in [`Self::create_runtime`].
+    /// - Any *other* existing activity's name equals `name` case-insensitively
+    ///   (via `str::eq_ignore_ascii_case`) → [`RenameActivityError::DuplicateName`].
+    ///   The target activity itself is excluded from the scan, so renaming to a
+    ///   case variant of its current name (e.g. "Beta" → "beta") or to its
+    ///   exact current name (no-op) succeeds.
+    ///
+    /// Config-declared and not-found checks are enforced by the outer
+    /// [`Layout::rename_activity`] wrapper; this method mutates whatever
+    /// activity `id` resolves to and trusts `id` to be a live key in the pool.
+    ///
+    /// Panics if `id` is not a live key in the map — caller must resolve before
+    /// calling this method.
+    pub(super) fn rename_runtime(
+        &mut self,
+        id: ActivityId,
+        name: String,
+    ) -> Result<(), RenameActivityError> {
+        if name.trim().is_empty() {
+            return Err(RenameActivityError::EmptyName);
+        }
+        // Exclude the target id from the collision scan so that renaming to a
+        // case variant of the target's own name (or its exact current name)
+        // succeeds — otherwise every rename would self-collide.
+        let is_dup = self
+            .map
+            .iter()
+            .any(|(other_id, other)| *other_id != id && other.name().eq_ignore_ascii_case(&name));
+        if is_dup {
+            return Err(RenameActivityError::DuplicateName);
+        }
+        self.map
+            .get_mut(&id)
+            .expect("id must be a live key in the map — caller must resolve before rename")
+            .set_name(name);
+        Ok(())
     }
 
     pub fn active(&self) -> &Activity {

@@ -57,7 +57,7 @@ use tile::{Tile, TileRenderElement};
 use workspace::{WorkspaceAddWindowTarget, WorkspaceId};
 
 use self::activity::{Activities, Activity, ActivityId, WorkspaceView};
-pub use self::activity::{CreateActivityError, RemoveActivityError};
+pub use self::activity::{CreateActivityError, RemoveActivityError, RenameActivityError};
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{Monitor, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
@@ -4473,6 +4473,55 @@ impl<W: LayoutElement> Layout<W> {
         // previous = Some(target)) and any non-active case where previous
         // happened to already equal target.
         let _ = self.activities.remove(target);
+
+        #[cfg(debug_assertions)]
+        self.verify_invariants();
+
+        Ok(target)
+    }
+
+    /// Rename the runtime activity identified by `reference`, returning its id
+    /// on success.
+    ///
+    /// Rejection rules (all evaluated before any mutation):
+    ///
+    /// - Unknown reference → [`RenameActivityError::NotFound`].
+    /// - Target is `is_config_declared` → [`RenameActivityError::ConfigDeclared`].
+    /// - `name.trim().is_empty()` → [`RenameActivityError::EmptyName`].
+    /// - `name` collides case-insensitively with a *different* activity's name
+    ///   → [`RenameActivityError::DuplicateName`]. Renaming to a case variant
+    ///   of the target's own current name (or its exact current name)
+    ///   succeeds — the target is excluded from the duplicate scan.
+    ///
+    /// Precedence on overlapping violations:
+    /// `NotFound` > `ConfigDeclared` > `EmptyName` / `DuplicateName`. The
+    /// outer check rejects config-declared before delegating to
+    /// [`Activities::rename_runtime`], so an empty or duplicate rename of a
+    /// config-declared activity surfaces as `ConfigDeclared`, never as the
+    /// inner validation error.
+    ///
+    /// Rename is pure metadata: no view patching, no cascade, no workspace-set
+    /// changes. The [`Activities`] pool's `active` / `previous` cursors are
+    /// unaffected.
+    pub(crate) fn rename_activity(
+        &mut self,
+        reference: &ActivityReferenceArg,
+        name: String,
+    ) -> Result<ActivityId, RenameActivityError> {
+        let target = self
+            .resolve_activity_ref(reference)
+            .ok_or(RenameActivityError::NotFound)?;
+
+        if self
+            .activities
+            .get(target)
+            .expect("resolve_activity_ref returned a live id")
+            .is_config_declared()
+        {
+            return Err(RenameActivityError::ConfigDeclared);
+        }
+
+        self.activities.rename_runtime(target, name)?;
 
         #[cfg(debug_assertions)]
         self.verify_invariants();

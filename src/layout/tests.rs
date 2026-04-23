@@ -6778,6 +6778,317 @@ fn create_activity_verify_invariants_empty_pool() {
 }
 
 #[test]
+fn rename_activity_valid_name_succeeds() {
+    // Happy path: rename_activity must update the target's name, leave the
+    // active cursor untouched, and satisfy verify_invariants.
+    let mut layout = Layout::<TestWindow>::default();
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create must succeed");
+    let seed_id = layout.active_activity_id();
+    let prev_before = layout.activities.previous_id();
+
+    let returned = layout
+        .rename_activity(&ActivityReferenceArg::Id(beta_id.get()), "Gamma".to_owned())
+        .expect("valid rename must succeed");
+    assert_eq!(returned, beta_id, "rename must return the resolved id");
+
+    let renamed = layout
+        .activities
+        .get(beta_id)
+        .expect("renamed activity must still be in the pool");
+    assert_eq!(renamed.name(), "Gamma");
+    assert_eq!(
+        layout.active_activity_id(),
+        seed_id,
+        "rename must not flip the active cursor",
+    );
+    assert_eq!(
+        layout.activities.previous_id(),
+        prev_before,
+        "rename must not touch the previous cursor",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn rename_activity_empty_name_errs() {
+    // Empty name → EmptyName; pool unchanged, name unchanged.
+    let mut layout = Layout::<TestWindow>::default();
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create must succeed");
+
+    let err = layout
+        .rename_activity(&ActivityReferenceArg::Id(beta_id.get()), String::new())
+        .expect_err("empty name must be rejected");
+    assert_eq!(err, RenameActivityError::EmptyName);
+    assert_eq!(
+        layout
+            .activities
+            .get(beta_id)
+            .expect("beta still present")
+            .name(),
+        "Beta",
+        "rejected rename must not mutate the name",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn rename_activity_whitespace_only_name_errs() {
+    // Whitespace-only name trims to empty and must be rejected as EmptyName
+    // (not DuplicateName). Pins the trim-then-check rule.
+    let mut layout = Layout::<TestWindow>::default();
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create must succeed");
+
+    let err = layout
+        .rename_activity(&ActivityReferenceArg::Id(beta_id.get()), "   ".to_owned())
+        .expect_err("whitespace-only name must be rejected");
+    assert_eq!(err, RenameActivityError::EmptyName);
+}
+
+#[test]
+fn rename_activity_duplicate_name_errs_case_insensitive() {
+    // Two activities Beta + Gamma. Attempting to rename Beta to "GAMMA"
+    // must collide case-insensitively with Gamma's existing name.
+    let mut layout = Layout::<TestWindow>::default();
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create must succeed");
+    layout
+        .create_activity("Gamma".to_owned())
+        .expect("create must succeed");
+
+    let err = layout
+        .rename_activity(&ActivityReferenceArg::Id(beta_id.get()), "GAMMA".to_owned())
+        .expect_err("case-insensitive collision must be rejected");
+    assert_eq!(err, RenameActivityError::DuplicateName);
+    assert_eq!(
+        layout
+            .activities
+            .get(beta_id)
+            .expect("beta still present")
+            .name(),
+        "Beta",
+        "rejected rename must not mutate the name",
+    );
+}
+
+#[test]
+fn rename_activity_config_declared_errs() {
+    // Config-declared activities cannot be renamed at runtime (mirrors the
+    // remove policy — edit config + reload instead).
+    let cfg = vec![
+        niri_config::Activity {
+            name: niri_config::ActivityName("Work".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Personal".to_owned()),
+        },
+    ];
+    #[allow(clippy::field_reassign_with_default)]
+    let mut layout = {
+        let mut layout = Layout::<TestWindow>::default();
+        layout.activities = super::activity::Activities::from_config_or_default(&cfg);
+        layout
+    };
+    let work_id = layout.active_activity_id();
+
+    let err = layout
+        .rename_activity(&ActivityReferenceArg::Id(work_id.get()), "Office".to_owned())
+        .expect_err("config-declared rename must err");
+    assert_eq!(err, RenameActivityError::ConfigDeclared);
+    assert_eq!(
+        layout
+            .activities
+            .get(work_id)
+            .expect("work still present")
+            .name(),
+        "Work",
+        "rejected rename must not mutate the name",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn rename_activity_not_found_errs() {
+    // Unknown id → NotFound. Uses u64::MAX (never minted by ActivityId::next).
+    let mut layout = Layout::<TestWindow>::default();
+
+    let err = layout
+        .rename_activity(&ActivityReferenceArg::Id(u64::MAX), "Whatever".to_owned())
+        .expect_err("unknown id must err");
+    assert_eq!(err, RenameActivityError::NotFound);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn rename_activity_self_same_name_is_noop() {
+    // Renaming an activity to its exact current name must succeed (Ok(id))
+    // rather than self-colliding in the duplicate scan. Load-bearing for the
+    // "exclude self from dup scan" invariant.
+    let mut layout = Layout::<TestWindow>::default();
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create must succeed");
+
+    let returned = layout
+        .rename_activity(&ActivityReferenceArg::Id(beta_id.get()), "Beta".to_owned())
+        .expect("self-same-name rename must succeed");
+    assert_eq!(returned, beta_id);
+    assert_eq!(
+        layout
+            .activities
+            .get(beta_id)
+            .expect("beta still present")
+            .name(),
+        "Beta",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn rename_activity_self_case_change_succeeds() {
+    // Renaming "Beta" → "beta" on the same activity must succeed — the
+    // duplicate scan must exclude the target id, otherwise every case-change
+    // rename would self-collide. Regression pin against a future "simplify"
+    // that accidentally reuses create_runtime's uniform scan.
+    let mut layout = Layout::<TestWindow>::default();
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create must succeed");
+
+    let returned = layout
+        .rename_activity(&ActivityReferenceArg::Id(beta_id.get()), "beta".to_owned())
+        .expect("self case-change rename must succeed");
+    assert_eq!(returned, beta_id);
+    assert_eq!(
+        layout
+            .activities
+            .get(beta_id)
+            .expect("beta still present")
+            .name(),
+        "beta",
+        "rename must actually persist the new casing",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn rename_activity_does_not_touch_views_or_workspace_sets() {
+    // Rename is pure metadata: every workspace's `activities` set and every
+    // activity's `views` map must be bitwise unchanged after a rename.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    // Flip one workspace sticky so create_activity unions beta into it — this
+    // ensures the post-rename workspace sets contain multiple activity ids, so
+    // a regression that accidentally mutates the sets is observable.
+    let sticky_id = {
+        let sticky_id = layout
+            .workspaces
+            .values()
+            .find(|ws| ws.output_id() == Some(&mon_out))
+            .expect("test precondition: at least one workspace bound to the output")
+            .id();
+        let sticky = layout
+            .workspaces
+            .get_mut(&sticky_id)
+            .expect("sticky candidate must be in the pool");
+        sticky.is_sticky = true;
+        sticky.activities = HashSet::from([seed_id]);
+        sticky_id
+    };
+
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create must succeed");
+
+    // Snapshot the state we expect to be preserved.
+    let workspace_sets_before: HashMap<WorkspaceId, HashSet<ActivityId>> = layout
+        .workspaces
+        .iter()
+        .map(|(id, ws)| (*id, ws.activities().clone()))
+        .collect();
+    // `WorkspaceView` doesn't derive `PartialEq` — project to a structural
+    // tuple (ids, active, previous) that captures every observable field and
+    // is `Eq`-comparable.
+    type ViewProjection = (Vec<WorkspaceId>, WorkspaceId, Option<WorkspaceId>);
+    fn project_views(a: &super::activity::Activity) -> HashMap<OutputId, ViewProjection> {
+        a.views()
+            .iter()
+            .map(|(out, v)| (out.clone(), (v.ids().to_vec(), v.active(), v.previous())))
+            .collect()
+    }
+    let views_before: HashMap<ActivityId, HashMap<OutputId, ViewProjection>> = layout
+        .activities
+        .iter()
+        .map(|a| (a.id(), project_views(a)))
+        .collect();
+
+    layout
+        .rename_activity(&ActivityReferenceArg::Id(beta_id.get()), "Gamma".to_owned())
+        .expect("valid rename must succeed");
+
+    // Every workspace's activities set must be bitwise unchanged.
+    for (ws_id, set_before) in &workspace_sets_before {
+        let set_after = layout
+            .workspaces
+            .get(ws_id)
+            .expect("workspace must still be in the pool")
+            .activities();
+        assert_eq!(
+            set_after, set_before,
+            "rename must not touch workspace {ws_id:?}'s activities set",
+        );
+    }
+
+    // Every activity's views map must be bitwise unchanged.
+    for (act_id, views_before_one) in &views_before {
+        let after = project_views(
+            layout
+                .activities
+                .get(*act_id)
+                .expect("activity must still be in the pool"),
+        );
+        assert_eq!(
+            &after, views_before_one,
+            "rename must not touch activity {act_id:?}'s views",
+        );
+    }
+
+    // Sanity: the sticky workspace still lists both ids (seed + beta).
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&sticky_id)
+            .expect("sticky workspace still in pool")
+            .activities(),
+        &HashSet::from([seed_id, beta_id]),
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
 fn remove_activity_unknown_reference_errs_not_found() {
     // Unknown name → NotFound; pool unchanged, invariants preserved.
     let mut layout = Layout::<TestWindow>::default();

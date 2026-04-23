@@ -396,6 +396,8 @@ pub enum Action {
     #[knuffel(skip)]
     RemoveActivity(ActivityReference),
     #[knuffel(skip)]
+    RenameActivity(ActivityReference, String),
+    #[knuffel(skip)]
     SwitchActivity(ActivityReference),
     SwitchActivityPrevious,
 }
@@ -711,6 +713,9 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::LoadConfigFile { path } => Self::LoadConfigFile(path),
             niri_ipc::Action::CreateActivity { name } => Self::CreateActivity(name),
             niri_ipc::Action::RemoveActivity { activity } => Self::RemoveActivity(activity.into()),
+            niri_ipc::Action::RenameActivity { activity, name } => {
+                Self::RenameActivity(activity.into(), name)
+            }
             niri_ipc::Action::SwitchActivity { activity } => Self::SwitchActivity(activity.into()),
             niri_ipc::Action::SwitchActivityPrevious {} => Self::SwitchActivityPrevious,
             // niri_ipc::Action is #[non_exhaustive]: any new variant added to

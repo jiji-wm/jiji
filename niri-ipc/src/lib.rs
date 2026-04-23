@@ -994,6 +994,29 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
         activity: ActivityReferenceArg,
     },
+    /// Rename a runtime activity. Errors if the referenced activity is not
+    /// found. Errors for config-declared activities — to rename those, edit
+    /// the config file and trigger a reload.
+    ///
+    /// Errors if `name` is empty (after trimming whitespace) or if it
+    /// collides case-insensitively with another activity's name. Renaming
+    /// an activity to a case variant of its *own* current name succeeds
+    /// (the target activity is excluded from the collision scan).
+    ///
+    /// Rename is runtime-only: the activity's name is updated in the live
+    /// pool, but no persistence occurs. On the next config reload, a
+    /// matching `activity "NewName"` config entry (if any) promotes this
+    /// runtime activity to config-declared by name match.
+    ///
+    /// Returns `Response::Handled`. Event-stream emission for activity rename
+    /// is not yet wired.
+    RenameActivity {
+        /// Activity to rename.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
+        activity: ActivityReferenceArg,
+        /// New name for the activity.
+        name: String,
+    },
     /// Switch to an activity.
     SwitchActivity {
         /// Activity to switch to.
@@ -1760,8 +1783,8 @@ pub enum Event {
     /// Sent on initial event stream connection with full state, and after
     /// bulk operations like config reload that add or remove multiple
     /// activities. Individual lifecycle actions (`CreateActivity`,
-    /// `RemoveActivity`, `RenameActivity` (Phase 1b)) emit per-activity
-    /// events instead; those do not emit [`Event::ActivitiesChanged`].
+    /// `RemoveActivity`, `RenameActivity`) emit per-activity events instead;
+    /// those do not emit [`Event::ActivitiesChanged`].
     ///
     /// **Phase 1a stub:** not yet emitted anywhere — variant exists so
     /// `#[non_exhaustive]` consumers can pattern-match on it today. Emission
@@ -2392,6 +2415,37 @@ mod tests {
         );
         let parsed: Workspace = serde_json::from_str(&json).expect("deserialize Workspace");
         assert_eq!(parsed, ws_with_activities);
+    }
+
+    #[test]
+    fn activity_rename_action_roundtrips_serde() {
+        // Pin both `ActivityReferenceArg` arms through serde for the
+        // `RenameActivity` action. Covers id-ref and name-ref in a single
+        // test — a field rename / tag change on either arm would break the
+        // round-trip and surface here. `Action` does not derive `PartialEq`,
+        // so compare via re-serialize: if the parsed round-trip yields the
+        // same JSON, the structure was preserved exactly.
+        let by_id = Action::RenameActivity {
+            activity: ActivityReferenceArg::Id(7),
+            name: "NewName".to_owned(),
+        };
+        let json = serde_json::to_string(&by_id).expect("serialize by-id");
+        let parsed: Action = serde_json::from_str(&json).expect("deserialize by-id");
+        assert_eq!(
+            serde_json::to_string(&parsed).expect("re-serialize by-id"),
+            json,
+        );
+
+        let by_name = Action::RenameActivity {
+            activity: ActivityReferenceArg::Name("OldName".to_owned()),
+            name: "NewName".to_owned(),
+        };
+        let json = serde_json::to_string(&by_name).expect("serialize by-name");
+        let parsed: Action = serde_json::from_str(&json).expect("deserialize by-name");
+        assert_eq!(
+            serde_json::to_string(&parsed).expect("re-serialize by-name"),
+            json,
+        );
     }
 
     #[test]

@@ -1609,6 +1609,31 @@ impl State {
                     }
                 }
             }
+            Action::RenameActivity(reference, name) => {
+                // Rename is pure metadata — no cascade, no view patching, no
+                // frame invalidation needed. Mirrors the `CreateActivity` arm
+                // shape (debug on Ok, warn on each Err variant), not
+                // `RemoveActivity`'s gated shape.
+                let name_str = name.clone();
+                let arg: ActivityReferenceArg = reference.into();
+                match self.niri.layout.rename_activity(&arg, name) {
+                    Ok(id) => {
+                        debug!("RenameActivity: renamed {id:?} ({arg:?}) to {name_str:?}");
+                    }
+                    Err(crate::layout::RenameActivityError::NotFound) => {
+                        warn!("RenameActivity: not found {arg:?}");
+                    }
+                    Err(crate::layout::RenameActivityError::ConfigDeclared) => {
+                        warn!("RenameActivity: config-declared, cannot rename {arg:?}");
+                    }
+                    Err(crate::layout::RenameActivityError::EmptyName) => {
+                        warn!("RenameActivity: empty name for {arg:?}");
+                    }
+                    Err(crate::layout::RenameActivityError::DuplicateName) => {
+                        warn!("RenameActivity: duplicate name {name_str:?} for {arg:?}");
+                    }
+                }
+            }
             Action::RemoveActivity(reference) => {
                 // Per DD §5.11 / §5.14 "Animation blocking", keybinding-triggered
                 // removes are silently dropped while hard-blocked — the cascade
