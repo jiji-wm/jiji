@@ -8580,6 +8580,10 @@ fn windows_all_interactive_move_first() {
     let (mut layout, _seed_id, _beta_id) = seed_two_activities_with_one_window_each();
 
     // Arm a move: Begin + Update to reach `InteractiveMoveState::Moving`.
+    // dx must exceed INTERACTIVE_MOVE_START_THRESHOLD^0.5 (= 256) for a
+    // non-floating window so the state machine actually transitions from
+    // `Starting` to `Moving`; a sub-threshold delta returns early and
+    // `windows_all()` would not prepend the window.
     check_ops_on_layout(
         &mut layout,
         [
@@ -8591,10 +8595,10 @@ fn windows_all_interactive_move_first() {
             },
             Op::InteractiveMoveUpdate {
                 window: 1,
-                dx: 10.,
+                dx: 300.,
                 dy: 0.,
                 output_idx: 1,
-                px: 10.,
+                px: 300.,
                 py: 0.,
             },
         ],
@@ -8954,4 +8958,237 @@ fn remove_active_activity_cascade_refresh_emits_removed_before_switch() {
     };
     assert_eq!(*id, alpha.get());
     assert_eq!(*previous_id, Some(beta.get()));
+}
+
+#[test]
+fn diff_activity_lifecycle_multi_kind_ordering() {
+    // Pins the full Removed → Renamed → Created emission order when all three
+    // buckets fire on the same tick. Seeded with four activities (alpha, beta,
+    // gamma, delta). Previous snapshot represents: beta and delta absent (route
+    // to Created), gamma with stale name (route to Renamed), two fake ids not
+    // present in the layout (route to Removed). Diff yields:
+    //   Removed {fake_epsilon_id=500, fake_zeta_id=999}  — ascending sort
+    //   Renamed {gamma_id, name: "Gamma2"}               ← snapshot name differs
+    //   Created {beta_id, delta_id}                      — ascending sort
+    //
+    // Two entries per Removed and Created bucket exercise within-bucket
+    // ascending-id sort: without sort_unstable/sort_by_key the HashMap
+    // iteration order is non-deterministic and the assertions fail.
+    let mut layout = Layout::<TestWindow>::default();
+    let alpha = layout.active_activity_id();
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    let gamma = layout
+        .create_activity("Gamma".to_owned())
+        .expect("create gamma");
+    let delta = layout
+        .create_activity("Delta".to_owned())
+        .expect("create delta");
+
+    // Rename gamma in the layout so snapshot will see the old name.
+    layout
+        .rename_activity(&ActivityReferenceArg::Id(gamma.get()), "Gamma2".to_owned())
+        .expect("rename gamma");
+
+    // Build a synthetic previous snapshot:
+    //   - alpha: present, name correct (no change)
+    //   - beta: absent (will route to Created)
+    //   - gamma: present with OLD name "Gamma" (will route to Renamed)
+    //   - delta: absent (will route to Created; id > beta, so Created bucket is [beta, delta])
+    //   - fake_epsilon (id=500): present in snapshot but not in layout (will route to Removed)
+    //   - fake_zeta (id=999): present in snapshot but not in layout (will route to Removed)
+    // Two Removed entries (500 < 999) and two Created entries (beta < delta) exercise
+    // within-bucket ascending-id sort, catching any regression that drops the sort calls.
+    let fake_epsilon_id: u64 = 500;
+    let fake_zeta_id: u64 = 999;
+    let mut previous: HashMap<u64, niri_ipc::Activity> = HashMap::new();
+    previous.insert(
+        alpha.get(),
+        niri_ipc::Activity {
+            id: alpha.get(),
+            name: layout
+                .activities()
+                .iter()
+                .find(|a| a.id() == alpha)
+                .expect("alpha in pool")
+                .name()
+                .to_owned(),
+            is_active: true,
+            is_urgent: false,
+            is_config_declared: false,
+        },
+    );
+    previous.insert(
+        gamma.get(),
+        niri_ipc::Activity {
+            id: gamma.get(),
+            name: "Gamma".to_owned(), // stale name — triggers Renamed
+            is_active: false,
+            is_urgent: false,
+            is_config_declared: false,
+        },
+    );
+    previous.insert(
+        fake_epsilon_id,
+        niri_ipc::Activity {
+            id: fake_epsilon_id,
+            name: "Epsilon".to_owned(), // not in layout — triggers Removed
+            is_active: false,
+            is_urgent: false,
+            is_config_declared: false,
+        },
+    );
+    previous.insert(
+        fake_zeta_id,
+        niri_ipc::Activity {
+            id: fake_zeta_id,
+            name: "Zeta".to_owned(), // not in layout — triggers Removed
+            is_active: false,
+            is_urgent: false,
+            is_config_declared: false,
+        },
+    );
+
+    let events =
+        crate::ipc::server::test_diff_activities_against_state(&layout, &previous);
+
+    // Extract events by kind in emission order.
+    let removed: Vec<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            niri_ipc::Event::ActivityRemoved { id } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    let renamed: Vec<(u64, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            niri_ipc::Event::ActivityRenamed { id, name } => Some((*id, name.as_str())),
+            _ => None,
+        })
+        .collect();
+    let created: Vec<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            niri_ipc::Event::ActivityCreated { activity } => Some(activity.id),
+            _ => None,
+        })
+        .collect();
+
+    // All Removed events precede all Renamed events, which precede all Created.
+    let removed_positions: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| matches!(e, niri_ipc::Event::ActivityRemoved { .. }).then_some(i))
+        .collect();
+    let renamed_positions: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| matches!(e, niri_ipc::Event::ActivityRenamed { .. }).then_some(i))
+        .collect();
+    let created_positions: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| matches!(e, niri_ipc::Event::ActivityCreated { .. }).then_some(i))
+        .collect();
+
+    assert!(
+        !removed_positions.is_empty() && !renamed_positions.is_empty() && !created_positions.is_empty(),
+        "must have at least one event per kind, got {events:?}",
+    );
+    assert!(
+        removed_positions.iter().all(|r| renamed_positions.iter().all(|n| r < n)),
+        "all Removed must precede all Renamed, got {events:?}",
+    );
+    assert!(
+        renamed_positions.iter().all(|n| created_positions.iter().all(|c| n < c)),
+        "all Renamed must precede all Created, got {events:?}",
+    );
+
+    // Correct ids in each bucket, in ascending-id order (pins the sort).
+    assert_eq!(
+        removed,
+        vec![fake_epsilon_id, fake_zeta_id],
+        "Removed bucket must be sorted ascending: {removed:?}",
+    );
+    assert_eq!(renamed, vec![(gamma.get(), "Gamma2")], "Renamed bucket: {renamed:?}");
+    // beta was created before delta, so beta.get() < delta.get() by construction.
+    // The sort in production must produce this order; if the sort is dropped the
+    // HashMap iteration order may flip them, breaking this assertion non-deterministically.
+    assert_eq!(
+        created,
+        vec![beta.get(), delta.get()],
+        "Created bucket must be sorted ascending: {created:?}",
+    );
+}
+
+#[test]
+fn diff_activity_lifecycle_newcomer_routes_to_created_not_renamed() {
+    // Pins that the lifecycle diff keys on id-presence, not name-match:
+    // a new activity with the same *name* as a removed activity must route
+    // to Created (for the new id) + Removed (for the old id), not Renamed.
+    let mut layout = Layout::<TestWindow>::default();
+    let alpha = layout.active_activity_id();
+
+    // Create "Work" in the layout under a fresh id.
+    let new_work_id = layout
+        .create_activity("Work".to_owned())
+        .expect("create Work");
+
+    // Snapshot contains a *different* id (old_work_id) also named "Work" —
+    // simulates a prior activity with the same name that was replaced.
+    let old_work_id: u64 = 999; // not present in the live layout
+    let mut previous: HashMap<u64, niri_ipc::Activity> = HashMap::new();
+    previous.insert(
+        alpha.get(),
+        niri_ipc::Activity {
+            id: alpha.get(),
+            name: layout
+                .activities()
+                .iter()
+                .find(|a| a.id() == alpha)
+                .expect("alpha in pool")
+                .name()
+                .to_owned(),
+            is_active: true,
+            is_urgent: false,
+            is_config_declared: false,
+        },
+    );
+    previous.insert(
+        old_work_id,
+        niri_ipc::Activity {
+            id: old_work_id,
+            name: "Work".to_owned(), // same name as the new activity, different id
+            is_active: false,
+            is_urgent: false,
+            is_config_declared: false,
+        },
+    );
+
+    let events =
+        crate::ipc::server::test_diff_activities_against_state(&layout, &previous);
+
+    // Must contain ActivityRemoved for the old id and ActivityCreated for
+    // the new id — NOT ActivityRenamed.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, niri_ipc::Event::ActivityRemoved { id } if *id == old_work_id)),
+        "expected ActivityRemoved for old id {old_work_id}, got {events:?}",
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            niri_ipc::Event::ActivityCreated { activity } if activity.id == new_work_id.get()
+        )),
+        "expected ActivityCreated for new id {}, got {events:?}",
+        new_work_id.get(),
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, niri_ipc::Event::ActivityRenamed { .. })),
+        "must NOT emit ActivityRenamed when id-presence drives routing, got {events:?}",
+    );
 }
