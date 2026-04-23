@@ -8692,348 +8692,49 @@ fn windows_all_disconnected_pool_yields_stale_output_id() {
 }
 
 // -----------------------------------------------------------------------------
-// Activity-lifecycle event tracker (`step_activity_lifecycle` /
-// `diff_activity_lifecycle`): pure-function tests.
+// Refresh-shape tests for activity mutation flows (`create_activity`,
+// `remove_activity`, `rename_activity`, cascade-remove-active).
 //
-// Mirrors the urgency-tracker test shape in `src/ipc/server.rs`. The helpers
-// take `&Layout<W>` so the [`niri_ipc::Event::ActivityCreated`] payload can be
-// rebuilt from live layout state; tests that only exercise Removed / Renamed /
-// seeding paths pass a layout too (for type-checking) without reading it.
+// These exercise the refresh-method shape against a live `Layout` via the
+// test-only helper `crate::ipc::server::test_diff_activities_against_state`,
+// which reproduces the combined lifecycle + active + urgency diff pass that
+// `ipc_refresh_layout` performs against `EventStreamState::activities` on a
+// single tick. Semantic coverage for single-snapshot apply-path cases lives
+// in `niri-ipc/src/state.rs`; this tier only pins the interaction between
+// `Layout` mutations and the refresh emission order.
 // -----------------------------------------------------------------------------
 
-/// Snapshot helper: build a `HashMap<ActivityId, String>` from `(id, name)`
-/// pairs for the lifecycle-tracker tests. `ActivityId::specific` keeps the ids
-/// stable across runs so the "sorted by id ascending" contract is visible in
-/// the literal pairs.
-fn lifecycle_snapshot(pairs: &[(u64, &str)]) -> HashMap<ActivityId, String> {
-    pairs
-        .iter()
-        .map(|&(id, name)| (ActivityId::specific(id), name.to_owned()))
+/// Build the client-tier snapshot that `EventStreamState::activities` would
+/// hold after a full `ipc_refresh_layout` tick against `layout`.
+fn activities_state_snapshot_from_layout<W: LayoutElement>(
+    layout: &Layout<W>,
+) -> HashMap<u64, niri_ipc::Activity> {
+    crate::ipc::server::build_activities_ipc(layout)
+        .into_iter()
+        .map(|a| (a.id, a))
         .collect()
 }
 
 #[test]
-fn diff_activity_lifecycle_no_change_emits_nothing() {
-    // Dominant hot-path case: equal snapshots short-circuit to an empty vec
-    // with no event allocation.
-    let layout = Layout::<TestWindow>::default();
-    let prev = lifecycle_snapshot(&[(1, "A"), (2, "B")]);
-    let curr = lifecycle_snapshot(&[(1, "A"), (2, "B")]);
-    assert!(crate::ipc::server::diff_activity_lifecycle(&prev, &curr, &layout).is_empty());
-}
-
-#[test]
-fn diff_activity_lifecycle_single_remove_emits_event() {
-    // Id in `previous` but not in `current` → one ActivityRemoved.
-    let layout = Layout::<TestWindow>::default();
-    let prev = lifecycle_snapshot(&[(1, "A"), (2, "B")]);
-    let curr = lifecycle_snapshot(&[(1, "A")]);
-    let events = crate::ipc::server::diff_activity_lifecycle(&prev, &curr, &layout);
-    assert_eq!(events.len(), 1);
-    assert!(matches!(
-        events[0],
-        niri_ipc::Event::ActivityRemoved { id: 2 }
-    ));
-}
-
-#[test]
-fn diff_activity_lifecycle_single_rename_emits_event() {
-    // Same id, different name → one ActivityRenamed. The renamed id must be
-    // present in both snapshots; no Layout lookup is required so the default
-    // layout (with its own distinct seed id) is irrelevant here.
-    let layout = Layout::<TestWindow>::default();
-    let prev = lifecycle_snapshot(&[(1, "Old")]);
-    let curr = lifecycle_snapshot(&[(1, "New")]);
-    let events = crate::ipc::server::diff_activity_lifecycle(&prev, &curr, &layout);
-    assert_eq!(events.len(), 1);
-    let niri_ipc::Event::ActivityRenamed { id, name } = &events[0] else {
-        panic!("expected ActivityRenamed, got {:?}", events[0]);
-    };
-    assert_eq!(*id, 1);
-    assert_eq!(name, "New");
-}
-
-#[test]
-fn diff_activity_lifecycle_single_create_emits_event() {
-    // New id in `current` → one ActivityCreated. The payload is rebuilt from
-    // the live `Layout`, so the new id must be a real pool key; use the seed
-    // activity id on a fresh layout.
-    let layout = Layout::<TestWindow>::default();
-    let seed_id = layout.active_activity_id();
-    let seed_name = layout
-        .activities()
-        .get(seed_id)
-        .expect("seed activity must exist")
-        .name()
-        .to_owned();
-
-    // `previous` is empty; `current` carries the live seed. This is the
-    // minimal one-Created case that exercises the `to_ipc_activity` rebuild.
-    let prev = lifecycle_snapshot(&[]);
-    let mut curr = HashMap::new();
-    curr.insert(seed_id, seed_name.clone());
-    let events = crate::ipc::server::diff_activity_lifecycle(&prev, &curr, &layout);
-    assert_eq!(events.len(), 1);
-    let niri_ipc::Event::ActivityCreated { activity } = &events[0] else {
-        panic!("expected ActivityCreated, got {:?}", events[0]);
-    };
-    assert_eq!(activity.id, seed_id.get());
-    assert_eq!(activity.name, seed_name);
-    // Seed on a fresh `Layout::default()` is the active activity.
-    assert!(activity.is_active);
-    assert!(!activity.is_urgent);
-}
-
-#[test]
-fn diff_activity_lifecycle_newcomer_routes_to_created_not_renamed() {
-    // Critical branch-order pin: a fresh id in `current` with the same name
-    // as some other id in `previous` must emit Created, not Renamed. The
-    // implementation must check `previous.contains_key(&id)` BEFORE
-    // considering the name; a reordered check would mis-classify the
-    // newcomer as a rename of the id-1 entry.
-    let layout = Layout::<TestWindow>::default();
-    let seed_id = layout.active_activity_id();
-    let seed_name = layout
-        .activities()
-        .get(seed_id)
-        .expect("seed activity must exist")
-        .name()
-        .to_owned();
-
-    // `previous` holds a synthetic id with the same name as the live seed;
-    // `current` holds only the live seed id. Without the correct branch
-    // order, the implementation could emit `ActivityRenamed` for the synth
-    // id or misclassify the seed as a rename.
-    let synth_id = ActivityId::specific(u64::MAX / 2); // must differ from seed_id
-    assert_ne!(synth_id, seed_id, "synthetic id must differ from seed");
-    let mut prev = HashMap::new();
-    prev.insert(synth_id, seed_name.clone());
-    let mut curr = HashMap::new();
-    curr.insert(seed_id, seed_name.clone());
-
-    let events = crate::ipc::server::diff_activity_lifecycle(&prev, &curr, &layout);
-    // Exactly one Removed (synth_id dropped) and one Created (seed newcomer).
-    // Removed comes first by the multi-kind ordering rule.
-    assert_eq!(events.len(), 2, "got {events:?}");
-    assert!(
-        matches!(&events[0], niri_ipc::Event::ActivityRemoved { id } if *id == synth_id.get()),
-        "first event must be ActivityRemoved for the synthetic id, got {:?}",
-        events[0],
-    );
-    assert!(
-        matches!(&events[1], niri_ipc::Event::ActivityCreated { activity } if activity.id == seed_id.get()),
-        "second event must be ActivityCreated for the seed id, got {:?}",
-        events[1],
-    );
-}
-
-#[test]
-fn diff_activity_lifecycle_remove_then_create_in_same_tick() {
-    // Id X dropped, new id Y appears. Exactly one Removed + one Created, in
-    // that order (Removed before Created per the multi-kind rule).
-    let layout = Layout::<TestWindow>::default();
-    let seed_id = layout.active_activity_id();
-    let seed_name = layout
-        .activities()
-        .get(seed_id)
-        .expect("seed activity must exist")
-        .name()
-        .to_owned();
-
-    let dropped_id = ActivityId::specific(u64::MAX / 2);
-    assert_ne!(dropped_id, seed_id);
-    let mut prev = HashMap::new();
-    prev.insert(dropped_id, "Old".to_owned());
-    let mut curr = HashMap::new();
-    curr.insert(seed_id, seed_name.clone());
-
-    let events = crate::ipc::server::diff_activity_lifecycle(&prev, &curr, &layout);
-    assert_eq!(events.len(), 2);
-    assert!(matches!(
-        events[0],
-        niri_ipc::Event::ActivityRemoved { id } if id == dropped_id.get(),
-    ));
-    assert!(matches!(
-        &events[1],
-        niri_ipc::Event::ActivityCreated { activity } if activity.id == seed_id.get(),
-    ));
-}
-
-#[test]
-fn diff_activity_lifecycle_multi_kind_ordering() {
-    // Shuffled input produces deterministic output: Removed → Renamed →
-    // Created, each bucket sorted by id ascending. Pins the contract against
-    // both a HashMap→BTreeMap swap and a bucket-reorder refactor.
-    //
-    // The Created ids (4 and 5) must be valid keys in the live pool for the
-    // `to_ipc_activity` rebuild to succeed; construct the layout with three
-    // runtime activities and identify their minted ids so the snapshot maps
-    // align with real pool state.
-    let mut layout = Layout::<TestWindow>::default();
-    let seed_id = layout.active_activity_id();
-    let seed_name = layout
-        .activities()
-        .get(seed_id)
-        .expect("seed activity must exist")
-        .name()
-        .to_owned();
-    let beta_id = layout.create_activity("Beta".to_owned()).expect("beta");
-    let gamma_id = layout.create_activity("Gamma".to_owned()).expect("gamma");
-
-    // `previous` shape: seed under old name, plus two synthetic ids that
-    // will drop. `current` shape: seed renamed, beta + gamma as newcomers.
-    //
-    // Pick synthetic ids from the top of the u64 range to avoid colliding
-    // with the process-global monotonic counter (`ACTIVITY_ID_COUNTER`),
-    // which is shared across all parallel test threads and has no upper
-    // bound we can rely on. Sort order (`dropped_lo < dropped_hi`) is still
-    // asserted below to pin the Removed-bucket sort-by-id contract.
-    let dropped_lo = ActivityId::specific(u64::MAX - 9);
-    let dropped_hi = ActivityId::specific(u64::MAX - 5);
-    assert_ne!(dropped_lo, seed_id);
-    assert_ne!(dropped_lo, beta_id);
-    assert_ne!(dropped_lo, gamma_id);
-    assert_ne!(dropped_hi, seed_id);
-    assert_ne!(dropped_hi, beta_id);
-    assert_ne!(dropped_hi, gamma_id);
-    assert!(dropped_lo.get() < dropped_hi.get());
-
-    let mut prev = HashMap::new();
-    prev.insert(dropped_lo, "drop-lo".to_owned());
-    prev.insert(seed_id, format!("{seed_name}-old")); // rename target
-    prev.insert(dropped_hi, "drop-hi".to_owned());
-
-    let mut curr = HashMap::new();
-    curr.insert(gamma_id, "Gamma".to_owned());
-    curr.insert(seed_id, seed_name.clone()); // renamed in this tick
-    curr.insert(beta_id, "Beta".to_owned());
-
-    let events = crate::ipc::server::diff_activity_lifecycle(&prev, &curr, &layout);
-    assert_eq!(
-        events.len(),
-        5,
-        "expected 2 Removed + 1 Renamed + 2 Created, got {events:?}",
-    );
-
-    // Removed: dropped_lo, dropped_hi (sorted by id asc).
-    assert!(
-        matches!(&events[0], niri_ipc::Event::ActivityRemoved { id } if *id == dropped_lo.get()),
-        "events[0] = {:?}",
-        events[0],
-    );
-    assert!(
-        matches!(&events[1], niri_ipc::Event::ActivityRemoved { id } if *id == dropped_hi.get()),
-        "events[1] = {:?}",
-        events[1],
-    );
-
-    // Renamed: seed_id only.
-    let niri_ipc::Event::ActivityRenamed { id, name } = &events[2] else {
-        panic!("events[2] = {:?}", events[2]);
-    };
-    assert_eq!(*id, seed_id.get());
-    assert_eq!(name, &seed_name);
-
-    // Created: beta then gamma (sorted by id asc — beta was created first,
-    // so beta_id < gamma_id by the monotonic counter).
-    assert!(beta_id.get() < gamma_id.get(), "beta minted before gamma");
-    assert!(
-        matches!(&events[3], niri_ipc::Event::ActivityCreated { activity } if activity.id == beta_id.get()),
-        "events[3] = {:?}",
-        events[3],
-    );
-    assert!(
-        matches!(&events[4], niri_ipc::Event::ActivityCreated { activity } if activity.id == gamma_id.get()),
-        "events[4] = {:?}",
-        events[4],
-    );
-}
-
-#[test]
-fn step_activity_lifecycle_seeds_without_emit() {
-    // First observation (`previous == None`) seeds the tracker silently even
-    // when multiple activities are already present. Once seeded, subsequent
-    // unchanged ticks emit nothing; a subsequent Create emits.
-    let mut layout = Layout::<TestWindow>::default();
-    let seed_id = layout.active_activity_id();
-    let seed_name = layout
-        .activities()
-        .get(seed_id)
-        .expect("seed activity must exist")
-        .name()
-        .to_owned();
-
-    let mut current = HashMap::new();
-    current.insert(seed_id, seed_name.clone());
-    let (events, snapshot) =
-        crate::ipc::server::step_activity_lifecycle(None, &current, &layout);
-    assert!(events.is_empty(), "seeding must be silent, got {events:?}");
-    assert_eq!(
-        snapshot, current,
-        "snapshot must be stored exactly as observed",
-    );
-
-    // Once seeded, an unchanged tick emits nothing.
-    let (events2, _) =
-        crate::ipc::server::step_activity_lifecycle(Some(&snapshot), &current, &layout);
-    assert!(events2.is_empty());
-
-    // A subsequent Create emits.
-    let beta_id = layout.create_activity("Beta".to_owned()).expect("beta");
-    let mut next = HashMap::new();
-    next.insert(seed_id, seed_name.clone());
-    next.insert(beta_id, "Beta".to_owned());
-    let (events3, _) =
-        crate::ipc::server::step_activity_lifecycle(Some(&snapshot), &next, &layout);
-    assert_eq!(events3.len(), 1);
-    assert!(matches!(
-        &events3[0],
-        niri_ipc::Event::ActivityCreated { activity } if activity.id == beta_id.get(),
-    ));
-}
-
-// -----------------------------------------------------------------------------
-// Integration-ish tests: exercise the full step_activity_lifecycle wiring in
-// response to Layout-level `create_activity` / `remove_activity` /
-// `rename_activity` actions. Seed the tracker, perform the action, call the
-// step again, assert the emitted event shape.
-// -----------------------------------------------------------------------------
-
-/// Build the current-tick lifecycle snapshot for `layout`, matching the
-/// production shape in `State::ipc_refresh_activity_lifecycle`.
-fn snapshot_from_layout<W: LayoutElement>(layout: &Layout<W>) -> HashMap<ActivityId, String> {
-    layout
-        .activities()
-        .iter()
-        .map(|a| (a.id(), a.name().to_owned()))
-        .collect()
-}
-
-#[test]
-fn create_activity_step_emits_activity_created() {
-    // Full-refresh wiring: seed the tracker from the initial pool, perform
-    // `create_activity`, step again — exactly one `ActivityCreated` for the
+fn create_activity_refresh_emits_activity_created() {
+    // Seed the refresh snapshot from the initial pool, perform
+    // `create_activity`, diff again — exactly one `ActivityCreated` for the
     // new id with the expected derived-field shape.
     //
     // Also exercises the `is_urgent=true` branch: after establishing the
-    // "Work" tracker, a second activity is created, switched to, and given an
-    // urgent window before the next step — the payload must carry
-    // `is_urgent=true`, guarding the derived-field rebuild in
-    // `diff_activity_lifecycle` against staling from a prior snapshot.
+    // "Work" snapshot, a second activity is created, switched to, and given
+    // an urgent window before the next diff — the payload must carry
+    // `is_urgent=true`, guarding the derived-field rebuild in the refresh
+    // method against staling from a prior snapshot.
     let mut layout = Layout::<TestWindow>::default();
 
-    let seed = snapshot_from_layout(&layout);
-    let (seed_events, tracker) =
-        crate::ipc::server::step_activity_lifecycle(None, &seed, &layout);
-    assert!(seed_events.is_empty(), "seeding must be silent");
+    let seed = activities_state_snapshot_from_layout(&layout);
 
     let new_id = layout
         .create_activity("Work".to_owned())
         .expect("valid name must succeed");
 
-    let current = snapshot_from_layout(&layout);
-    let (events, tracker) =
-        crate::ipc::server::step_activity_lifecycle(Some(&tracker), &current, &layout);
+    let events = crate::ipc::server::test_diff_activities_against_state(&layout, &seed);
     assert_eq!(events.len(), 1, "got {events:?}");
     let niri_ipc::Event::ActivityCreated { activity } = &events[0] else {
         panic!("expected ActivityCreated, got {:?}", events[0]);
@@ -9047,9 +8748,10 @@ fn create_activity_step_emits_activity_created() {
     );
     assert!(!activity.is_urgent, "fresh runtime activity has no urgent windows");
 
-    // Extended coverage: is_urgent=true branch. Reuse `tracker` (seeded at
-    // {default, Work}), create "Urgent", switch to it, add an urgent window,
-    // then step — payload must report is_urgent=true.
+    // Extended coverage: is_urgent=true branch. Re-seed from the current
+    // pool (seeded at {default, Work}), create "Urgent", switch to it, add an
+    // urgent window, then diff — payload must report is_urgent=true.
+    let reseed = activities_state_snapshot_from_layout(&layout);
     let urgent_id = layout
         .create_activity("Urgent".to_owned())
         .expect("valid name must succeed");
@@ -9065,13 +8767,19 @@ fn create_activity_step_emits_activity_created() {
         ActivateWindow::default(),
     );
     win.set_urgent(true);
-    let current2 = snapshot_from_layout(&layout);
-    let (events2, _) =
-        crate::ipc::server::step_activity_lifecycle(Some(&tracker), &current2, &layout);
-    assert_eq!(events2.len(), 1, "exactly one ActivityCreated, got {events2:?}");
-    let niri_ipc::Event::ActivityCreated { activity: urgent_activity } = &events2[0] else {
-        panic!("expected ActivityCreated, got {:?}", events2[0]);
-    };
+    let events2 = crate::ipc::server::test_diff_activities_against_state(&layout, &reseed);
+    // Expect: ActivityCreated(Urgent) + ActivitySwitched(Urgent).
+    // The Urgent activity starts with is_urgent=true in the Created payload
+    // because the urgent window is already attached when we snapshot.
+    let created: Vec<_> = events2
+        .iter()
+        .filter_map(|e| match e {
+            niri_ipc::Event::ActivityCreated { activity } => Some(activity),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(created.len(), 1, "exactly one ActivityCreated, got {events2:?}");
+    let urgent_activity = created[0];
     assert_eq!(urgent_activity.id, urgent_id.get());
     assert!(
         urgent_activity.is_urgent,
@@ -9080,26 +8788,22 @@ fn create_activity_step_emits_activity_created() {
 }
 
 #[test]
-fn remove_activity_step_emits_activity_removed() {
-    // Seed, create "Work", seed tracker, remove "Work", step — exactly one
-    // `ActivityRemoved { id }` where id matches the removed activity.
+fn remove_activity_refresh_emits_activity_removed() {
+    // Seed, create "Work", re-seed refresh snapshot, remove "Work", diff —
+    // exactly one `ActivityRemoved { id }` where id matches the removed
+    // activity.
     let mut layout = Layout::<TestWindow>::default();
     let work_id = layout
         .create_activity("Work".to_owned())
         .expect("valid name must succeed");
 
-    let seed = snapshot_from_layout(&layout);
-    let (seed_events, tracker) =
-        crate::ipc::server::step_activity_lifecycle(None, &seed, &layout);
-    assert!(seed_events.is_empty());
+    let seed = activities_state_snapshot_from_layout(&layout);
 
     layout
         .remove_activity(&ActivityReferenceArg::Id(work_id.get()))
         .expect("runtime activity with no exclusive content must remove cleanly");
 
-    let current = snapshot_from_layout(&layout);
-    let (events, _) =
-        crate::ipc::server::step_activity_lifecycle(Some(&tracker), &current, &layout);
+    let events = crate::ipc::server::test_diff_activities_against_state(&layout, &seed);
     assert_eq!(events.len(), 1, "got {events:?}");
     assert!(matches!(
         events[0],
@@ -9108,18 +8812,15 @@ fn remove_activity_step_emits_activity_removed() {
 }
 
 #[test]
-fn rename_activity_step_emits_activity_renamed() {
-    // Seed, create "Work", seed tracker, rename to "Office", step — exactly
-    // one `ActivityRenamed { id, name: "Office" }`.
+fn rename_activity_refresh_emits_activity_renamed() {
+    // Seed, create "Work", re-seed refresh snapshot, rename to "Office",
+    // diff — exactly one `ActivityRenamed { id, name: "Office" }`.
     let mut layout = Layout::<TestWindow>::default();
     let work_id = layout
         .create_activity("Work".to_owned())
         .expect("valid name must succeed");
 
-    let seed = snapshot_from_layout(&layout);
-    let (seed_events, tracker) =
-        crate::ipc::server::step_activity_lifecycle(None, &seed, &layout);
-    assert!(seed_events.is_empty());
+    let seed = activities_state_snapshot_from_layout(&layout);
 
     layout
         .rename_activity(
@@ -9128,9 +8829,7 @@ fn rename_activity_step_emits_activity_renamed() {
         )
         .expect("valid rename");
 
-    let current = snapshot_from_layout(&layout);
-    let (events, _) =
-        crate::ipc::server::step_activity_lifecycle(Some(&tracker), &current, &layout);
+    let events = crate::ipc::server::test_diff_activities_against_state(&layout, &seed);
     assert_eq!(events.len(), 1);
     let niri_ipc::Event::ActivityRenamed { id, name } = &events[0] else {
         panic!("expected ActivityRenamed, got {:?}", events[0]);
@@ -9140,19 +8839,90 @@ fn rename_activity_step_emits_activity_renamed() {
 }
 
 #[test]
-fn remove_active_activity_cascade_diff_helpers_emit_removed_before_switch() {
-    // Pins the event sequence produced by the cascade case — RemoveActivity of
-    // the active activity re-points the cursor — at the pure-function tier:
+fn refresh_first_tick_seeds_silently_then_live_activities_emit_created_with_correct_derived_fields() {
+    // Regression pin for the first-tick seeding invariant: on a fresh
+    // `EventStreamState::activities` (empty map), the combined refresh pass
+    // emits `ActivityCreated` for every live activity — NOT `ActivitySwitched`
+    // — and each `ActivityCreated` payload carries the correct derived
+    // fields (`is_active`, `is_urgent`) sourced from the live `Layout`.
+    //
+    // Pin targets (see the spec Risks section):
+    // - No spurious `ActivitySwitched { previous_id: None }` on first tick.
+    // - `ActivityCreated` payload freshness: `to_ipc_activity` must read
+    //   live `Layout` state, not reuse a stale snapshot.
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+
+    // Make the seed activity urgent so the payload-freshness pin bites:
+    // add a window, flip it urgent.
+    let win = TestWindow::new(TestWindowParams::new(7));
+    layout.add_window(
+        win.clone(),
+        AddWindowTarget::Auto,
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::default(),
+    );
+    win.set_urgent(true);
+    assert!(
+        layout.activity_is_urgent(seed_id),
+        "precondition: seed activity is urgent",
+    );
+
+    // First-tick previous snapshot is empty.
+    let previous: HashMap<u64, niri_ipc::Activity> = HashMap::new();
+    let events = crate::ipc::server::test_diff_activities_against_state(&layout, &previous);
+
+    // No ActivitySwitched on the first tick.
+    for event in &events {
+        assert!(
+            !matches!(event, niri_ipc::Event::ActivitySwitched { .. }),
+            "no ActivitySwitched must be emitted on the first (seeding) tick, got {event:?}",
+        );
+    }
+
+    // Exactly one ActivityCreated for the seed activity.
+    let created: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            niri_ipc::Event::ActivityCreated { activity } => Some(activity),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        created.len(),
+        1,
+        "exactly one ActivityCreated on first tick, got {events:?}",
+    );
+    let activity = created[0];
+    assert_eq!(activity.id, seed_id.get());
+    assert!(
+        activity.is_active,
+        "seed activity is the live active cursor — is_active must be true in the Created payload",
+    );
+    assert!(
+        activity.is_urgent,
+        "is_urgent must reflect live Layout state (urgent seed window), not a stale snapshot",
+    );
+}
+
+#[test]
+fn remove_active_activity_cascade_refresh_emits_removed_before_switch() {
+    // Pins the event sequence produced by the cascade case — RemoveActivity
+    // of the active activity re-points the cursor — at the refresh-method
+    // tier:
     //
     //   [ActivityRemoved { id: B }, ActivitySwitched { id: A, previous_id: Some(B) }]
     //
-    // We invoke both diffs in sequence (lifecycle first, then active-activity),
-    // mirroring what `ipc_refresh_layout` does at the method-call tier. The
-    // production call order itself is guarded by the block comment on
-    // `ipc_refresh_layout` (naming DD §4.6), not by this test — swapping the
-    // two `ipc_refresh_*` calls in production would leave this test passing.
-    // Accepted trade-off: no `State`-level test harness exists and the
-    // comment-only ordering guard mirrors sibling refresh contracts.
+    // The production call order (`lifecycle → active → urgency`) is guarded
+    // by the block comment on `ipc_refresh_layout` (naming DD §4.6), not by
+    // this test — the helper `test_diff_activities_against_state` bakes that
+    // order in. Swapping the two `ipc_refresh_*` calls in production would
+    // leave this test passing. Accepted trade-off: no `State`-level test
+    // harness exists and the comment-only ordering guard mirrors sibling
+    // refresh contracts.
     let mut layout = Layout::<TestWindow>::default();
     let alpha = layout.active_activity_id();
 
@@ -9162,9 +8932,8 @@ fn remove_active_activity_cascade_diff_helpers_emit_removed_before_switch() {
     layout.switch_activity(beta);
     assert_eq!(layout.active_activity_id(), beta);
 
-    // Seed both trackers at this settled-pre-cascade state.
-    let lifecycle_tracker = snapshot_from_layout(&layout);
-    let active_tracker = layout.active_activity_id().get();
+    // Seed the refresh snapshot at this settled-pre-cascade state.
+    let seed = activities_state_snapshot_from_layout(&layout);
 
     // Perform the cascade: remove the active beta. previous was alpha, so
     // the cursor re-points at alpha.
@@ -9173,24 +8942,7 @@ fn remove_active_activity_cascade_diff_helpers_emit_removed_before_switch() {
         .expect("active removal with previous cascade");
     assert_eq!(layout.active_activity_id(), alpha, "cascade target is alpha");
 
-    // Assemble the event stream in production order.
-    let lifecycle_current = snapshot_from_layout(&layout);
-    let lifecycle_events = crate::ipc::server::diff_activity_lifecycle(
-        &lifecycle_tracker,
-        &lifecycle_current,
-        &layout,
-    );
-    let switch_event = crate::ipc::server::diff_active_activity(
-        Some(active_tracker),
-        layout.active_activity_id().get(),
-    );
-
-    let mut all_events: Vec<niri_ipc::Event> = Vec::new();
-    all_events.extend(lifecycle_events);
-    if let Some(ev) = switch_event {
-        all_events.push(ev);
-    }
-
+    let all_events = crate::ipc::server::test_diff_activities_against_state(&layout, &seed);
     assert_eq!(all_events.len(), 2, "got {all_events:?}");
     assert!(
         matches!(&all_events[0], niri_ipc::Event::ActivityRemoved { id } if *id == beta.get()),
