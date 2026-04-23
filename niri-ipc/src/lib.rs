@@ -1827,6 +1827,64 @@ pub enum Event {
         /// Whether this activity now has any urgent windows.
         urgent: bool,
     },
+    /// A new activity was created.
+    ///
+    /// Emitted in response to runtime creation (`CreateActivity` action) or
+    /// any other mutation that introduces a new activity id to the pool.
+    ///
+    /// Ordering: lifecycle events fire structure-before-state. This event,
+    /// together with [`Event::ActivityRemoved`] and [`Event::ActivityRenamed`],
+    /// is emitted before [`Event::ActivitySwitched`] (structure before cursor)
+    /// and before per-workspace events such as [`Event::WorkspaceOpenedOrChanged`]
+    /// or [`Event::WorkspaceClosed`] (structure before per-workspace state).
+    /// A client receiving an `ActivitySwitched { id: N, .. }` has therefore
+    /// already seen `ActivityCreated { id: N }` if `N` is a newly-minted
+    /// activity; a client receiving a `WorkspaceClosed` triggered by
+    /// `RemoveActivity`'s exclusive-workspace destruction has already seen
+    /// the accompanying `ActivityRemoved` on the same tick. Mirrors the
+    /// [`Event::ActivitiesChanged`]-before-`WorkspacesChanged` rationale for
+    /// bulk-change emission.
+    ///
+    /// Payload freshness: the embedded [`Activity`]'s derived fields
+    /// (`is_active`, `is_urgent`) reflect the compositor's state at the
+    /// refresh tick when this event is emitted, not the instant the id was
+    /// minted. In a tick where a new activity is created and immediately
+    /// activated, `is_active` will be `true` in this payload and no separate
+    /// `ActivitySwitched` will follow for that id on the same tick. Clients
+    /// should apply subsequent [`Event::ActivitySwitched`] and
+    /// [`Event::ActivityUrgencyChanged`] events on top of the initial
+    /// snapshot carried here.
+    ActivityCreated {
+        /// The newly created activity.
+        activity: Activity,
+    },
+    /// An activity was removed.
+    ///
+    /// Emitted in response to runtime removal (`RemoveActivity` action) or
+    /// any other mutation that drops an activity id from the pool.
+    ///
+    /// Ordering: see [`Event::ActivityCreated`]. Structure-before-state —
+    /// this event fires before [`Event::ActivitySwitched`] even in the
+    /// cascade case where removing the active activity re-points the cursor
+    /// at another activity.
+    ActivityRemoved {
+        /// ID of the removed activity.
+        id: u64,
+    },
+    /// An activity was renamed.
+    ///
+    /// Emitted in response to the `RenameActivity` action. The activity id is
+    /// unchanged; only the human-readable name differs.
+    ///
+    /// Ordering: see [`Event::ActivityCreated`]. Rename is pure metadata and
+    /// does not interact with the cursor or workspace state, but groups with
+    /// the other lifecycle events for the structure-before-state principle.
+    ActivityRenamed {
+        /// ID of the activity.
+        id: u64,
+        /// The new name.
+        name: String,
+    },
     /// The window configuration has changed.
     WindowsChanged {
         /// The new window configuration.
@@ -2588,6 +2646,73 @@ mod tests {
         };
         assert_eq!(parsed_id2, 7);
         assert!(!parsed_urgent2);
+    }
+
+    #[test]
+    fn activity_created_event_roundtrips_serde() {
+        // Pin the full `Activity` payload shape on the wire. All five
+        // `Activity` fields (id, name, is_config_declared, is_active,
+        // is_urgent) are part of the contract.
+        let event = Event::ActivityCreated {
+            activity: Activity {
+                id: 7,
+                name: "Work".to_owned(),
+                is_config_declared: false,
+                is_active: false,
+                is_urgent: false,
+            },
+        };
+        let json = serde_json::to_string(&event).expect("serialize Event::ActivityCreated");
+        assert_eq!(
+            json,
+            r#"{"ActivityCreated":{"activity":{"id":7,"name":"Work","is_config_declared":false,"is_active":false,"is_urgent":false}}}"#
+        );
+        let parsed: Event = serde_json::from_str(&json)
+            .expect("deserialize Event::ActivityCreated");
+        let Event::ActivityCreated { activity } = parsed else {
+            panic!("expected ActivityCreated variant");
+        };
+        assert_eq!(activity.id, 7);
+        assert_eq!(activity.name, "Work");
+        assert!(!activity.is_config_declared);
+        assert!(!activity.is_active);
+        assert!(!activity.is_urgent);
+    }
+
+    #[test]
+    fn activity_removed_event_roundtrips_serde() {
+        // Id-only shape: the removed activity's other fields are not
+        // meaningful post-removal; clients are expected to have their own
+        // prior snapshot for any field they cared about.
+        let event = Event::ActivityRemoved { id: 7 };
+        let json = serde_json::to_string(&event).expect("serialize Event::ActivityRemoved");
+        assert_eq!(json, r#"{"ActivityRemoved":{"id":7}}"#);
+        let parsed: Event = serde_json::from_str(&json)
+            .expect("deserialize Event::ActivityRemoved");
+        let Event::ActivityRemoved { id } = parsed else {
+            panic!("expected ActivityRemoved variant");
+        };
+        assert_eq!(id, 7);
+    }
+
+    #[test]
+    fn activity_renamed_event_roundtrips_serde() {
+        // Id + name shape: the other `Activity` fields (is_config_declared,
+        // is_active, is_urgent) are not touched by a rename; clients patch
+        // only the name in their local tracker.
+        let event = Event::ActivityRenamed {
+            id: 7,
+            name: "Office".to_owned(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize Event::ActivityRenamed");
+        assert_eq!(json, r#"{"ActivityRenamed":{"id":7,"name":"Office"}}"#);
+        let parsed: Event = serde_json::from_str(&json)
+            .expect("deserialize Event::ActivityRenamed");
+        let Event::ActivityRenamed { id, name } = parsed else {
+            panic!("expected ActivityRenamed variant");
+        };
+        assert_eq!(id, 7);
+        assert_eq!(name, "Office");
     }
 
     #[test]

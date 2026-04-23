@@ -122,6 +122,35 @@ pub struct IpcServer {
     /// only — no cross-thread access. `RefCell` (not `Cell`) because the
     /// value is a `HashMap` that we mutate in place on each tick.
     last_activity_urgency: RefCell<Option<HashMap<ActivityId, bool>>>,
+    /// Most recently observed activity-lifecycle snapshot keyed by
+    /// [`ActivityId`], carrying only the name (see below for why name-only).
+    /// Used to diff against the current activities pool on each refresh tick
+    /// and emit [`Event::ActivityCreated`] / [`Event::ActivityRemoved`] /
+    /// [`Event::ActivityRenamed`] for every transition.
+    ///
+    /// `None` before the first observation: the first call to
+    /// [`State::ipc_refresh_activity_lifecycle`] seeds this field from the
+    /// current pool without emitting, so clients do not see spurious
+    /// lifecycle events on server startup (same seeding posture as
+    /// [`Self::last_active_activity_id`] and [`Self::last_activity_urgency`]).
+    ///
+    /// Snapshot shape is `id → name`, not a full [`niri_ipc::Activity`]:
+    /// `is_config_declared` is immutable after creation (see
+    /// [`niri_ipc::Activity::is_config_declared`]); `is_active` has its own
+    /// [`Event::ActivitySwitched`] event; `is_urgent` has its own
+    /// [`Event::ActivityUrgencyChanged`] event. This tracker only needs to
+    /// detect Created (new id), Removed (dropped id), and Renamed (name
+    /// differs for the same id); the other fields would either be constant
+    /// (`is_config_declared`) or duplicate work done by the sibling
+    /// trackers.
+    ///
+    /// Deliberately on `IpcServer` directly (not part of `EventStreamState`):
+    /// the corresponding `ActivitiesState` on `EventStreamState` is Phase 1b
+    /// scope (DD box 1958) and subsumes this tracker together with
+    /// [`Self::last_active_activity_id`] and [`Self::last_activity_urgency`]
+    /// in one piece. Main-thread calloop only — no cross-thread access.
+    /// `RefCell` (not `Cell`) because the value is a `HashMap`.
+    last_activities_by_id: RefCell<Option<HashMap<ActivityId, String>>>,
     /// Per-connection depth-1 queue for blocked [`Request::Action`]s. One
     /// entry per connection (admission rejects a second enqueue). `IndexMap`
     /// preserves FIFO insertion order; [`drain_blocked_action_waiters`] walks
@@ -198,6 +227,7 @@ impl IpcServer {
             event_stream_state: Rc::new(RefCell::new(EventStreamState::default())),
             last_active_activity_id: Cell::new(None),
             last_activity_urgency: RefCell::new(None),
+            last_activities_by_id: RefCell::new(None),
             blocked_action_waiters: Rc::new(RefCell::new(IndexMap::new())),
         })
     }
@@ -884,6 +914,24 @@ impl State {
     }
 
     pub fn ipc_refresh_layout(&mut self) {
+        // Activity-lifecycle events (`ActivityCreated` / `ActivityRemoved` /
+        // `ActivityRenamed`) fire structure-before-state: before
+        // `ipc_refresh_active_activity` so a client seeing an
+        // `ActivitySwitched { id: N, previous_id: Some(M) }` has already
+        // observed `ActivityCreated { id: N }` (for Create-then-Switch) and
+        // already observed `ActivityRemoved { id: M }` on the same tick (for
+        // the `RemoveActivity`-of-active cascade, where the remove fires
+        // before the forced cursor re-point); and before
+        // `ipc_refresh_workspaces` so a `WorkspaceClosed { id: W }` triggered
+        // by exclusive-workspace destruction follows the `ActivityRemoved`
+        // for the activity that owned it. This mirrors the
+        // `ActivitiesChanged`-before-`WorkspacesChanged` principle
+        // documented on `Event::ActivitiesChanged`. See
+        // docs/activities/design.md §4.6 for the normative statement of the
+        // structure-before-state rule. Do not move
+        // `ipc_refresh_activity_lifecycle` after `ipc_refresh_active_activity`
+        // or `ipc_refresh_workspaces`.
+        self.ipc_refresh_activity_lifecycle();
         // `ActivitySwitched` must precede any `WorkspaceOpenedOrChanged` whose
         // `is_in_active_activity` flipped this tick, so clients can update
         // their activity state before processing workspace visibility
@@ -965,6 +1013,37 @@ impl State {
         // the seeding branch above. Never move this into the event-emission
         // branch.
         *server.last_activity_urgency.borrow_mut() = Some(snapshot);
+    }
+
+    fn ipc_refresh_activity_lifecycle(&mut self) {
+        let Some(server) = &self.niri.ipc_server else {
+            return;
+        };
+
+        let _span = tracy_client::span!("State::ipc_refresh_activity_lifecycle");
+
+        let layout = &self.niri.layout;
+        let current: HashMap<ActivityId, String> = layout
+            .activities()
+            .iter()
+            .map(|a| (a.id(), a.name().to_owned()))
+            .collect();
+
+        // Clone out the previous snapshot inside a narrow shared-borrow scope
+        // so the unconditional `borrow_mut` at function exit cannot alias an
+        // outstanding shared borrow (mirrors `ipc_refresh_activity_urgency`).
+        let previous = server.last_activities_by_id.borrow().clone();
+        let (events, snapshot) = step_activity_lifecycle(previous.as_ref(), &current, layout);
+        for event in events {
+            server.send_event(event);
+        }
+
+        // Tracker-update discipline (mirrors `ipc_refresh_active_activity` and
+        // `ipc_refresh_activity_urgency`): unconditional set at function exit
+        // so the "emitted == tracked" invariant holds whether or not
+        // `step_activity_lifecycle` emitted events, and regardless of the
+        // seeding branch. Never move this into the event-emission branch.
+        *server.last_activities_by_id.borrow_mut() = Some(snapshot);
     }
 
     fn ipc_refresh_workspaces(&mut self) {
@@ -1256,7 +1335,7 @@ impl State {
 /// `was_initialized` check and write the tracker unconditionally at function
 /// exit, so the tracker is set on the first tick without emitting. See
 /// [`State::ipc_refresh_active_activity`] for the seeding pattern.
-fn diff_active_activity(previous: Option<u64>, current: u64) -> Option<Event> {
+pub(crate) fn diff_active_activity(previous: Option<u64>, current: u64) -> Option<Event> {
     if Some(current) == previous {
         return None;
     }
@@ -1297,9 +1376,9 @@ fn step_activity_urgency(
 /// - For every id present in `current` but not in `previous` (newly-tracked
 ///   activity): emit only if `current` reports `true`. A new activity that
 ///   starts non-urgent is silent — its initial `false` rides the
-///   `ActivityCreated` event (future; see DD §4.6).
+///   [`Event::ActivityCreated`] event (see [`diff_activity_lifecycle`]).
 /// - Ids that dropped out of `current` emit nothing here; lifecycle fires
-///   through the future `ActivityRemoved` event (future; see DD §4.6).
+///   through [`Event::ActivityRemoved`] (see [`diff_activity_lifecycle`]).
 ///
 /// Events are sorted by [`ActivityId`] for determinism so clients writing
 /// tests against the event stream aren't exposed to `HashMap` iteration-order
@@ -1331,6 +1410,111 @@ fn diff_activity_urgency(
             urgent,
         })
         .collect()
+}
+
+/// Pure step over the activity-lifecycle tracker: given the prior snapshot
+/// (`None` before first observation) and the current snapshot, return the
+/// events to emit and the snapshot to store.
+///
+/// Seeding (`previous == None`) returns an empty event list regardless of the
+/// current state — the first observation silently seeds the tracker. Once
+/// seeded, emission is delegated to [`diff_activity_lifecycle`].
+///
+/// Callers handle the `RefCell` mechanics and event dispatch; this function
+/// owns the decision of *what* to emit for a given (previous, current) pair.
+/// See [`State::ipc_refresh_activity_lifecycle`] for the thin wrapper.
+///
+/// Signature note: `current` is taken by reference (unlike the by-value shape
+/// of [`step_activity_urgency`]) because callers inspect `current` after the
+/// call — the return-tuple snapshot is a `.clone()` of the borrow. The clone
+/// cost is one `HashMap<ActivityId, String>` per refresh tick and is
+/// intentional; changing to by-value would force callers to clone before
+/// passing.
+pub(crate) fn step_activity_lifecycle<W: LayoutElement>(
+    previous: Option<&HashMap<ActivityId, String>>,
+    current: &HashMap<ActivityId, String>,
+    layout: &Layout<W>,
+) -> (Vec<Event>, HashMap<ActivityId, String>) {
+    let events = match previous {
+        Some(prev) => diff_activity_lifecycle(prev, current, layout),
+        None => Vec::new(),
+    };
+    (events, current.clone())
+}
+
+/// Diff two activity-lifecycle snapshots and produce the list of
+/// [`Event::ActivityCreated`] / [`Event::ActivityRemoved`] /
+/// [`Event::ActivityRenamed`] events to emit.
+///
+/// Multi-kind ordering: `Removed` first, then `Renamed`, then `Created`.
+/// Removes before Creates so a client never sees a `Created` for a stale-id
+/// slot while the old tracker entry for that id is still live.
+/// Renames are pure-metadata and order-independent but group with Removed
+/// for the "old state first" principle. Within each kind, events are sorted
+/// by [`ActivityId`] ascending for determinism against `HashMap` iteration
+/// order (the same flake surface that [`diff_activity_urgency`] pins).
+///
+/// The [`Event::ActivityCreated`] payload is rebuilt at emission time from
+/// the current `Layout` state via [`to_ipc_activity`], so the derived fields
+/// (`is_active`, `is_urgent`) reflect the layout as of the refresh tick
+/// rather than a stale snapshot captured when the id was first observed.
+///
+/// Newcomer-routing rule: id presence in `previous` is checked before name
+/// comparison. An id that appears in `current` but not in `previous` is a
+/// newcomer and routes unconditionally to `ActivityCreated` — a name match
+/// with some other id in `previous` does NOT classify it as a rename.
+/// This guarantees that even a test using [`ActivityId::specific`] to
+/// mint an id reusing a previous name produces an unambiguous stream.
+pub(crate) fn diff_activity_lifecycle<W: LayoutElement>(
+    previous: &HashMap<ActivityId, String>,
+    current: &HashMap<ActivityId, String>,
+    layout: &Layout<W>,
+) -> Vec<Event> {
+    // Collect newcomers and renames from a single walk of `current`.
+    // See rustdoc — newcomers route to Created.
+    let mut created_ids: Vec<ActivityId> = Vec::new();
+    let mut renamed: Vec<(ActivityId, String)> = Vec::new();
+    for (&id, name) in current {
+        if let Some(prev_name) = previous.get(&id) {
+            if prev_name != name {
+                renamed.push((id, name.clone()));
+            }
+        } else {
+            created_ids.push(id);
+        }
+    }
+
+    // Removed: ids in `previous` but not in `current`.
+    let mut removed_ids: Vec<ActivityId> = previous
+        .keys()
+        .copied()
+        .filter(|id| !current.contains_key(id))
+        .collect();
+
+    // Deterministic ordering within each kind.
+    removed_ids.sort_by_key(|id| id.get());
+    renamed.sort_by_key(|(id, _)| id.get());
+    created_ids.sort_by_key(|id| id.get());
+
+    let mut events: Vec<Event> =
+        Vec::with_capacity(removed_ids.len() + renamed.len() + created_ids.len());
+
+    for id in removed_ids {
+        events.push(Event::ActivityRemoved { id: id.get() });
+    }
+    for (id, name) in renamed {
+        events.push(Event::ActivityRenamed { id: id.get(), name });
+    }
+    for id in created_ids {
+        let activity = layout
+            .activities()
+            .get(id)
+            .expect("create-newcomer id was just observed in layout.activities() on this same refresh tick (single-threaded calloop, no intervening mutation)");
+        let payload = to_ipc_activity(activity, layout.active_activity_id(), layout);
+        events.push(Event::ActivityCreated { activity: payload });
+    }
+
+    events
 }
 
 /// Builds the full per-refresh workspace snapshot sent to IPC clients.
@@ -2041,7 +2225,7 @@ mod tests {
         // Ids that drop out of `current` (removed activities) must emit
         // nothing: the loop iterates `current`, not `previous`, so prev-only
         // keys are silently skipped.  Lifecycle for removed activities fires
-        // through the future `ActivityRemoved` event (see DD §4.6).
+        // through [`Event::ActivityRemoved`] (see [`diff_activity_lifecycle`]).
         let prev = urgency_snapshot(&[(1, true), (2, true)]);
         let curr = urgency_snapshot(&[(1, true)]); // id 2 dropped
         assert!(
