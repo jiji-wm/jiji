@@ -1785,10 +1785,6 @@ pub enum Event {
     /// activities. Individual lifecycle actions (`CreateActivity`,
     /// `RemoveActivity`, `RenameActivity`) emit per-activity events instead;
     /// those do not emit [`Event::ActivitiesChanged`].
-    ///
-    /// **Phase 1a stub:** not yet emitted anywhere — variant exists so
-    /// `#[non_exhaustive]` consumers can pattern-match on it today. Emission
-    /// lands with `ActivitiesState` in Phase 1b.
     ActivitiesChanged {
         /// The new activity configuration.
         activities: Vec<Activity>,
@@ -1799,10 +1795,6 @@ pub enum Event {
     /// for workspaces whose `is_in_active_activity` flipped, so clients
     /// can update their activity state before processing workspace
     /// visibility changes.
-    ///
-    /// **Phase 1a stub:** not yet emitted anywhere. Emission lands in Phase 1a
-    /// (together with the `is_in_active_activity` `Workspace` field);
-    /// [`state::EventStreamState`] tracking lands in Phase 1b.
     ActivitySwitched {
         /// ID of the newly active activity.
         id: u64,
