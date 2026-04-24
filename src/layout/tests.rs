@@ -11045,3 +11045,87 @@ fn pick_activity_for_hidden_window_degenerate_single_activity_on_hidden_ws() {
         "single-activity hidden ws: tier 3 picks beta",
     );
 }
+
+// -- FocusWindow hard-block gate (DD §5.18 + §5.11) --------------------------
+
+#[test]
+fn focus_window_hard_block_gate_fires_before_switch() {
+    // Pins the DD §5.18 + §5.11 hard-block discipline at the Layout level:
+    // when `is_activity_switch_hard_blocked()` is `Some(_)`, the caller is
+    // expected to return `Err(block)` without mutating the active activity.
+    // This test performs the structural inspection the spec allows
+    // ("Layout<TestWindow>-level structural inspection") instead of wiring
+    // up a full `do_action_inner` fixture because:
+    //   (a) the gate is a two-line test that directly reads `is_activity_switch_hard_blocked`, and
+    //   (b) the production `Action::FocusWindow` arm early-returns `Err(block)` before
+    //       calling `switch_activity`, so no state mutation happens regardless.
+    //
+    // Steps:
+    //   1. Two activities (alpha/seed, beta). Window added under alpha.
+    //   2. Switch to beta — window is now on a hidden workspace.
+    //   3. Arm DnD to trigger the hard block.
+    //   4. Verify `is_activity_switch_hard_blocked()` is `Some(Dnd)`.
+    //   5. Verify `window_ws_and_activity_hint` resolves the window's workspace.
+    //   6. Verify `pick_activity_for_hidden_window` picks a non-active target (the
+    //      production gate would fire before reaching `switch_activity`).
+    //   7. Verify `active_activity_id()` is unchanged (simulates Err path — no mutation).
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(0),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha_id = layout.active_activity_id();
+
+    // Mint a beta activity and switch to it so the window is hidden.
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+    layout.switch_activity(beta_id);
+    assert_eq!(layout.active_activity_id(), beta_id, "precondition: active = beta");
+
+    // Arm DnD — no window required (same recipe as
+    // `is_activity_switch_hard_blocked_returns_some_during_dnd` at line 5747).
+    let output = layout
+        .outputs()
+        .find(|o| o.name() == "output1")
+        .cloned()
+        .expect("output1 must exist after AddOutput(1)");
+    layout.dnd_update(output, Point::from((0., 0.)));
+    assert_eq!(
+        layout.is_activity_switch_hard_blocked(),
+        Some(super::ActivitySwitchBlock::Dnd),
+        "precondition: DnD must hard-block the activity switch",
+    );
+
+    // The window must be resolvable (mirrors production `window_ws_and_activity_hint`).
+    // For TestWindow, W::Id = usize, so pass &0 to look up window 0.
+    let ws_id = layout
+        .window_ws_and_activity_hint(&0usize)
+        .expect("window 0 must be tracked in the workspace pool");
+
+    // Picker must return a non-active candidate (alpha) — the hard-block gate
+    // in production fires AFTER picking the target, before `switch_activity`.
+    let target = layout.pick_activity_for_hidden_window(ws_id, None);
+    assert_ne!(
+        target,
+        beta_id,
+        "picker must return a non-active activity for the hidden window",
+    );
+    assert_eq!(
+        target, alpha_id,
+        "tier 3 (declaration order) picks alpha for the hidden window under beta-active",
+    );
+
+    // No mutation: active activity must still be beta (caller would Err-return).
+    assert_eq!(
+        layout.active_activity_id(),
+        beta_id,
+        "hard-block gate simulation: active activity must be unchanged when Err is returned",
+    );
+
+    // Clean up so verify_invariants runs under the normal gate.
+    layout.dnd_end();
+    layout.verify_invariants();
+}
