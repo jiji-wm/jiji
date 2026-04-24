@@ -2812,6 +2812,45 @@ impl<W: LayoutElement> Layout<W> {
         pruned
     }
 
+    /// Per-id guard matching the skip policy of
+    /// [`Layout::destroy_workspaces_cross_activity`] (DD §5.4 shared-workspace
+    /// cleanup rule). Returns `true` only when `ws_id` is a live pool key
+    /// whose workspace is exclusive to a single activity.
+    ///
+    /// Returns `false` in two cases:
+    /// - `ws_id` is absent from the pool. Defensive: the downstream
+    ///   `pool.remove` assert inside `destroy_workspaces_cross_activity` is
+    ///   the authoritative panic for genuinely dead ids; returning `false`
+    ///   here just keeps the predicate total.
+    /// - `workspace.activities().len() > 1`. Shared membership — another
+    ///   activity still references the workspace, so reclaim must be skipped
+    ///   (DD §5.4: "a workspace with `activities = {A, B}` that becomes
+    ///   empty is not removed").
+    ///
+    /// The `len() == 1` form is a deliberate Phase 1b narrowing. The full
+    /// §5.4 rule is "empty AND every activity in its `activities` set has
+    /// another, non-empty workspace to fall back to on the same output"; in
+    /// Phase 1b no shared workspace is constructible (mutators land in
+    /// Phase 2), so `len() == 1` coincides with the membership-exclusivity
+    /// portion of that predicate; callers separately enforce the emptiness
+    /// precondition. Tightening to the full per-(activity, output) fallback
+    /// check is deferred to Phase 2.
+    ///
+    /// `pub(crate)` so Phase 2 action handlers (`AddWorkspaceToActivity`,
+    /// `SetWorkspaceActivities`, sticky mutators) can reuse the predicate
+    /// directly rather than re-encoding the rule.
+    // Phase 2 call sites don't exist yet; suppress the premature dead_code lint.
+    #[allow(dead_code)]
+    pub(crate) fn workspace_is_safe_to_reclaim(
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        ws_id: WorkspaceId,
+    ) -> bool {
+        let Some(ws) = pool.get(&ws_id) else {
+            return false;
+        };
+        ws.activities().len() == 1
+    }
+
     /// Drops workspaces from the pool after patching every activity's
     /// `WorkspaceView` that still references them. The retain closure mirrors
     /// `RemoveActivity`'s exclusive-workspace destruction pass: single-entry
@@ -2819,22 +2858,41 @@ impl<W: LayoutElement> Layout<W> {
     /// multi-entry views get `remove_at`-patched so `active`/`previous` stay
     /// coherent.
     ///
-    /// **Precondition (Phase 1b):** callers supply only ids that are currently
-    /// exclusive to a single activity (i.e. `workspace.activities.len() == 1`).
-    /// Phase 2 `AddWorkspaceToActivity`/sticky-mutator actions will make
-    /// shared workspaces constructible; at that point callers must gate on
-    /// `workspace_is_safe_to_reclaim` (DD §5.4) before passing an id here.
+    /// **Shared-id skip policy (DD §5.4).** Each id is checked at loop entry:
+    /// if the pool contains a workspace with `activities().len() > 1` (shared
+    /// across activities), that id is `warn!`-logged and skipped — both the
+    /// per-activity retain sweep and the `pool.remove` assert are bypassed.
+    /// Skipping rather than panicking keeps a batched destroy recoverable when
+    /// a caller passes a shared id; the `warn!` ensures the skip is not silent.
+    /// The guard is defensive in Phase 1b — no caller can yet construct a
+    /// shared workspace — but lands ahead of Phase 2's multi-activity mutators
+    /// so the skip path is wired up before it can fire.
+    ///
+    /// Absent ids (not present in the pool at all) are a caller bug; they are
+    /// not skipped here and fall through to the `pool.remove` assert, which is
+    /// the authoritative panic for genuinely dead ids.
     ///
     /// **Ordering is load-bearing:** every activity's view is patched before
     /// `pool.remove` for each id, so that debug assertions and
     /// `verify_invariants` always see pool and views in agreement. Do not
     /// hoist the `pool.remove` calls out of the per-id loop.
+    #[track_caller]
     fn destroy_workspaces_cross_activity(
         activities: &mut Activities,
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         ids: impl IntoIterator<Item = WorkspaceId>,
     ) {
         for ws_id in ids {
+            if let Some(ws) = pool.get(&ws_id) {
+                if ws.activities().len() > 1 {
+                    warn!(
+                        "destroy_workspaces_cross_activity: skipping shared id {ws_id:?} \
+                         (activities.len() = {}) — DD §5.4 shared-workspace cleanup rule",
+                        ws.activities().len(),
+                    );
+                    continue;
+                }
+            }
             for activity in activities.iter_mut() {
                 activity.views_mut().retain(|_output_id, view| {
                     let Some(pos) = view.position_of(ws_id) else {

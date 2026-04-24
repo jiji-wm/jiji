@@ -8188,15 +8188,10 @@ fn destroy_workspaces_cross_activity_patches_other_activity_views() {
             .bind_output(&mon_output);
         id
     };
-    // Put `doomed_id` into Beta's membership too, so `destroy` removes it
-    // from the pool cleanly.
-    layout
-        .workspaces
-        .get_mut(&doomed_id)
-        .expect("pool must hold doomed id")
-        .activities
-        .insert(beta_id);
-    // Seed Beta's view on this output with [doomed, spare].
+    // Seed Beta's view with a stale reference to doomed_id. doomed_id.activities
+    // remains {Alpha} (exclusive), so the §5.4 guard clears and destroy proceeds.
+    // The retain closure patches Beta's view because it iterates every activity's
+    // views regardless of workspace membership.
     layout
         .activities
         .get_mut(beta_id)
@@ -8263,14 +8258,10 @@ fn destroy_workspaces_cross_activity_drops_single_entry_view() {
     let beta_id = layout
         .create_activity("Beta".to_owned())
         .expect("create beta");
-    // Membership bookkeeping: Beta owns the doomed workspace too.
-    layout
-        .workspaces
-        .get_mut(&doomed_id)
-        .expect("doomed in pool")
-        .activities
-        .insert(beta_id);
-    // Beta's view on this output is single-entry [doomed_id].
+    // Seed Beta's view with a stale reference to doomed_id. doomed_id.activities
+    // remains {Alpha} (exclusive), so the §5.4 guard clears and destroy proceeds.
+    // The retain closure patches Beta's view because it iterates every activity's
+    // views regardless of workspace membership.
     layout
         .activities
         .get_mut(beta_id)
@@ -8298,6 +8289,366 @@ fn destroy_workspaces_cross_activity_drops_single_entry_view() {
             .is_none(),
         "single-entry beta view must be dropped",
     );
+}
+
+// Baseline for the DD §5.4 shared-workspace cleanup rule: a workspace owned
+// by exactly one activity is safe to reclaim.
+#[test]
+fn workspace_is_safe_to_reclaim_true_for_single_activity_membership() {
+    let layout = check_ops([Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+    let view = layout.active_view(&mon_out);
+    let id = view.ids()[view.len() - 1];
+
+    // A fresh `check_ops([AddOutput(1)])` layout's bookend is exclusive to
+    // the active (Alpha) activity; `activities().len() == 1`.
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&id)
+            .expect("bookend in pool")
+            .activities()
+            .len(),
+        1,
+        "precondition: bookend starts out exclusive to Alpha",
+    );
+    assert!(
+        Layout::<TestWindow>::workspace_is_safe_to_reclaim(&layout.workspaces, id),
+        "exclusive-membership workspace must be safe to reclaim",
+    );
+}
+
+// Guard's primary correctness: a workspace shared between two activities
+// must NOT be safe to reclaim (DD §5.4: "a workspace with
+// `activities = {A, B}` that becomes empty is not removed").
+#[test]
+fn workspace_is_safe_to_reclaim_false_for_shared_membership() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+    let id = {
+        let view = layout.active_view(&mon_out);
+        view.ids()[view.len() - 1]
+    };
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    // Mark the bookend as shared between Alpha and Beta.
+    layout
+        .workspaces
+        .get_mut(&id)
+        .expect("bookend in pool")
+        .activities
+        .insert(beta_id);
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&id)
+            .expect("bookend in pool")
+            .activities()
+            .len(),
+        2,
+        "precondition: bookend is now shared across two activities",
+    );
+
+    assert!(
+        !Layout::<TestWindow>::workspace_is_safe_to_reclaim(&layout.workspaces, id),
+        "shared-membership workspace must NOT be safe to reclaim",
+    );
+    // verify_invariants intentionally skipped: bookend.activities is widened
+    // without a matching Beta view entry.
+}
+
+// Defensive branch: an id not present in the pool returns `false`. The
+// authoritative panic for genuinely dead ids lives in
+// `destroy_workspaces_cross_activity`'s `pool.remove.is_some()` assert;
+// returning `false` here simply keeps the predicate total.
+#[test]
+fn workspace_is_safe_to_reclaim_false_for_absent_id() {
+    let layout = check_ops([Op::AddOutput(1)]);
+
+    // Manufacture an id that cannot possibly be in the pool by allocating a
+    // throwaway workspace and dropping it — its `WorkspaceId` is unique and
+    // never inserted.
+    let absent_id = Workspace::<TestWindow>::new_no_outputs(
+        HashSet::from([layout.active_activity_id()]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    )
+    .id();
+    assert!(
+        !layout.workspaces.contains_key(&absent_id),
+        "precondition: absent_id must not be in the pool",
+    );
+
+    assert!(
+        !Layout::<TestWindow>::workspace_is_safe_to_reclaim(&layout.workspaces, absent_id),
+        "id absent from pool must return false (defensive branch)",
+    );
+}
+
+// End-to-end absent-id panic: an id not present in the pool must not be
+// silently skipped by `destroy_workspaces_cross_activity` — it must reach the
+// `pool.remove` assert and panic. Absent ids are a caller bug; the assert is
+// the authoritative diagnostic.
+#[test]
+#[should_panic(expected = "must be a live pool key")]
+fn destroy_workspaces_cross_activity_panics_for_absent_id() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+
+    // Manufacture an id that cannot possibly be in the pool.
+    let absent_id = Workspace::<TestWindow>::new_no_outputs(
+        HashSet::from([layout.active_activity_id()]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    )
+    .id();
+    assert!(
+        !layout.workspaces.contains_key(&absent_id),
+        "precondition: absent_id must not be in the pool",
+    );
+
+    // Must panic — absent ids are not skipped; the pool.remove assert fires.
+    Layout::<TestWindow>::destroy_workspaces_cross_activity(
+        &mut layout.activities,
+        &mut layout.workspaces,
+        vec![absent_id],
+    );
+}
+
+// End-to-end skip: when `destroy_workspaces_cross_activity` is handed an id
+// that fails the guard (shared membership), pool and every activity's views
+// must be unchanged, and `verify_invariants` must still hold.
+#[test]
+fn destroy_workspaces_cross_activity_skips_shared_id_keeps_pool_and_views_intact() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let mon_out = layout.monitors[0].output_id();
+    let mon_output = layout.monitors[0].output.clone();
+    let seed_activity = layout.active_activity_id();
+
+    // Seed a shared workspace that both Alpha (active) and Beta reference.
+    // Shape Alpha's view as `[W1 (active), shared, E_bottom]` so `shared`
+    // sits at a non-terminal middle position. `shared` is named so that
+    // `has_windows_or_name()` returns `true`, clearing the non-terminal-empty
+    // bookend check inside `Monitor::verify_invariants` (monitor.rs:1772).
+    let shared_id = {
+        let spare = Workspace::<TestWindow>::new_with_config_no_outputs(
+            Some(WorkspaceConfig {
+                name: WorkspaceName("shared".to_owned()),
+                open_on_output: None,
+                layout: None,
+                activities: Vec::new(),
+                sticky: None,
+            }),
+            HashSet::from([seed_activity]),
+            layout.clock.clone(),
+            layout.options.clone(),
+        );
+        let id = spare.id();
+        layout.workspaces.insert(id, spare);
+        layout
+            .workspaces
+            .get_mut(&id)
+            .expect("shared spare must be in pool")
+            .bind_output(&mon_output);
+        id
+    };
+    layout.active_view_mut(&mon_out).insert(1, shared_id);
+
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    layout
+        .workspaces
+        .get_mut(&shared_id)
+        .expect("shared in pool")
+        .activities
+        .insert(beta_id);
+    // Beta view length 2 so it would hit `remove_at` if the skip misfired.
+    let beta_spare_id = {
+        let spare = Workspace::<TestWindow>::new_no_outputs(
+            HashSet::from([beta_id]),
+            layout.clock.clone(),
+            layout.options.clone(),
+        );
+        let id = spare.id();
+        layout.workspaces.insert(id, spare);
+        layout
+            .workspaces
+            .get_mut(&id)
+            .expect("beta spare must be in pool")
+            .bind_output(&mon_output);
+        id
+    };
+    layout
+        .activities
+        .get_mut(beta_id)
+        .expect("beta must exist")
+        .views_mut()
+        .insert(
+            mon_out.clone(),
+            WorkspaceView::new(vec![shared_id, beta_spare_id], 0),
+        );
+
+    // Snapshot the shapes that must not change after the (no-op) destroy.
+    let alpha_view_before: Vec<_> = layout.active_view(&mon_out).ids().to_vec();
+    let beta_view_before: Vec<_> = layout
+        .activities
+        .get(beta_id)
+        .expect("beta")
+        .views()
+        .get(&mon_out)
+        .expect("beta view")
+        .ids()
+        .to_vec();
+    let pool_size_before = layout.workspaces.len();
+
+    // Precondition: the guard must say "skip".
+    assert!(
+        !Layout::<TestWindow>::workspace_is_safe_to_reclaim(&layout.workspaces, shared_id),
+        "precondition: shared id must fail the guard",
+    );
+
+    Layout::<TestWindow>::destroy_workspaces_cross_activity(
+        &mut layout.activities,
+        &mut layout.workspaces,
+        vec![shared_id],
+    );
+
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_before,
+        "pool size must be unchanged after a skipped destroy",
+    );
+    assert!(
+        layout.workspaces.contains_key(&shared_id),
+        "shared id must still be in the pool after a skipped destroy",
+    );
+    assert_eq!(
+        layout.active_view(&mon_out).ids(),
+        alpha_view_before.as_slice(),
+        "Alpha's view must be unchanged after a skipped destroy",
+    );
+    assert_eq!(
+        layout
+            .activities
+            .get(beta_id)
+            .expect("beta")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .ids(),
+        beta_view_before.as_slice(),
+        "Beta's view must be unchanged after a skipped destroy",
+    );
+    layout.verify_invariants();
+}
+
+// Per-id guard: a batch containing one shared (skipped) id alongside one
+// exclusive (doomed) id must reclaim only the exclusive sibling. Pins that
+// the skip is per-iteration, not a batch-level short-circuit.
+#[test]
+fn destroy_workspaces_cross_activity_mixed_batch_drops_only_safe_id() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let mon_out = layout.monitors[0].output_id();
+    let mon_output = layout.monitors[0].output.clone();
+    let seed_activity = layout.active_activity_id();
+
+    // Two spares, both seeded into Alpha's view between W1 and E_bottom:
+    // `[W1 (active, pos 0), shared, doomed, E_bottom]`. `shared` is named so
+    // that `has_windows_or_name()` returns `true`, clearing the
+    // non-terminal-empty bookend check inside `Monitor::verify_invariants`
+    // (monitor.rs:1772).
+    let shared_id = {
+        let spare = Workspace::<TestWindow>::new_with_config_no_outputs(
+            Some(WorkspaceConfig {
+                name: WorkspaceName("shared".to_owned()),
+                open_on_output: None,
+                layout: None,
+                activities: Vec::new(),
+                sticky: None,
+            }),
+            HashSet::from([seed_activity]),
+            layout.clock.clone(),
+            layout.options.clone(),
+        );
+        let id = spare.id();
+        layout.workspaces.insert(id, spare);
+        layout
+            .workspaces
+            .get_mut(&id)
+            .expect("shared spare must be in pool")
+            .bind_output(&mon_output);
+        id
+    };
+    let doomed_id = {
+        let spare = Workspace::<TestWindow>::new_no_outputs(
+            HashSet::from([seed_activity]),
+            layout.clock.clone(),
+            layout.options.clone(),
+        );
+        let id = spare.id();
+        layout.workspaces.insert(id, spare);
+        layout
+            .workspaces
+            .get_mut(&id)
+            .expect("doomed spare must be in pool")
+            .bind_output(&mon_output);
+        id
+    };
+    layout.active_view_mut(&mon_out).insert(1, shared_id);
+    layout.active_view_mut(&mon_out).insert(2, doomed_id);
+
+    // Widen `shared_id` to Beta's membership so it fails the guard. Leave
+    // `doomed_id` exclusive to Alpha so the guard clears it. Beta does not
+    // need a view entry on this output — cross-activity view patching is
+    // covered by `destroy_workspaces_cross_activity_patches_other_activity_views`.
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    layout
+        .workspaces
+        .get_mut(&shared_id)
+        .expect("shared in pool")
+        .activities
+        .insert(beta_id);
+
+    Layout::<TestWindow>::destroy_workspaces_cross_activity(
+        &mut layout.activities,
+        &mut layout.workspaces,
+        vec![shared_id, doomed_id],
+    );
+
+    assert!(
+        layout.workspaces.contains_key(&shared_id),
+        "shared id must survive (skipped by guard)",
+    );
+    assert!(
+        !layout.workspaces.contains_key(&doomed_id),
+        "doomed id must be removed (passed guard)",
+    );
+    let alpha_ids = layout.active_view(&mon_out).ids().to_vec();
+    assert!(
+        alpha_ids.contains(&shared_id),
+        "Alpha's view must still reference shared_id",
+    );
+    assert!(
+        !alpha_ids.contains(&doomed_id),
+        "Alpha's view must no longer reference doomed_id",
+    );
+    layout.verify_invariants();
 }
 
 // Regression: `remove_output` must flush doomed empty bookends through
@@ -8352,15 +8703,10 @@ fn take_workspace_ids_doomed_flushed_from_other_activity_view_on_remove_output()
             .bind_output(&mon_output);
         id
     };
-    // Add Beta membership to the bookend so destroy_workspaces_cross_activity
-    // can remove it from the pool cleanly (the pool.remove assert fires on
-    // workspaces without any remaining owner).
-    layout
-        .workspaces
-        .get_mut(&e_bottom_id)
-        .expect("bookend in pool")
-        .activities
-        .insert(beta_id);
+    // Seed Beta's view with a stale reference to doomed_id. doomed_id.activities
+    // remains {Alpha} (exclusive), so the §5.4 guard clears and destroy proceeds.
+    // The retain closure patches Beta's view because it iterates every activity's
+    // views regardless of workspace membership.
     layout
         .activities
         .get_mut(beta_id)
