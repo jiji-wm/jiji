@@ -1066,6 +1066,37 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
         activity: ActivityReferenceArg,
     },
+    /// Set which activities a workspace belongs to.
+    ///
+    /// Replaces the workspace's `activities` set with `activities` as a
+    /// symmetric diff: ids present in the old set but not the new are removed,
+    /// ids present in the new set but not the old are added. The target
+    /// activity's per-output view is patched in place for each add / remove
+    /// (position-invariant append for adds, `remove_at` or single-entry drop
+    /// for removes — matching `AddWorkspaceToActivity` /
+    /// `RemoveWorkspaceFromActivity`).
+    ///
+    /// An empty `activities` list returns
+    /// `Err("activities list is empty (DD §3.2)")` — every workspace must
+    /// belong to at least one activity.
+    ///
+    /// Asymmetry with `Add` / `Remove`: a workspace reference that does not
+    /// resolve silently no-ops (logs `warn!` and returns `Handled`) per
+    /// activities design doc §5.14. `Add` / `Remove` surface `Err` on the
+    /// same miss; this is deliberate and pinned by
+    /// `do_action_error_envelope_matches_wire_contract`.
+    ///
+    /// Gesture blocks this action: see `RemoveWorkspaceFromActivity` for the
+    /// gesture-only gate (animations snap, interactive_move / DnD are
+    /// orthogonal).
+    SetWorkspaceActivities {
+        /// Workspace to modify. Defaults to focused.
+        workspace: Option<WorkspaceReferenceArg>,
+        /// Activity IDs or names that the workspace must belong to after
+        /// the call. Must be non-empty.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME", num_args = 1..))]
+        activities: Vec<ActivityReferenceArg>,
+    },
 }
 
 /// Change in window or column size.
@@ -2786,6 +2817,36 @@ mod tests {
     }
 
     #[test]
+    fn set_workspace_activities_action_roundtrips_serde() {
+        // Pin the on-the-wire field names and shape for the
+        // `SetWorkspaceActivities` action. Covers None / Some workspace and
+        // both `ActivityReferenceArg` arms in the list. `Action` does not
+        // derive `PartialEq`, so compare via re-serialize: structure-preserving
+        // round-trip yields identical JSON.
+        let defaulted = Action::SetWorkspaceActivities {
+            workspace: None,
+            activities: vec![ActivityReferenceArg::Id(1), ActivityReferenceArg::Name("beta".into())],
+        };
+        let json = serde_json::to_string(&defaulted).expect("serialize defaulted");
+        let parsed: Action = serde_json::from_str(&json).expect("deserialize defaulted");
+        assert_eq!(
+            serde_json::to_string(&parsed).expect("re-serialize defaulted"),
+            json,
+        );
+
+        let explicit = Action::SetWorkspaceActivities {
+            workspace: Some(WorkspaceReferenceArg::Id(42)),
+            activities: vec![ActivityReferenceArg::Name("alpha".into())],
+        };
+        let json = serde_json::to_string(&explicit).expect("serialize explicit");
+        let parsed: Action = serde_json::from_str(&json).expect("deserialize explicit");
+        assert_eq!(
+            serde_json::to_string(&parsed).expect("re-serialize explicit"),
+            json,
+        );
+    }
+
+    #[test]
     fn reply_err_format_for_workspace_activity_assignment() {
         // Roundtrips the DD §5.14 / §3.2 wire envelopes for
         // `AddWorkspaceToActivity` / `RemoveWorkspaceFromActivity` through
@@ -2808,6 +2869,10 @@ mod tests {
             (
                 "workspace would be left with no activities (DD §3.2)",
                 r#"{"Err":"workspace would be left with no activities (DD §3.2)"}"#,
+            ),
+            (
+                "activities list is empty (DD §3.2)",
+                r#"{"Err":"activities list is empty (DD §3.2)"}"#,
             ),
         ] {
             let reply: Reply = Err(msg.to_owned());

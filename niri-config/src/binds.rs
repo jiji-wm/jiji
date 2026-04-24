@@ -404,6 +404,10 @@ pub enum Action {
     AddWorkspaceToActivity(Option<WorkspaceReference>, ActivityReference),
     #[knuffel(skip)]
     RemoveWorkspaceFromActivity(Option<WorkspaceReference>, ActivityReference),
+    // IPC-only: `Vec<ActivityReference>` does not KDL-encode, so there is no
+    // keybinding surface for this action.
+    #[knuffel(skip)]
+    SetWorkspaceActivities(Option<WorkspaceReference>, Vec<ActivityReference>),
 }
 
 impl From<niri_ipc::Action> for Action {
@@ -735,6 +739,13 @@ impl From<niri_ipc::Action> for Action {
             } => Self::RemoveWorkspaceFromActivity(
                 workspace.map(WorkspaceReference::from),
                 activity.into(),
+            ),
+            niri_ipc::Action::SetWorkspaceActivities {
+                workspace,
+                activities,
+            } => Self::SetWorkspaceActivities(
+                workspace.map(WorkspaceReference::from),
+                activities.into_iter().map(ActivityReference::from).collect(),
             ),
             // niri_ipc::Action is #[non_exhaustive]: any new variant added to
             // niri_ipc without a matching arm here is a coding error that

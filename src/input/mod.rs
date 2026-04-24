@@ -1907,6 +1907,78 @@ impl State {
                     }
                 }
             }
+            Action::SetWorkspaceActivities(ws_ref, activity_refs) => {
+                // Per DD §5.11 line 1082: Set is hard-blocked by an in-flight
+                // workspace-switch gesture (symmetric-diff removes on the
+                // active view invalidate gesture fractional targets). Same
+                // gate as Remove. No §5.19 call needed here — Set does NOT
+                // flip the active activity cursor; inhibitor reconciliation
+                // fires on activity flips only. (WHY-comment for future grep
+                // sweeps.)
+                if let Some(block) = self
+                    .niri
+                    .layout
+                    .is_workspace_activity_assignment_blocked_by_gesture()
+                {
+                    debug!(
+                        "SetWorkspaceActivities: hard-blocked by {block:?}, \
+                         ignoring (DD §5.11)"
+                    );
+                    return Err(block.into());
+                }
+                // niri-config holds its own ActivityReference; layout's API
+                // speaks the IPC type, so map at the boundary.
+                let arg_acts: Vec<ActivityReferenceArg> = activity_refs
+                    .into_iter()
+                    .map(ActivityReferenceArg::from)
+                    .collect();
+                let arg_ws_log = ws_ref.clone();
+                match self
+                    .niri
+                    .layout
+                    .set_workspace_activities(ws_ref, &arg_acts)
+                {
+                    Ok((ws_id, new_set, active_affected)) => {
+                        debug!(
+                            "SetWorkspaceActivities: updated {ws_id:?} to \
+                             {new_set:?} (active_affected={active_affected})"
+                        );
+                        if active_affected {
+                            // Visibility for the workspace flipped in the
+                            // active activity. The structural diff at
+                            // ipc/server.rs diff_workspaces emits
+                            // WorkspaceOpenedOrChanged for fields that
+                            // changed. Focus and frame may need refresh.
+                            self.maybe_warp_cursor_to_focus();
+                            self.niri.queue_redraw_all();
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "SetWorkspaceActivities: {e}: workspace={arg_ws_log:?} \
+                             activities={arg_acts:?}"
+                        );
+                        let mapped = match e {
+                            crate::layout::SetWorkspaceActivitiesError::ActivityNotFound => {
+                                DoActionError::SetWorkspaceActivitiesActivityNotFound
+                            }
+                            crate::layout::SetWorkspaceActivitiesError::EmptyActivityList => {
+                                DoActionError::SetWorkspaceActivitiesEmptyActivityList
+                            }
+                            // DD §5.14: asymmetry with Add / Remove — Set
+                            // silently no-ops on workspace miss (log + Ok).
+                            // Do NOT "harmonize" this arm with Add / Remove
+                            // without first checking the §5.14 wire table;
+                            // the dispatch-layer silent-drop IS the wire
+                            // contract for this action.
+                            crate::layout::SetWorkspaceActivitiesError::WorkspaceNotFound => {
+                                return Ok(());
+                            }
+                        };
+                        return Err(mapped);
+                    }
+                }
+            }
             Action::MoveWorkspaceDown => {
                 self.niri.layout.move_workspace_down();
                 // FIXME: granular

@@ -5956,6 +5956,16 @@ fn do_action_error_display_matches_wire_contract() {
         format!("{}", DoActionError::RemoveWorkspaceFromActivityLastActivity),
         "workspace would be left with no activities",
     );
+    // DD §5.14 / §3.2 SetWorkspaceActivities tokens. ActivityNotFound shares
+    // text with Add / Remove — byte-identity pins the shared DD §5.14 row.
+    assert_eq!(
+        format!("{}", DoActionError::SetWorkspaceActivitiesActivityNotFound),
+        "activity not found",
+    );
+    assert_eq!(
+        format!("{}", DoActionError::SetWorkspaceActivitiesEmptyActivityList),
+        "activities list is empty",
+    );
 }
 
 #[test]
@@ -6010,6 +6020,14 @@ fn do_action_error_envelope_matches_wire_contract() {
         (
             DoActionError::RemoveWorkspaceFromActivityLastActivity,
             "workspace would be left with no activities (DD §3.2)",
+        ),
+        (
+            DoActionError::SetWorkspaceActivitiesActivityNotFound,
+            "activity not found (DD §5.14)",
+        ),
+        (
+            DoActionError::SetWorkspaceActivitiesEmptyActivityList,
+            "activities list is empty (DD §3.2)",
         ),
     ] {
         assert_eq!(format_do_action_error(err), expected);
@@ -12335,6 +12353,536 @@ fn remove_workspace_from_activity_hard_blocked_by_gesture() {
 
     // Animations alone must NOT trip the gesture predicate. Clean up the
     // gesture first to isolate the animation-only case.
+    layout.workspace_switch_gesture_end(Some(true));
+    assert!(layout
+        .is_workspace_activity_assignment_blocked_by_gesture()
+        .is_none());
+}
+
+// --- SetWorkspaceActivities ------------------------------------------------
+
+#[test]
+fn set_workspace_activities_diff_removes_from_dormant_view() {
+    // Workspace initially tagged {alpha, beta}. Call Set(ws, [alpha]).
+    // Symmetric diff yields to_remove = {beta} (dormant), to_add = {}.
+    // Beta's single-entry dormant view must be dropped; alpha untouched.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    layout
+        .workspaces
+        .get_mut(&target_ws_id)
+        .expect("live")
+        .activities = [alpha, beta].into_iter().collect();
+    layout
+        .activities
+        .get_mut(beta)
+        .expect("live")
+        .views_mut()
+        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
+
+    let (ws_id, new_set, active_affected) = layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[ActivityReferenceArg::Id(alpha.get())],
+        )
+        .expect("set must succeed");
+    assert_eq!(ws_id, target_ws_id);
+    assert_eq!(new_set, HashSet::from([alpha]));
+    assert!(
+        !active_affected,
+        "alpha stays on ws, beta drops — active activity (alpha) is NOT in symmetric diff",
+    );
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&target_ws_id)
+            .expect("live")
+            .activities(),
+        &HashSet::from([alpha]),
+    );
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("live")
+            .views()
+            .get(&mon_out)
+            .is_none(),
+        "beta's single-entry view must be dropped",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_diff_adds_to_target_view() {
+    // Workspace initially tagged {alpha}. Set(ws, [alpha, beta]) where
+    // beta has a pre-existing dormant view on the output. to_add = {beta}.
+    // Beta's view must append the ws id; alpha's view unchanged.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    // Seed beta's view with one id from alpha's view so Set appends a
+    // distinct id.
+    let seed_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+    layout
+        .activities
+        .get_mut(beta)
+        .expect("beta live")
+        .views_mut()
+        .insert(mon_out.clone(), WorkspaceView::new(vec![seed_ws_id], 0));
+
+    // Pick a workspace from alpha's view NOT in beta's view — distinct.
+    let target_ws_id = {
+        let ids = layout.active_view(&mon_out).ids().to_vec();
+        *ids.iter()
+            .find(|id| **id != seed_ws_id)
+            .expect("alpha view has >= 2 entries")
+    };
+
+    let (_, new_set, active_affected) = layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+    assert_eq!(new_set, HashSet::from([alpha, beta]));
+    assert!(
+        !active_affected,
+        "alpha stays, beta is added — active activity (alpha) not in symmetric diff",
+    );
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&target_ws_id)
+            .expect("live")
+            .activities(),
+        &HashSet::from([alpha, beta]),
+    );
+    assert_eq!(
+        layout
+            .activities
+            .get(beta)
+            .expect("live")
+            .views()
+            .get(&mon_out)
+            .expect("beta has view")
+            .ids(),
+        &[seed_ws_id, target_ws_id],
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_drops_single_entry_view_for_removed_active_activity() {
+    // Set removes the active activity from a workspace whose active-activity
+    // view has exactly that workspace as its single entry on a connected
+    // monitor. `ensure_active_views` must reinstate the view.
+    //
+    // Fixture shape mirrors `remove_workspace_from_activity_active_activity_recreates_view`:
+    // ws is tagged {alpha, beta}, appears in alpha's active view (single
+    // entry) AND in beta's dormant view so pool-keys equality holds.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let output = layout.monitors[0].output.clone();
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    let ws = Workspace::new(
+        &output,
+        [alpha, beta].into_iter().collect(),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let ws_id = ws.id();
+    assert!(layout.workspaces.insert(ws_id, ws).is_none());
+
+    let original_ids: Vec<_> = layout.active_view(&mon_out).ids().to_vec();
+    layout
+        .activities
+        .active_mut()
+        .views_mut()
+        .insert(mon_out.clone(), WorkspaceView::new(vec![ws_id], 0));
+    for id in &original_ids {
+        let _ = layout.workspaces.remove(id);
+    }
+    layout
+        .activities
+        .get_mut(beta)
+        .expect("beta live")
+        .views_mut()
+        .insert(mon_out.clone(), WorkspaceView::new(vec![ws_id], 0));
+    layout.verify_invariants();
+
+    // Set(ws, [beta]) → to_remove = {alpha}, drops alpha's single-entry view.
+    let (_, _, active_affected) = layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[ActivityReferenceArg::Id(beta.get())],
+        )
+        .expect("set must succeed");
+    assert!(
+        active_affected,
+        "alpha (active) is in to_remove — active_affected must be true",
+    );
+
+    let reinstated = layout
+        .activities
+        .active()
+        .views()
+        .get(&mon_out)
+        .expect("ensure_active_views must reinstate alpha's view on mon_out");
+    assert!(!reinstated.ids().contains(&ws_id));
+    assert!(!reinstated.ids().is_empty(), "reinstated view non-empty");
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&ws_id)
+            .expect("live")
+            .activities(),
+        &HashSet::from([beta]),
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_empty_list_errors_without_mutation() {
+    // Passing an empty list must Err(EmptyActivityList) with zero mutation —
+    // guard-before-mutate. Pre/post snapshot of the workspace's activities
+    // and alpha's view is byte-identical after the call.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    let acts_before = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("live")
+        .activities()
+        .clone();
+    assert_eq!(acts_before, HashSet::from([alpha]));
+    let view_ids_before = layout.active_view(&mon_out).ids().to_vec();
+
+    let err = layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[],
+        )
+        .expect_err("empty list must err");
+    assert_eq!(err, SetWorkspaceActivitiesError::EmptyActivityList);
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&target_ws_id)
+            .expect("live")
+            .activities(),
+        &acts_before,
+    );
+    assert_eq!(layout.active_view(&mon_out).ids(), &view_ids_before[..]);
+}
+
+#[test]
+fn set_workspace_activities_activity_not_found_errors_without_mutation() {
+    // List contains one unresolvable id. Must Err(ActivityNotFound) with
+    // zero mutation.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let mon_out = layout.monitors[0].output_id();
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+    let acts_before = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("live")
+        .activities()
+        .clone();
+
+    let err = layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[ActivityReferenceArg::Id(u64::MAX)],
+        )
+        .expect_err("unknown activity must err");
+    assert_eq!(err, SetWorkspaceActivitiesError::ActivityNotFound);
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&target_ws_id)
+            .expect("live")
+            .activities(),
+        &acts_before,
+    );
+}
+
+#[test]
+fn set_workspace_activities_activity_not_found_precedence_over_empty() {
+    // A single-element list `[unresolvable_id]` must yield ActivityNotFound,
+    // not EmptyActivityList — precedence pin. Resolution happens before the
+    // empty-list gate.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let mon_out = layout.monitors[0].output_id();
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    let err = layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[ActivityReferenceArg::Id(u64::MAX)],
+        )
+        .expect_err("unknown activity must err");
+    assert_eq!(
+        err,
+        SetWorkspaceActivitiesError::ActivityNotFound,
+        "ActivityNotFound must precede EmptyActivityList",
+    );
+}
+
+#[test]
+fn set_workspace_activities_workspace_not_found_returns_err() {
+    // Layout-level: surfaces WorkspaceNotFound. The dispatch-layer silent
+    // no-op is an input/mod.rs concern; here we pin the Layout surface so
+    // `DoActionError` match exhaustiveness stays load-bearing.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+
+    let err = layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(u64::MAX)),
+            &[ActivityReferenceArg::Id(alpha.get())],
+        )
+        .expect_err("unknown workspace must err at the Layout surface");
+    assert_eq!(err, SetWorkspaceActivitiesError::WorkspaceNotFound);
+}
+
+#[test]
+fn set_workspace_activities_no_op_when_set_equals_current() {
+    // Call Set with new == old. Must return Ok without touching any state:
+    // no animation clear, no view patching, and the result's
+    // active_activity_affected flag is false.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    let view_ids_before = layout.active_view(&mon_out).ids().to_vec();
+
+    let (_, new_set, active_affected) = layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[ActivityReferenceArg::Id(alpha.get())],
+        )
+        .expect("no-op set must succeed");
+    assert_eq!(new_set, HashSet::from([alpha]));
+    assert!(
+        !active_affected,
+        "identity set must not flag active_affected",
+    );
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&target_ws_id)
+            .expect("live")
+            .activities(),
+        &HashSet::from([alpha]),
+    );
+    assert_eq!(layout.active_view(&mon_out).ids(), &view_ids_before[..]);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_snaps_animation_only_when_active_affected() {
+    // Arm an in-flight workspace-switch Animation. A Set where active is
+    // NOT in the symmetric diff must leave the animation intact; a Set that
+    // DOES touch the active activity must snap the animation on every
+    // monitor (DD §5.11 snap+proceed).
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    // Pick the named workspace (its remove_at patch preserves bookend).
+    let target_ws_id = {
+        let ids = layout.active_view(&mon_out).ids().to_vec();
+        *ids.iter()
+            .find(|id| {
+                layout
+                    .workspaces
+                    .get(id)
+                    .expect("view id in pool")
+                    .name()
+                    .is_some()
+            })
+            .expect("named workspace must be present")
+    };
+
+    // Place into beta's dormant view for pool-keys equality after the
+    // cross-activity changes below. ws.activities stays {alpha} initially.
+    layout
+        .activities
+        .get_mut(beta)
+        .expect("live")
+        .views_mut()
+        .insert(
+            mon_out.clone(),
+            WorkspaceView::new(vec![target_ws_id], 0),
+        );
+    layout.verify_invariants();
+
+    // Arm an animation.
+    let target_pos = if layout.active_view(&mon_out).active_position() == 0 {
+        1
+    } else {
+        0
+    };
+    layout.switch_workspace(target_pos);
+    assert!(
+        matches!(
+            layout.monitors[0].workspace_switch,
+            Some(super::monitor::WorkspaceSwitch::Animation(_)),
+        ),
+        "switch_workspace must arm an Animation",
+    );
+
+    // Path A: Set(ws, [alpha]) — new == old, identity case, no diff.
+    // Animation must survive (no mutation, no snap).
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[ActivityReferenceArg::Id(alpha.get())],
+        )
+        .expect("identity set must succeed");
+    assert!(
+        matches!(
+            layout.monitors[0].workspace_switch,
+            Some(super::monitor::WorkspaceSwitch::Animation(_)),
+        ),
+        "no-op Set must not snap in-flight animation",
+    );
+
+    // Path B: Set(ws, [beta]) — to_remove = {alpha}, active_affected = true.
+    // Animation must be snapped.
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[ActivityReferenceArg::Id(beta.get())],
+        )
+        .expect("set with active in diff must succeed");
+    for mon in &layout.monitors {
+        assert!(
+            mon.workspace_switch.is_none(),
+            "Set touching active activity must snap animation on every monitor",
+        );
+    }
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_blocked_by_gesture_at_dispatch() {
+    // Predicate-level pin: the dispatch arm's weaker gate fires on a
+    // workspace-switch gesture in flight on any monitor, matching Remove's
+    // recipe. Animations alone do NOT trip the gate.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+
+    assert!(layout
+        .is_workspace_activity_assignment_blocked_by_gesture()
+        .is_none());
+
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .expect("output2 live");
+    layout.workspace_switch_gesture_begin(&output2, true);
+
+    assert_eq!(
+        layout.is_workspace_activity_assignment_blocked_by_gesture(),
+        Some(super::ActivitySwitchBlock::WorkspaceSwitchGesture),
+        "Set shares Remove's weaker gesture gate — pinned by the predicate",
+    );
+
     layout.workspace_switch_gesture_end(Some(true));
     assert!(layout
         .is_workspace_activity_assignment_blocked_by_gesture()

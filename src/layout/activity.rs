@@ -452,6 +452,47 @@ impl fmt::Display for RemoveWorkspaceFromActivityError {
 
 impl std::error::Error for RemoveWorkspaceFromActivityError {}
 
+/// Validation failure for replacing a workspace's activity set via
+/// `Layout::set_workspace_activities`. Variants mirror the DD §5.14 wire
+/// contract plus the DD §3.2 non-empty-activities invariant guard.
+///
+/// Precedence: `ActivityNotFound` > `EmptyActivityList` > `WorkspaceNotFound`.
+/// Activity refs are resolved first — an unresolvable ref in the list
+/// short-circuits to `ActivityNotFound` regardless of list length, matching
+/// the `resolve_activity_ref` precedence of `Add` / `Remove`.
+///
+/// `WorkspaceNotFound` is total on the `Display` side for symmetry with the
+/// other action errors, but per DD §5.14 the dispatch layer intercepts it and
+/// returns `Ok(())` (silent no-op) so it never reaches the wire. Keeping the
+/// variant here lets the dispatch arm's `match e` stay exhaustive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetWorkspaceActivitiesError {
+    /// At least one supplied activity reference does not resolve to a live
+    /// activity in the pool.
+    ActivityNotFound,
+    /// The supplied `activities` list was empty (DD §3.2: every workspace
+    /// must belong to at least one activity).
+    EmptyActivityList,
+    /// No workspace in the pool matches the supplied reference (or `None`
+    /// was supplied and there is no active workspace).
+    WorkspaceNotFound,
+}
+
+impl fmt::Display for SetWorkspaceActivitiesError {
+    /// Plain lowercase tokens without DD-section punctuation. Matches the DD
+    /// §5.14 wire table wording verbatim. The envelope and DD-section suffix
+    /// are assembled by `format_do_action_error`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ActivityNotFound => f.write_str("activity not found"),
+            Self::EmptyActivityList => f.write_str("activities list is empty"),
+            Self::WorkspaceNotFound => f.write_str("workspace not found"),
+        }
+    }
+}
+
+impl std::error::Error for SetWorkspaceActivitiesError {}
+
 /// Validation failure for config-reload activity removal via
 /// `Layout::reconcile_activities_on_reload_remove`. Each variant corresponds
 /// to one of the rejection rules the outer entry point evaluates before any
