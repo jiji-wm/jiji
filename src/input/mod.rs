@@ -815,22 +815,63 @@ impl State {
                 show_pointer,
                 path,
             } => {
-                let mut windows = self.niri.layout.windows();
-                let window = windows.find(|(_, m)| m.id().get() == id);
-                if let Some((Some(monitor), mapped)) = window {
-                    let output = monitor.output();
-                    self.backend.with_primary_renderer(|renderer| {
-                        if let Err(err) = self.niri.screenshot_window(
-                            renderer,
-                            output,
-                            mapped,
-                            write_to_disk,
-                            show_pointer,
-                            path,
-                        ) {
-                            warn!("error taking screenshot: {err:?}");
-                        }
-                    });
+                // DD §5.18: widen the id lookup from `windows()` (active-view
+                // scope) to `windows_all()` (pool-span) so hidden-activity
+                // windows are reachable. A window with no live monitor backing
+                // its bound output is a silent no-op (design call (a) below).
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
+                if let Some((oid_opt, mapped)) = window {
+                    // Resolve through the layout rather than using the pool
+                    // workspace's `OutputId` alone: screenshotting needs the
+                    // renderer's live `Output`, which only exists on a
+                    // connected monitor.
+                    let monitor = oid_opt
+                        .and_then(|oid| self.niri.layout.monitor_for_output_id(oid));
+                    if let Some(monitor) = monitor {
+                        // Hoist `output` before the closure for readability — mirrors
+                        // the style used by `focus_with_output()` callers.
+                        let output = monitor.output();
+                        self.backend.with_primary_renderer(|renderer| {
+                            if let Err(err) = self.niri.screenshot_window(
+                                renderer,
+                                output,
+                                mapped,
+                                write_to_disk,
+                                show_pointer,
+                                path,
+                            ) {
+                                warn!("error taking screenshot: {err:?}");
+                            }
+                        });
+                    } else if let Some(oid) = oid_opt {
+                        // Design call (a): silent no-op + `debug!` when the
+                        // window's bound output is disconnected. Alternative
+                        // (b) — falling back to the primary monitor — was
+                        // rejected because scale/transform mismatch would
+                        // silently produce a wrong-for-that-output render.
+                        // A future reader tempted to flip to (b) must come
+                        // back to this comment first.
+                        debug!(
+                            "screenshot_window: id={id} bound output {oid:?} not connected, \
+                             no-op (DD §5.18)"
+                        );
+                    } else {
+                        // In-flight interactive-move window for which `windows_all`
+                        // could not resolve a bound output id — either no live
+                        // monitor exists for the move's output (triggers a `warn!`
+                        // inside `windows_all`), or no pool workspace is currently
+                        // bound to it.
+                        debug!(
+                            "screenshot_window: id={id} has no bound output \
+                             (interactive-move in flight), no-op"
+                        );
+                    }
+                } else {
+                    debug!("screenshot_window: id={id} not found in pool, no-op");
                 }
             }
             Action::ToggleKeyboardShortcutsInhibit => {
