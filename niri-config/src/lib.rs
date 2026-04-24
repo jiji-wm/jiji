@@ -888,6 +888,7 @@ mod tests {
                 exclude is-active=true is-focused=false
 
                 open-on-output "eDP-1"
+                open-on-activity "Work"
                 open-maximized true
                 open-fullscreen false
                 open-floating false
@@ -1796,6 +1797,9 @@ mod tests {
                         "eDP-1",
                     ),
                     open_on_workspace: None,
+                    open_on_activity: Some(
+                        "Work",
+                    ),
                     open_maximized: Some(
                         true,
                     ),
