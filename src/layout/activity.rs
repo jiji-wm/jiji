@@ -850,6 +850,21 @@ impl Activities {
         self.map.get(&id)
     }
 
+    /// Find an activity whose name matches `name` case-insensitively
+    /// (`str::eq_ignore_ascii_case`), in declaration order.
+    ///
+    /// Mirrors the matching rule used by [`Self::resolve_config_names`] and
+    /// the `niri_config::ActivityName` duplicate detector. Returns `None` if
+    /// no activity carries the requested name; callers (e.g. the
+    /// `open-on-activity` window-rule resolver in `send_initial_configure`)
+    /// own the silent-fallback to the active activity (liberal-accept,
+    /// mirroring `open-on-output`'s precedent for unknown output names).
+    pub fn find_by_name(&self, name: &str) -> Option<&Activity> {
+        self.map
+            .values()
+            .find(|a| a.name().eq_ignore_ascii_case(name))
+    }
+
     pub fn get_mut(&mut self, id: ActivityId) -> Option<&mut Activity> {
         self.map.get_mut(&id)
     }

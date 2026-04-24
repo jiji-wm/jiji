@@ -13995,3 +13995,348 @@ fn toggle_workspace_sticky_no_op_when_workspace_not_found() {
         .expect_err("unknown workspace must err at the Layout surface");
     assert_eq!(err, ToggleWorkspaceStickyError::WorkspaceNotFound);
 }
+
+// ---- DD §6.4 `open-on-activity` cross-activity helpers (Phase 2 boxes 2022 + 2023) ----
+
+/// Build a [`Config`] with two declared activities (`alpha` first → seed,
+/// `beta` second → inactive) and the supplied per-activity workspace lists.
+/// The `output_for` slice (same length as `alpha_ws + beta_ws`) routes each
+/// workspace to a named output via `open-on-output`. `None` leaves the
+/// workspace unbound. Mirrors the integration-test helper in
+/// `tests/fixture.rs::config_with_two_activities`, but constructed
+/// field-by-field so tests can name an output.
+fn cross_activity_config(
+    alpha_ws: &[(&str, Option<&str>)],
+    beta_ws: &[(&str, Option<&str>)],
+) -> niri_config::Config {
+    let mut workspaces = Vec::new();
+    for (name, output) in alpha_ws {
+        workspaces.push(WorkspaceConfig {
+            name: WorkspaceName((*name).to_owned()),
+            open_on_output: output.map(|s| s.to_owned()),
+            layout: None,
+            activities: vec!["alpha".to_owned()],
+            sticky: None,
+        });
+    }
+    for (name, output) in beta_ws {
+        workspaces.push(WorkspaceConfig {
+            name: WorkspaceName((*name).to_owned()),
+            open_on_output: output.map(|s| s.to_owned()),
+            layout: None,
+            activities: vec!["beta".to_owned()],
+            sticky: None,
+        });
+    }
+    niri_config::Config {
+        activities: vec![
+            niri_config::Activity {
+                name: niri_config::ActivityName("alpha".to_owned()),
+            },
+            niri_config::Activity {
+                name: niri_config::ActivityName("beta".to_owned()),
+            },
+        ],
+        workspaces,
+        ..niri_config::Config::default()
+    }
+}
+
+#[test]
+fn activities_find_by_name_resolves_case_insensitively() {
+    let layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(&[], &[]),
+    );
+    let beta_id = layout
+        .activities()
+        .find_by_name("BETA")
+        .expect("case-insensitive match must resolve a config-declared activity")
+        .id();
+    let canonical = layout
+        .activities()
+        .find_by_name("beta")
+        .expect("exact-case lookup must resolve too");
+    assert_eq!(beta_id, canonical.id());
+    assert!(layout.activities().find_by_name("gamma").is_none());
+}
+
+#[test]
+fn find_workspace_in_activity_by_name_finds_hidden_workspace() {
+    // A workspace tagged with the inactive `beta` activity is not in the
+    // active view — `find_workspace_by_name` would miss it. Pin that the new
+    // pool-walk helper resolves it.
+    let mut layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(&[], &[("beta-ws", None)]),
+    );
+    layout.add_output(make_test_output("output1"), None);
+
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+    let alpha_id = layout.activities().find_by_name("alpha").unwrap().id();
+
+    let found = layout
+        .find_workspace_in_activity_by_name("beta-ws", beta_id)
+        .expect("hidden-activity workspace must be reachable via the new helper");
+    assert_eq!(found.name(), Some(&"beta-ws".to_owned()));
+    assert!(found.activities().contains(&beta_id));
+
+    // Same name + wrong activity → None (DD §6.4 point 3 fallback).
+    assert!(layout
+        .find_workspace_in_activity_by_name("beta-ws", alpha_id)
+        .is_none());
+}
+
+#[test]
+fn find_workspace_in_activity_by_name_returns_none_for_active_activity_when_workspace_in_other_activity()
+ {
+    // §6.4 point 3 fallback: `open-on-workspace ws` + `open-on-activity X`
+    // where `ws` is not tagged with `X` must miss, so the precedence chain
+    // can fall through to the next branch.
+    let mut layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(&[("alpha-only", None)], &[]),
+    );
+    layout.add_output(make_test_output("output1"), None);
+
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+    assert!(layout
+        .find_workspace_in_activity_by_name("alpha-only", beta_id)
+        .is_none());
+}
+
+#[test]
+fn monitor_for_workspace_in_activity_returns_none_for_workspace_not_in_activity() {
+    // The §6.4 point-3 lookup variant of the above: `monitor_for_workspace`
+    // must filter by activity membership, not just name.
+    let mut layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(
+            &[("alpha-only", Some("output1"))],
+            &[("beta-only", Some("output1"))],
+        ),
+    );
+    layout.add_output(make_test_output("output1"), None);
+
+    let alpha_id = layout.activities().find_by_name("alpha").unwrap().id();
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+
+    assert!(layout
+        .monitor_for_workspace_in_activity("alpha-only", alpha_id)
+        .is_some());
+    assert!(layout
+        .monitor_for_workspace_in_activity("alpha-only", beta_id)
+        .is_none(),);
+    assert!(layout
+        .monitor_for_workspace_in_activity("beta-only", beta_id)
+        .is_some());
+    assert!(layout
+        .monitor_for_workspace_in_activity("beta-only", alpha_id)
+        .is_none());
+}
+
+#[test]
+fn view_in_activity_or_materialize_creates_fresh_view_for_inactive_activity() {
+    // alpha is the seed (active); beta has no workspaces in config and no
+    // active view. After `view_in_activity_or_materialize(beta, output1)`,
+    // beta must own a fresh view rooted on output1 with exactly one
+    // trailing-empty workspace (DD §5.3 fresh branch under no-EWAF).
+    let mut layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(&[], &[]),
+    );
+    layout.add_output(make_test_output("output1"), None);
+
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+    let output_id = OutputId::new(&layout.monitors[0].output);
+
+    assert!(
+        layout
+            .activities()
+            .get(beta_id)
+            .unwrap()
+            .views()
+            .get(&output_id)
+            .is_none(),
+        "precondition: beta has no view for output1",
+    );
+
+    layout.view_in_activity_or_materialize(beta_id, &output_id);
+
+    let view = layout
+        .activities()
+        .get(beta_id)
+        .unwrap()
+        .views()
+        .get(&output_id)
+        .expect("post: beta must own a fresh view for output1");
+    assert_eq!(view.len(), 1, "fresh branch must allocate exactly one empty");
+    let id = view.ids()[0];
+    let ws = layout.workspace_pool().get(&id).unwrap();
+    assert!(ws.activities().contains(&beta_id));
+    assert!(!ws.has_windows_or_name());
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn view_in_activity_or_materialize_lifts_pre_tagged_workspaces() {
+    // beta has one config-declared workspace bound to output1. Materializing
+    // beta's view must lift it (the lift branch in `ensure_view_for`)
+    // and pad with a trailing empty so the "last must be empty/unnamed"
+    // monitor invariants hold.
+    let mut layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(&[], &[("beta-ws", Some("output1"))]),
+    );
+    layout.add_output(make_test_output("output1"), None);
+
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+    let output_id = OutputId::new(&layout.monitors[0].output);
+
+    layout.view_in_activity_or_materialize(beta_id, &output_id);
+
+    let view = layout
+        .activities()
+        .get(beta_id)
+        .unwrap()
+        .views()
+        .get(&output_id)
+        .expect("post: beta must own a view for output1");
+    assert_eq!(view.len(), 2, "lift branch (no EWAF) must produce body + trailing empty");
+    let body_id = view.ids()[0];
+    let trailing_id = view.ids()[1];
+    let body = layout.workspace_pool().get(&body_id).unwrap();
+    let trailing = layout.workspace_pool().get(&trailing_id).unwrap();
+    assert_eq!(body.name(), Some(&"beta-ws".to_owned()));
+    assert!(trailing.name().is_none());
+    assert!(!trailing.has_windows_or_name());
+    assert_eq!(view.active_position(), 0, "active stays on the lifted workspace");
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn view_in_activity_or_materialize_respects_ewaf_bookend() {
+    // EWAF (`empty-workspace-above-first`) mirror of the lift branch above:
+    // the materialized view must also have a leading-empty bookend, with
+    // active_position shifted to 1.
+    let mut config = cross_activity_config(&[], &[("beta-ws", Some("output1"))]);
+    config.layout.empty_workspace_above_first = true;
+
+    let mut layout = Layout::<TestWindow>::new(Clock::with_time(Duration::ZERO), &config);
+    layout.add_output(make_test_output("output1"), None);
+
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+    let output_id = OutputId::new(&layout.monitors[0].output);
+
+    layout.view_in_activity_or_materialize(beta_id, &output_id);
+
+    let view = layout
+        .activities()
+        .get(beta_id)
+        .unwrap()
+        .views()
+        .get(&output_id)
+        .expect("post: beta must own a view for output1");
+    assert_eq!(view.len(), 3, "EWAF lift branch must produce leading + body + trailing");
+    assert_eq!(view.active_position(), 1, "EWAF active shifts to body");
+    let leading = layout.workspace_pool().get(&view.ids()[0]).unwrap();
+    let body = layout.workspace_pool().get(&view.ids()[1]).unwrap();
+    let trailing = layout.workspace_pool().get(&view.ids()[2]).unwrap();
+    assert!(leading.name().is_none());
+    assert_eq!(body.name(), Some(&"beta-ws".to_owned()));
+    assert!(trailing.name().is_none());
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn view_in_activity_or_materialize_no_op_when_view_already_exists() {
+    // Re-call must not allocate a second trailing empty / re-lift workspaces.
+    let mut layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(&[], &[]),
+    );
+    layout.add_output(make_test_output("output1"), None);
+
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+    let output_id = OutputId::new(&layout.monitors[0].output);
+
+    layout.view_in_activity_or_materialize(beta_id, &output_id);
+    let after_first = layout
+        .activities()
+        .get(beta_id)
+        .unwrap()
+        .views()
+        .get(&output_id)
+        .unwrap()
+        .ids()
+        .to_vec();
+
+    layout.view_in_activity_or_materialize(beta_id, &output_id);
+    let after_second = layout
+        .activities()
+        .get(beta_id)
+        .unwrap()
+        .views()
+        .get(&output_id)
+        .unwrap()
+        .ids()
+        .to_vec();
+
+    assert_eq!(after_first, after_second, "second call must be a no-op");
+    layout.verify_invariants();
+}
+
+#[test]
+fn add_window_to_hidden_activity_workspace_via_add_window_target_workspace() {
+    // Pin the hidden-target shortcut in `Layout::add_window`. A workspace
+    // tagged with the inactive `beta` activity is materialized via
+    // `view_in_activity_or_materialize`; then `add_window` is called with
+    // `AddWindowTarget::Workspace(beta_ws_id)`. The window must land in the
+    // pool entry, the active activity's view for output1 must remain
+    // unchanged, and the layout must stay invariant-clean.
+    let mut layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(&[], &[("beta-ws", Some("output1"))]),
+    );
+    layout.add_output(make_test_output("output1"), None);
+
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+    let output_id = OutputId::new(&layout.monitors[0].output);
+
+    // Materialize beta's view so the workspace is reachable; capture the
+    // alpha-active view shape as a regression baseline.
+    layout.view_in_activity_or_materialize(beta_id, &output_id);
+    let alpha_view_before = layout.active_view(&output_id).ids().to_vec();
+    let beta_ws_id = layout
+        .find_workspace_in_activity_by_name("beta-ws", beta_id)
+        .expect("beta-ws must be present in pool")
+        .id();
+
+    let window = TestWindow::new(TestWindowParams::new(0));
+    let _output = layout.add_window(
+        window,
+        AddWindowTarget::Workspace(beta_ws_id),
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::No,
+    );
+
+    // The window landed in the hidden workspace.
+    let beta_ws = layout.workspace_pool().get(&beta_ws_id).unwrap();
+    assert!(beta_ws.has_window(&0), "window must land in the hidden-activity workspace");
+
+    // The active activity's view for output1 is unchanged (no auto-switch,
+    // no view mutation).
+    assert_eq!(
+        layout.active_view(&output_id).ids(),
+        alpha_view_before.as_slice(),
+        "alpha view for output1 must remain unchanged after adding to a hidden-activity workspace",
+    );
+
+    layout.verify_invariants();
+}

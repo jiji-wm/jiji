@@ -1489,6 +1489,33 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         let seed_activity = self.activities.active_id();
+
+        // Hidden-target shortcut: when `AddWindowTarget::Workspace(ws_id)` names a
+        // workspace that is **not** present in the active activity's view for any
+        // monitor (e.g. an `open-on-activity` window rule routed the window into a
+        // hidden activity per DD §6.4), the active-view-keyed lookups below would
+        // panic on the `expect("...active activity")` assertions. Fall through to
+        // a pool-only path that resolves the monitor via the workspace's bound
+        // `output_id()` and adds the tile straight to the pool entry, leaving
+        // every active-activity `WorkspaceView` untouched.
+        if let AddWindowTarget::Workspace(ws_id) = &target {
+            let active_views = self.activities.active().views();
+            let in_active_view = active_views
+                .values()
+                .any(|view| view.ids().contains(ws_id));
+            if !in_active_view {
+                return self.add_window_to_hidden_workspace(
+                    *ws_id,
+                    window,
+                    width,
+                    scrolling_height,
+                    is_full_width,
+                    is_floating,
+                    activate,
+                );
+            }
+        }
+
         let views = self.activities.active().views();
         let pool = &mut self.workspaces;
         let monitors = &mut self.monitors[..];
@@ -1504,6 +1531,8 @@ impl<W: LayoutElement> Layout<W> {
                 (mon_idx, MonitorAddWindowTarget::Auto)
             }
             AddWindowTarget::Workspace(ws_id) => {
+                // Visible-target path: the early shortcut above ruled out
+                // hidden-activity ids, so the active view *must* contain `ws_id`.
                 let mon_idx = monitors
                     .iter()
                     .position(|mon| {
@@ -1513,7 +1542,9 @@ impl<W: LayoutElement> Layout<W> {
                             .ids()
                             .contains(&ws_id)
                     })
-                    .unwrap();
+                    .expect(
+                        "hidden-target shortcut above must catch ws_id not in any active view",
+                    );
 
                 (
                     mon_idx,
@@ -1624,6 +1655,79 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         Some(&monitors[mon_idx].output)
+    }
+
+    /// Pool-only [`Self::add_window`] path used when the requested
+    /// `AddWindowTarget::Workspace(ws_id)` is not present in any active
+    /// activity's `WorkspaceView` — i.e. the target workspace lives in a
+    /// hidden activity (DD §6.4 `open-on-activity` window-rule into a
+    /// non-active activity).
+    ///
+    /// Resolves the owning monitor through the workspace's bound
+    /// `output_id()` (Some(real OutputId) for connected workspaces) and
+    /// adds the tile straight to the pool entry via `Workspace::add_tile`.
+    /// Bypasses every `WorkspaceView` lookup and every `Monitor`-keyed
+    /// add path so the active-activity views remain untouched. The user
+    /// will see the new window the next time they switch to that activity.
+    ///
+    /// Returns the monitor's `Output` to mirror [`Self::add_window`]'s
+    /// return shape, so the caller (`compositor.rs`) can `queue_redraw`
+    /// against it.
+    #[allow(clippy::too_many_arguments)]
+    fn add_window_to_hidden_workspace(
+        &mut self,
+        ws_id: WorkspaceId,
+        window: W,
+        width: Option<PresetSize>,
+        scrolling_height: Option<SizeChange>,
+        is_full_width: bool,
+        is_floating: bool,
+        activate: ActivateWindow,
+    ) -> Option<&Output> {
+        let id = window.id().clone();
+        let ws_output_id = self
+            .workspaces
+            .get(&ws_id)
+            .expect("AddWindowTarget::Workspace must name a live pool key")
+            .output_id()
+            .cloned()?;
+        // Resolve the monitor owning this workspace. If the workspace is unbound
+        // (output_id == Some(OutputId(""))) or the named output is not currently
+        // connected, there is no monitor to add to; returning None signals the
+        // caller to drop the window normally (avoids an orphan tile in the pool).
+        // In practice this is unreachable for the `open-on-activity` path because
+        // `Monitor::new` reclaim-binds pre-tagged workspaces to the output on
+        // first connect, so a workspace whose id was returned by the
+        // configure-time `view_in_activity_or_materialize` call is always bound.
+        let mon_idx = self
+            .monitors
+            .iter()
+            .position(|mon| mon.output_id() == ws_output_id)?;
+
+        let mon_output = self.monitors[mon_idx].output.clone();
+        let ws = self
+            .workspaces
+            .get_mut(&ws_id)
+            .expect("AddWindowTarget::Workspace must name a live pool key");
+        let scrolling_width = ws.resolve_scrolling_width(&window, width);
+        let tile = ws.make_tile(window);
+        ws.add_tile(
+            Some(&mon_output),
+            tile,
+            WorkspaceAddWindowTarget::Auto,
+            activate,
+            scrolling_width,
+            is_full_width,
+            is_floating,
+        );
+
+        if !is_floating {
+            if let Some(change) = scrolling_height {
+                ws.set_window_height(Some(&id), change);
+            }
+        }
+
+        Some(&self.monitors[mon_idx].output)
     }
 
     pub fn remove_window(
@@ -3741,6 +3845,78 @@ impl<W: LayoutElement> Layout<W> {
         })
     }
 
+    /// Return the connected monitor that currently owns a workspace named
+    /// `workspace_name` (case-insensitive, matching the
+    /// [`Self::find_workspace_by_name`] / [`Self::monitor_for_workspace`]
+    /// precedent) AND whose activities set contains `activity_id`.
+    ///
+    /// Differs from [`Self::monitor_for_workspace`] in two ways:
+    /// 1. The lookup walks the workspace pool keyed by `output_id` ↔ monitor,
+    ///    not the active activity's `WorkspaceView`. Hidden-activity
+    ///    workspaces are visible to this scan.
+    /// 2. The match is filtered by activity membership.
+    ///
+    /// Returns `None` if the workspace exists but is unbound (`output_id` is
+    /// `None` or `Some(OutputId(""))` — the disconnected / unbound-config
+    /// sentinels) or if no workspace matches. The empty-`OutputId` sentinel
+    /// is never the id of a real connected monitor, so the
+    /// `monitor_for_output_id` filter naturally rejects it (Appendix C entry
+    /// 1 risk neutralized).
+    ///
+    /// Used by `xdg_shell::send_initial_configure` to scope the
+    /// `open-on-workspace`-derived monitor lookup against an
+    /// `open-on-activity` target activity (DD §6.4 point 3): if the named
+    /// workspace is not tagged with the target activity, the chain falls
+    /// through to subsequent targets.
+    pub fn monitor_for_workspace_in_activity(
+        &self,
+        workspace_name: &str,
+        activity_id: ActivityId,
+    ) -> Option<&Monitor<W>> {
+        let ws = self.workspaces.values().find(|ws| {
+            ws.activities().contains(&activity_id)
+                && ws
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
+        })?;
+        let out_id = ws.output_id()?;
+        self.monitor_for_output_id(out_id)
+    }
+
+    /// Pool-walk lookup of a workspace by name, scoped to a specific
+    /// activity.
+    ///
+    /// Returns the first workspace whose activities set contains
+    /// `activity_id` and whose name matches `workspace_name`
+    /// case-insensitively (matching [`Self::find_workspace_by_name`]'s
+    /// `eq_ignore_ascii_case` precedent). The walk does
+    /// **not** filter by `output_id`, so it succeeds for hidden-activity
+    /// workspaces that aren't in the active view.
+    ///
+    /// Distinct from [`Self::find_workspace_by_name`], which walks
+    /// `monitors × active_view.ids` plus the disconnected-workspace list
+    /// and returns active-activity matches only (preserved by design — see
+    /// the spec's "out of scope" note on cross-activity widening of that
+    /// helper).
+    ///
+    /// Used by `compositor.rs` map-time re-resolution of
+    /// `InitialConfigureState::Configured.workspace_name` when the
+    /// configure-time target was a hidden activity (DD §6.4).
+    pub fn find_workspace_in_activity_by_name(
+        &self,
+        workspace_name: &str,
+        activity_id: ActivityId,
+    ) -> Option<&Workspace<W>> {
+        self.workspaces.values().find(|ws| {
+            ws.activities().contains(&activity_id)
+                && ws
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
+        })
+    }
+
     pub fn outputs(&self) -> impl Iterator<Item = &Output> + '_ {
         self.monitors().map(|mon| &mon.output)
     }
@@ -4509,20 +4685,14 @@ impl<W: LayoutElement> Layout<W> {
     //
     // Borrow discipline: we read `&self.monitors` once into a Vec of triples
     // (OutputId, cloned `Output`, cloned per-monitor `Rc<Options>`), drop that borrow,
-    // and only then take `&mut self.activities` (and occasionally `&mut self.workspaces`
-    // when allocating). The `Rc<Options>` is captured per-monitor because the lift branch
-    // below mirrors `Monitor::new`'s bookend allocation discipline (monitor.rs:286-381) —
-    // both reads of `empty_workspace_above_first` and every `Workspace::new` ctor must
-    // see the per-monitor merged options, not the global `self.options`. Using
-    // `self.options` would silently violate `verify_invariants`'s EWAF first/last-empty
-    // checks for outputs whose `layout_config` flips the flag. No overlapping borrows.
+    // and only then dispatch to [`Self::ensure_view_for`], which owns the
+    // pool/activities split-borrow internally.
     pub(super) fn ensure_active_views(&mut self) {
         let connected: Vec<(OutputId, Output, Rc<Options>)> = self
             .monitors
             .iter()
             .map(|m| (m.output_id(), m.output.clone(), m.options.clone()))
             .collect();
-        let clock = self.clock.clone();
         let target = self.activities.active_id();
 
         for (output_id, output, mon_options) in connected {
@@ -4534,95 +4704,176 @@ impl<W: LayoutElement> Layout<W> {
             {
                 continue;
             }
-
-            // Collect pre-tagged candidates under a shared borrow of the pool, so we can
-            // later take `&mut self.workspaces` without a conflicting active borrow.
-            let mut tagged: Vec<WorkspaceId> = self
-                .workspaces
-                .values()
-                .filter(|ws| {
-                    ws.output_id() == Some(&output_id) && ws.activities().contains(&target)
-                })
-                .map(|ws| ws.id())
-                .collect();
-            // Phase 1a: sort by WorkspaceId (monotonic creation counter) — placeholder for
-            // cmp_by_config_then_creation which requires is_config_declared on Workspace
-            // (Phase 1b/2). See DD §5.3 step 3.
-            tagged.sort_by_key(|id| id.get());
-
-            let ewaf = mon_options.layout.empty_workspace_above_first;
-
-            let view = if tagged.is_empty() {
-                // Fresh branch: a single trailing empty satisfies all EWAF invariants at
-                // len=1. Mirrors `Monitor::new`'s trailing-empty allocation
-                // (monitor.rs:286-381).
-                let ws = Workspace::new(
-                    &output,
-                    HashSet::from([target]),
-                    clock.clone(),
-                    mon_options.clone(),
-                );
-                let id = ws.id();
-                assert!(
-                    self.workspaces.insert(id, ws).is_none(),
-                    "fresh id must be unique",
-                );
-                WorkspaceView::new(vec![id], 0)
-            } else {
-                // Lift branch: pre-tagged candidates form the body. Append a fresh trailing
-                // empty so the "last must be empty" (monitor.rs:1724) and "last must be
-                // unnamed" (monitor.rs:1735) invariants hold. Under EWAF for this monitor,
-                // also prepend a fresh leading empty so the "first must be empty" (1728),
-                // "first must be unnamed" (1739), and "1 or 3+" (1746) invariants hold;
-                // the active index becomes 1 so the first lifted workspace stays selected.
-                let bottom = Workspace::new(
-                    &output,
-                    HashSet::from([target]),
-                    clock.clone(),
-                    mon_options.clone(),
-                );
-                let bottom_id = bottom.id();
-                assert!(
-                    self.workspaces.insert(bottom_id, bottom).is_none(),
-                    "fresh id must be unique",
-                );
-
-                let mut ids = tagged;
-                let mut active_idx = 0usize;
-
-                if ewaf {
-                    let top = Workspace::new(
-                        &output,
-                        HashSet::from([target]),
-                        clock.clone(),
-                        mon_options.clone(),
-                    );
-                    let top_id = top.id();
-                    assert!(
-                        self.workspaces.insert(top_id, top).is_none(),
-                        "fresh id must be unique",
-                    );
-                    ids.insert(0, top_id);
-                    active_idx = 1;
-                }
-
-                ids.push(bottom_id);
-
-                WorkspaceView::new(ids, active_idx)
-            };
-
-            // Explicit contains_key → insert rather than `.entry().or_insert_with()`: the
-            // closure arg would need to capture `&mut self.workspaces` via `||`, conflicting
-            // with this outer `&mut self.activities` reborrow.
-            assert!(
-                self.activities
-                    .active_mut()
-                    .views_mut()
-                    .insert(output_id, view)
-                    .is_none(),
-                "contains_key check above ruled out existing entry",
-            );
+            self.ensure_view_for(target, output_id, &output, &mon_options);
         }
+    }
+
+    /// Materialize a `WorkspaceView` entry on `activity_id`'s `views` map for
+    /// `output_id` if and only if no entry exists yet.
+    ///
+    /// The body mirrors the per-output allocation discipline of
+    /// [`Self::ensure_active_views`] — pre-tagged candidates from the pool are
+    /// lifted into the new view (sorted by `WorkspaceId.get()` as a Phase-1a
+    /// placeholder for `cmp_by_config_then_creation`), padded with a fresh
+    /// trailing empty so `Monitor::verify_invariants`' "last must be empty"
+    /// (`monitor.rs:1724`) and "last must be unnamed" (`monitor.rs:1735`)
+    /// hold; under `empty_workspace_above_first` for this monitor, a fresh
+    /// leading empty is also prepended so "first must be empty" (1728),
+    /// "first must be unnamed" (1739), and the "1 or 3+" length rule (1746)
+    /// hold. The active index becomes 1 in the EWAF lift branch so the first
+    /// lifted workspace stays selected. The `Rc<Options>` must be the
+    /// per-monitor merged options (mirrors `Monitor::new`'s ctor; using
+    /// `self.options` would silently violate the EWAF first/last-empty
+    /// invariants for outputs whose `layout_config` flips the flag).
+    ///
+    /// Used both by [`Self::ensure_active_views`] (target = active activity)
+    /// and by [`Self::view_in_activity_or_materialize`] (target = arbitrary
+    /// activity, e.g. an inactive activity addressed by an `open-on-activity`
+    /// window rule per DD §6.4).
+    ///
+    /// Caller must ensure the entry does not yet exist (else the final insert
+    /// asserts).
+    pub(crate) fn ensure_view_for(
+        &mut self,
+        activity_id: ActivityId,
+        output_id: OutputId,
+        output: &Output,
+        mon_options: &Rc<Options>,
+    ) {
+        let clock = self.clock.clone();
+
+        // Collect pre-tagged candidates under a shared borrow of the pool, so we can
+        // later take `&mut self.workspaces` without a conflicting active borrow.
+        let mut tagged: Vec<WorkspaceId> = self
+            .workspaces
+            .values()
+            .filter(|ws| {
+                ws.output_id() == Some(&output_id) && ws.activities().contains(&activity_id)
+            })
+            .map(|ws| ws.id())
+            .collect();
+        // Phase 1a: sort by WorkspaceId (monotonic creation counter) — placeholder for
+        // cmp_by_config_then_creation which requires is_config_declared on Workspace
+        // (Phase 1b/2). See DD §5.3 step 3.
+        tagged.sort_by_key(|id| id.get());
+
+        let ewaf = mon_options.layout.empty_workspace_above_first;
+
+        let view = if tagged.is_empty() {
+            // Fresh branch: a single trailing empty satisfies all EWAF invariants at
+            // len=1. Mirrors `Monitor::new`'s trailing-empty allocation
+            // (monitor.rs:286-381).
+            let ws = Workspace::new(
+                output,
+                HashSet::from([activity_id]),
+                clock.clone(),
+                mon_options.clone(),
+            );
+            let id = ws.id();
+            assert!(
+                self.workspaces.insert(id, ws).is_none(),
+                "fresh id must be unique",
+            );
+            WorkspaceView::new(vec![id], 0)
+        } else {
+            // Lift branch: pre-tagged candidates form the body. Append a fresh trailing
+            // empty so the "last must be empty" (monitor.rs:1724) and "last must be
+            // unnamed" (monitor.rs:1735) invariants hold. Under EWAF for this monitor,
+            // also prepend a fresh leading empty so the "first must be empty" (1728),
+            // "first must be unnamed" (1739), and "1 or 3+" (1746) invariants hold;
+            // the active index becomes 1 so the first lifted workspace stays selected.
+            let bottom = Workspace::new(
+                output,
+                HashSet::from([activity_id]),
+                clock.clone(),
+                mon_options.clone(),
+            );
+            let bottom_id = bottom.id();
+            assert!(
+                self.workspaces.insert(bottom_id, bottom).is_none(),
+                "fresh id must be unique",
+            );
+
+            let mut ids = tagged;
+            let mut active_idx = 0usize;
+
+            if ewaf {
+                let top = Workspace::new(
+                    output,
+                    HashSet::from([activity_id]),
+                    clock.clone(),
+                    mon_options.clone(),
+                );
+                let top_id = top.id();
+                assert!(
+                    self.workspaces.insert(top_id, top).is_none(),
+                    "fresh id must be unique",
+                );
+                ids.insert(0, top_id);
+                active_idx = 1;
+            }
+
+            ids.push(bottom_id);
+
+            WorkspaceView::new(ids, active_idx)
+        };
+
+        // Explicit contains_key → insert rather than `.entry().or_insert_with()`: the
+        // closure arg would need to capture `&mut self.workspaces` via `||`, conflicting
+        // with this outer `&mut self.activities` reborrow.
+        let activity = self
+            .activities
+            .get_mut(activity_id)
+            .expect("activity id must be a live key");
+        assert!(
+            activity.views_mut().insert(output_id, view).is_none(),
+            "caller must ensure the entry does not yet exist",
+        );
+    }
+
+    /// Ensure `activity_id`'s `views` map has a `WorkspaceView` entry for the
+    /// connected monitor identified by `output_id`, materializing one through
+    /// [`Self::ensure_view_for`] if needed.
+    ///
+    /// Used by `xdg_shell::send_initial_configure` to address a hidden
+    /// activity targeted by an `open-on-activity` window rule (DD §6.4).
+    /// Side-effecting only; the materialized view can be read back via
+    /// `self.activities.get(activity_id).views()[output_id]`. Returns `()`
+    /// rather than `&WorkspaceView` so callers can keep their subsequent
+    /// reads on `&self.layout` instead of holding a `&mut self.layout`
+    /// borrow across send_configure (keeps the call site free of an
+    /// outstanding `&mut self.layout` borrow).
+    ///
+    /// No-op when `output_id` is not connected: the `monitor_for_output_id`
+    /// lookup returns `None` and we skip the materialize. Caller is
+    /// responsible for handling the missing-entry case after the call (in
+    /// practice: `send_initial_configure` will then fall through its
+    /// precedence chain to a different target).
+    // `dead_code` allow lifts in commit 3 of this sub-phase, where
+    // `xdg_shell::send_initial_configure` becomes the runtime caller. The
+    // method is exercised by layout-level tests in this commit; release
+    // builds without the test cfg would otherwise warn.
+    #[allow(dead_code)]
+    pub(crate) fn view_in_activity_or_materialize(
+        &mut self,
+        activity_id: ActivityId,
+        output_id: &OutputId,
+    ) {
+        if self
+            .activities
+            .get(activity_id)
+            .is_some_and(|a| a.views().contains_key(output_id))
+        {
+            return;
+        }
+        let Some((output, options)) = self
+            .monitor_for_output_id(output_id)
+            .map(|mon| (mon.output.clone(), mon.options.clone()))
+        else {
+            // Output not connected — nothing to materialize against.
+            return;
+        };
+        self.ensure_view_for(activity_id, output_id.clone(), &output, &options);
     }
 
     /// Switch to the previously-active activity (history-based toggle).
