@@ -7,6 +7,7 @@ use calloop::timer::{TimeoutAction, Timer};
 use input::event::gesture::GestureEventCoordinates as _;
 use niri_config::{
     Action, Bind, Binds, Config, Key, ModKey, Modifiers, MruDirection, SwitchBinds, Trigger,
+    WorkspaceReference,
 };
 use niri_ipc::{ActivityReferenceArg, LayoutSwitchTarget};
 use smithay::backend::input::{
@@ -2064,6 +2065,24 @@ impl State {
                     }
                 }
             }
+            Action::ToggleWorkspaceSticky => {
+                self.dispatch_toggle_workspace_sticky(None)?;
+            }
+            Action::ToggleWorkspaceStickyByRef(reference) => {
+                self.dispatch_toggle_workspace_sticky(Some(reference))?;
+            }
+            Action::SetWorkspaceSticky => {
+                self.dispatch_set_workspace_sticky(None)?;
+            }
+            Action::SetWorkspaceStickyByRef(reference) => {
+                self.dispatch_set_workspace_sticky(Some(reference))?;
+            }
+            Action::UnsetWorkspaceSticky => {
+                self.dispatch_unset_workspace_sticky(None)?;
+            }
+            Action::UnsetWorkspaceStickyByRef(reference) => {
+                self.dispatch_unset_workspace_sticky(Some(reference))?;
+            }
             Action::MoveWorkspaceDown => {
                 self.niri.layout.move_workspace_down();
                 // FIXME: granular
@@ -2954,6 +2973,127 @@ impl State {
             }
         }
 
+        Ok(())
+    }
+
+    /// Dispatch handler for `Action::ToggleWorkspaceSticky` /
+    /// `Action::ToggleWorkspaceStickyByRef`. See activities design doc Phase 2
+    /// box 2015 for the contract.
+    ///
+    /// Per DD §5.11 ("blocked while a workspace switch gesture is in flight"):
+    /// Set/Toggle-on are append-only on views (delegate to
+    /// set_workspace_activities which handles animation-snap internally);
+    /// Unset/Toggle-off touches no views. No hard-block gate.
+    fn dispatch_toggle_workspace_sticky(
+        &mut self,
+        reference: Option<WorkspaceReference>,
+    ) -> Result<(), DoActionError> {
+        let arg_ws_log = reference.clone();
+        match self.niri.layout.toggle_workspace_sticky(reference) {
+            Ok(outcome) => {
+                debug!(
+                    "ToggleWorkspaceSticky: {:?} is_sticky={} (active_affected={})",
+                    outcome.ws_id, outcome.new_is_sticky, outcome.active_affected,
+                );
+                // Cursor-warp / redraw asymmetry: Toggle-on may flip workspace
+                // visibility in the active activity (when the symmetric diff
+                // touched the active id) — same precondition as
+                // SetWorkspaceActivities at input/mod.rs. Toggle-off
+                // (and Toggle-on no-op) leave views untouched. No §5.19 call:
+                // sticky toggles don't flip Activities.active_id.
+                if outcome.active_affected {
+                    self.maybe_warp_cursor_to_focus();
+                    self.niri.queue_redraw_all();
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "ToggleWorkspaceSticky: {e}: workspace={arg_ws_log:?}"
+                );
+                // DD §5.14 ("No-op if workspace not found"): silent no-op on
+                // workspace-not-found. No DoActionError variant for sticky
+                // WorkspaceNotFound — that asymmetry with Add/Remove is the
+                // wire contract.
+                match e {
+                    crate::layout::ToggleWorkspaceStickyError::WorkspaceNotFound => {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Dispatch handler for `Action::SetWorkspaceSticky` /
+    /// `Action::SetWorkspaceStickyByRef`. See activities design doc Phase 2
+    /// box 2015 for the contract.
+    ///
+    /// Per DD §5.11 ("blocked while a workspace switch gesture is in flight"):
+    /// Set/Toggle-on are append-only on views (delegate to
+    /// set_workspace_activities which handles animation-snap internally).
+    /// No hard-block gate.
+    fn dispatch_set_workspace_sticky(
+        &mut self,
+        reference: Option<WorkspaceReference>,
+    ) -> Result<(), DoActionError> {
+        let arg_ws_log = reference.clone();
+        match self.niri.layout.set_workspace_sticky(reference) {
+            Ok((ws_id, active_affected)) => {
+                debug!(
+                    "SetWorkspaceSticky: {ws_id:?} (active_affected={active_affected})"
+                );
+                // Mirrors SetWorkspaceActivities at input/mod.rs: cursor warp
+                // + redraw fire when the symmetric diff touched the active
+                // activity. No §5.19 call: sticky toggles don't flip
+                // Activities.active_id.
+                if active_affected {
+                    self.maybe_warp_cursor_to_focus();
+                    self.niri.queue_redraw_all();
+                }
+            }
+            Err(e) => {
+                warn!("SetWorkspaceSticky: {e}: workspace={arg_ws_log:?}");
+                // DD §5.14 ("No-op if workspace not found"): silent no-op.
+                match e {
+                    crate::layout::SetWorkspaceStickyError::WorkspaceNotFound => {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Dispatch handler for `Action::UnsetWorkspaceSticky` /
+    /// `Action::UnsetWorkspaceStickyByRef`. See activities design doc Phase 2
+    /// box 2015 for the contract.
+    ///
+    /// Per DD §5.11 ("blocked while a workspace switch gesture is in flight"):
+    /// Unset/Toggle-off touches no views. No hard-block gate. No cursor-warp /
+    /// redraw — visibility for the active activity does not change (precedent:
+    /// see the `act_id == active_before` gate in the
+    /// `Action::RemoveWorkspaceFromActivity` dispatch arm which only redraws
+    /// when the active activity is the removal target). No §5.19 call: sticky
+    /// toggles don't flip Activities.active_id.
+    fn dispatch_unset_workspace_sticky(
+        &mut self,
+        reference: Option<WorkspaceReference>,
+    ) -> Result<(), DoActionError> {
+        let arg_ws_log = reference.clone();
+        match self.niri.layout.unset_workspace_sticky(reference) {
+            Ok(ws_id) => {
+                debug!("UnsetWorkspaceSticky: {ws_id:?}");
+            }
+            Err(e) => {
+                warn!("UnsetWorkspaceSticky: {e}: workspace={arg_ws_log:?}");
+                // DD §5.14 ("No-op if workspace not found"): silent no-op.
+                match e {
+                    crate::layout::UnsetWorkspaceStickyError::WorkspaceNotFound => {
+                        return Ok(());
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

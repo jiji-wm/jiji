@@ -13473,3 +13473,464 @@ fn move_workspace_to_activity_focus_true_uses_stronger_gate() {
 
     layout.dnd_end();
 }
+
+// --- SetWorkspaceSticky / UnsetWorkspaceSticky / ToggleWorkspaceSticky -----
+// (Phase 2 box 2015)
+
+#[test]
+fn set_workspace_sticky_expands_activities_to_all_ids() {
+    // A non-sticky workspace bound to {alpha}; alpha + beta live in the pool.
+    // SetSticky must flip is_sticky and expand activities to {alpha, beta}.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    let mon_out = layout.monitors[0].output_id();
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has at least one ws");
+
+    // Sanity: not sticky, only in alpha.
+    {
+        let ws = layout
+            .workspaces
+            .get(&target_ws_id)
+            .expect("target ws live");
+        assert!(!ws.is_sticky());
+        assert_eq!(ws.activities(), &HashSet::from([alpha]));
+    }
+
+    let (ws_id, active_affected) = layout
+        .set_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
+        .expect("set sticky must succeed");
+    assert_eq!(ws_id, target_ws_id);
+    // alpha was already in the set; only beta was added — alpha is the
+    // active activity, but it's NOT in the symmetric diff, so
+    // active_affected is false.
+    assert!(
+        !active_affected,
+        "to_add = {{beta}} only; active activity (alpha) is not in the diff"
+    );
+
+    let ws = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("target ws live");
+    assert!(ws.is_sticky(), "is_sticky must be true after SetSticky");
+    assert_eq!(
+        ws.activities(),
+        &HashSet::from([alpha, beta]),
+        "activities must equal the full live id set",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_sticky_no_op_when_already_sticky_with_full_set() {
+    // Pre-state: workspace already sticky with activities = {alpha, beta}
+    // (the full live set). SetSticky must early-exit without churning state:
+    // active_affected = false, animation untouched.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    let mon_out = layout.monitors[0].output_id();
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    // Hand-construct the "already sticky + full set" state.
+    {
+        let ws = layout
+            .workspaces
+            .get_mut(&target_ws_id)
+            .expect("target ws live");
+        ws.is_sticky = true;
+        ws.activities = HashSet::from([alpha, beta]);
+    }
+    layout.verify_invariants();
+
+    let (ws_id, active_affected) = layout
+        .set_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
+        .expect("no-op set must succeed");
+    assert_eq!(ws_id, target_ws_id);
+    assert!(
+        !active_affected,
+        "no-op set must not flag active_affected",
+    );
+
+    let ws = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("target ws live");
+    assert!(ws.is_sticky());
+    assert_eq!(ws.activities(), &HashSet::from([alpha, beta]));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_sticky_no_op_when_workspace_not_found() {
+    // Layout-level: surfaces WorkspaceNotFound. The dispatch-layer silent
+    // no-op is an input/mod.rs concern; this pin keeps the Layout surface
+    // exhaustive for the dispatch arm's `match e`.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let err = layout
+        .set_workspace_sticky(Some(WorkspaceReference::Id(u64::MAX)))
+        .expect_err("unknown workspace must err at the Layout surface");
+    assert_eq!(err, SetWorkspaceStickyError::WorkspaceNotFound);
+}
+
+#[test]
+fn set_workspace_sticky_re_expands_when_activities_was_narrowed_to_subset() {
+    // Load-bearing pin for the "no strict equality invariant" decision in
+    // workspace.rs `is_sticky()`'s rustdoc — calling SetSticky on a
+    // workspace whose `is_sticky == true` AND `activities ⊊ all_live_ids`
+    // must re-expand the activities set to the full live id set (rather
+    // than no-op out on the `is_sticky` flag alone).
+    //
+    // The DD §3.2 / is_sticky() contract explicitly permits the inconsistent
+    // state `is_sticky == true ∧ activities ⊊ all_ids` to arise via runtime
+    // narrowing (e.g. `SetWorkspaceActivities` / `RemoveWorkspaceFromActivity`
+    // on a sticky workspace). This test hand-mutates the workspace into that
+    // state directly rather than going through the narrowing API. Going
+    // through the API would surface a pre-existing limitation in
+    // `set_workspace_activities` step 9 / `add_workspace_to_activity` step
+    // (mod.rs view.insert(pos = view.len(), ws_id) appends after the
+    // monitor's unnamed-bookend, breaking monitor.rs "last must be unnamed"
+    // when re-adding a named workspace to the *active* activity's
+    // view; lazy view rebuild §3.3 covers dormant activities only). That
+    // limitation is orthogonal to the sticky-action triplet and is not
+    // addressed in Phase 2 box 2015 — see the implementer's notes in the
+    // landing commit body for a follow-up Part 2 candidate.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    let mon_out = layout.monitors[0].output_id();
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has the seed unnamed workspace");
+
+    // Hand-seed the inconsistent state: is_sticky = true, activities =
+    // {alpha} (a strict subset of {alpha, beta}). This is what runtime
+    // narrowing on a sticky workspace would leave behind.
+    {
+        let ws = layout
+            .workspaces
+            .get_mut(&target_ws_id)
+            .expect("target ws live");
+        ws.is_sticky = true;
+        ws.activities = HashSet::from([alpha]);
+    }
+    layout.verify_invariants();
+
+    // Sanity: pre-call invariants hold despite the inconsistent state.
+    {
+        let ws = layout
+            .workspaces
+            .get(&target_ws_id)
+            .expect("live");
+        assert!(ws.is_sticky());
+        assert_eq!(ws.activities(), &HashSet::from([alpha]));
+    }
+
+    // SetSticky: must re-expand to {alpha, beta}. The diff is purely
+    // additive on beta (a dormant activity without a view on `mon_out`), so
+    // alpha's view is untouched and the unnamed-last invariant is
+    // preserved.
+    let (ws_id, active_affected) = layout
+        .set_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
+        .expect("SetSticky must re-expand");
+    assert_eq!(ws_id, target_ws_id);
+    // alpha was already in the set; only beta is in to_add. alpha (the
+    // active activity) is NOT in the symmetric diff.
+    assert!(
+        !active_affected,
+        "to_add = {{beta}}; active activity (alpha) is not in the diff",
+    );
+
+    let ws = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("live");
+    assert!(ws.is_sticky(), "is_sticky must remain true");
+    assert_eq!(
+        ws.activities(),
+        &HashSet::from([alpha, beta]),
+        "SetSticky must re-expand to the full live id set even when \
+         is_sticky was already true and activities was a strict subset",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn unset_workspace_sticky_clears_flag_keeps_activities_set() {
+    // DD §3.2: "Toggling off … keeps the current `activities` set." Pin the
+    // contract: is_sticky flips to false; activities is untouched (even if
+    // it equals all_live_ids at call time).
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    let mon_out = layout.monitors[0].output_id();
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    {
+        let ws = layout
+            .workspaces
+            .get_mut(&target_ws_id)
+            .expect("live");
+        ws.is_sticky = true;
+        ws.activities = HashSet::from([alpha, beta]);
+    }
+    layout.verify_invariants();
+
+    let ws_id = layout
+        .unset_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
+        .expect("unset must succeed");
+    assert_eq!(ws_id, target_ws_id);
+
+    let ws = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("live");
+    assert!(!ws.is_sticky(), "is_sticky must flip to false");
+    assert_eq!(
+        ws.activities(),
+        &HashSet::from([alpha, beta]),
+        "activities set must be preserved verbatim (DD §3.2)",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn unset_workspace_sticky_no_op_when_not_sticky() {
+    // Already-not-sticky workspace: Unset must early-exit without touching
+    // state. Pinned because the early-exit branch is the common case for
+    // toggle-off-on-a-non-sticky-ws.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+
+    let mon_out = layout.monitors[0].output_id();
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    let activities_before = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("live")
+        .activities()
+        .clone();
+    assert!(!layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("live")
+        .is_sticky());
+
+    layout
+        .unset_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
+        .expect("unset on non-sticky must succeed (no-op)");
+
+    let ws = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("live");
+    assert!(!ws.is_sticky());
+    assert_eq!(ws.activities(), &activities_before);
+    assert_eq!(ws.activities(), &HashSet::from([alpha]));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn unset_workspace_sticky_preserves_strict_subset_activities() {
+    // Pin the sub-contract that unset leaves `activities` intact even when
+    // it is a strict subset of all_live_ids. A plausible mis-fix for a
+    // misread of DD §3.2 would expand activities to all_ids on unset when
+    // already non-sticky; this test would catch that regression.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    let mon_out = layout.monitors[0].output_id();
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    // Seed the workspace with activities = {alpha} — a strict subset of
+    // all_live_ids = {alpha, beta}.  is_sticky stays false (no-op path).
+    {
+        let ws = layout
+            .workspaces
+            .get_mut(&target_ws_id)
+            .expect("live");
+        ws.activities = HashSet::from([alpha]);
+        assert!(!ws.is_sticky());
+    }
+
+    layout
+        .unset_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
+        .expect("unset on non-sticky must succeed (no-op)");
+
+    let ws = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("live");
+    assert!(!ws.is_sticky());
+    // Strict subset {alpha} must be preserved — not expanded to {alpha, beta}.
+    assert_eq!(ws.activities(), &HashSet::from([alpha]));
+    assert!(!ws.activities().contains(&beta));
+}
+
+#[test]
+fn unset_workspace_sticky_no_op_when_workspace_not_found() {
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let err = layout
+        .unset_workspace_sticky(Some(WorkspaceReference::Id(u64::MAX)))
+        .expect_err("unknown workspace must err at the Layout surface");
+    assert_eq!(err, UnsetWorkspaceStickyError::WorkspaceNotFound);
+}
+
+#[test]
+fn toggle_workspace_sticky_dispatches_to_set_when_off() {
+    // is_sticky=false → Toggle dispatches to SetSticky. Outcome carries
+    // new_is_sticky=true and active_affected bubbled up from the delegate.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    let mon_out = layout.monitors[0].output_id();
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    let outcome = layout
+        .toggle_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
+        .expect("toggle must succeed");
+    assert_eq!(outcome.ws_id, target_ws_id);
+    assert!(outcome.new_is_sticky, "toggle-off → on must report sticky=true");
+    // alpha already in set; to_add = {beta}; active_affected = false.
+    assert!(!outcome.active_affected);
+
+    let ws = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("live");
+    assert!(ws.is_sticky());
+    assert_eq!(ws.activities(), &HashSet::from([alpha, beta]));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn toggle_workspace_sticky_dispatches_to_unset_when_on() {
+    // is_sticky=true → Toggle dispatches to UnsetSticky. Outcome carries
+    // new_is_sticky=false and active_affected=false (Unset never touches
+    // activities).
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    let mon_out = layout.monitors[0].output_id();
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    {
+        let ws = layout
+            .workspaces
+            .get_mut(&target_ws_id)
+            .expect("live");
+        ws.is_sticky = true;
+        ws.activities = HashSet::from([alpha, beta]);
+    }
+    layout.verify_invariants();
+
+    let outcome = layout
+        .toggle_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
+        .expect("toggle must succeed");
+    assert_eq!(outcome.ws_id, target_ws_id);
+    assert!(!outcome.new_is_sticky, "toggle-on → off must report sticky=false");
+    assert!(
+        !outcome.active_affected,
+        "Unset never touches activities; active_affected must always be false on toggle-off",
+    );
+
+    let ws = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("live");
+    assert!(!ws.is_sticky());
+    // DD §3.2: Toggle-off keeps activities set.
+    assert_eq!(ws.activities(), &HashSet::from([alpha, beta]));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn toggle_workspace_sticky_no_op_when_workspace_not_found() {
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let err = layout
+        .toggle_workspace_sticky(Some(WorkspaceReference::Id(u64::MAX)))
+        .expect_err("unknown workspace must err at the Layout surface");
+    assert_eq!(err, ToggleWorkspaceStickyError::WorkspaceNotFound);
+}

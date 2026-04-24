@@ -1138,6 +1138,51 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = false))]
         focus: bool,
     },
+    /// Toggle whether a workspace is sticky.
+    ///
+    /// Sticky = auto-tagged with all current and future activities.
+    /// Toggling on sets `is_sticky = true` and expands `activities` to all.
+    /// Toggling off sets `is_sticky = false` but keeps the current `activities`
+    /// set (the user can then narrow it with `RemoveWorkspaceFromActivity`).
+    ///
+    /// Silent no-op if the workspace reference does not resolve (activities
+    /// design doc §5.14).
+    ToggleWorkspaceSticky {
+        /// Workspace to modify. Defaults to focused.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
+        workspace: Option<WorkspaceReferenceArg>,
+    },
+    /// Set a workspace as sticky (add to all current and future activities).
+    ///
+    /// Sets `is_sticky = true` and expands `activities` to the full set of live
+    /// activity ids. No-op if the workspace is already sticky and its
+    /// `activities` set already equals the full live id set.
+    ///
+    /// Silent no-op if the workspace reference does not resolve (activities
+    /// design doc §5.14).
+    SetWorkspaceSticky {
+        /// Workspace to modify. Defaults to focused.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
+        workspace: Option<WorkspaceReferenceArg>,
+    },
+    /// Unset a workspace's sticky flag.
+    ///
+    /// The workspace keeps its current `activities` set but stops auto-expanding
+    /// when new activities are created.
+    ///
+    /// **Session-only for config-sticky workspaces.** If the workspace has
+    /// `sticky true` in its config block, config reload re-applies stickiness
+    /// and re-expands `activities` to all current activities (activities
+    /// design doc §5.15). To permanently unset, remove `sticky true` from the
+    /// workspace's config block.
+    ///
+    /// Silent no-op if the workspace reference does not resolve (activities
+    /// design doc §5.14).
+    UnsetWorkspaceSticky {
+        /// Workspace to modify. Defaults to focused.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
+        workspace: Option<WorkspaceReferenceArg>,
+    },
 }
 
 /// Change in window or column size.
@@ -2917,6 +2962,84 @@ mod tests {
             serde_json::to_string(&parsed).expect("re-serialize by-name"),
             json,
         );
+    }
+
+    #[test]
+    fn toggle_workspace_sticky_action_roundtrips_serde() {
+        // Pin the on-the-wire field names and shape for the
+        // `ToggleWorkspaceSticky` action. Covers None / Some workspace and
+        // every `WorkspaceReferenceArg` arm. `Action` does not derive
+        // `PartialEq`, so compare via re-serialize: structure-preserving
+        // round-trip yields identical JSON.
+        for action in [
+            Action::ToggleWorkspaceSticky { workspace: None },
+            Action::ToggleWorkspaceSticky {
+                workspace: Some(WorkspaceReferenceArg::Id(42)),
+            },
+            Action::ToggleWorkspaceSticky {
+                workspace: Some(WorkspaceReferenceArg::Index(3)),
+            },
+            Action::ToggleWorkspaceSticky {
+                workspace: Some(WorkspaceReferenceArg::Name("home".into())),
+            },
+        ] {
+            let json = serde_json::to_string(&action).expect("serialize");
+            let parsed: Action = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                serde_json::to_string(&parsed).expect("re-serialize"),
+                json,
+            );
+        }
+    }
+
+    #[test]
+    fn set_workspace_sticky_action_roundtrips_serde() {
+        // Mirrors `toggle_workspace_sticky_action_roundtrips_serde` for the
+        // `SetWorkspaceSticky` variant — pins all four `Option<...>` arms.
+        for action in [
+            Action::SetWorkspaceSticky { workspace: None },
+            Action::SetWorkspaceSticky {
+                workspace: Some(WorkspaceReferenceArg::Id(42)),
+            },
+            Action::SetWorkspaceSticky {
+                workspace: Some(WorkspaceReferenceArg::Index(3)),
+            },
+            Action::SetWorkspaceSticky {
+                workspace: Some(WorkspaceReferenceArg::Name("home".into())),
+            },
+        ] {
+            let json = serde_json::to_string(&action).expect("serialize");
+            let parsed: Action = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                serde_json::to_string(&parsed).expect("re-serialize"),
+                json,
+            );
+        }
+    }
+
+    #[test]
+    fn unset_workspace_sticky_action_roundtrips_serde() {
+        // Mirrors `toggle_workspace_sticky_action_roundtrips_serde` for the
+        // `UnsetWorkspaceSticky` variant — pins all four `Option<...>` arms.
+        for action in [
+            Action::UnsetWorkspaceSticky { workspace: None },
+            Action::UnsetWorkspaceSticky {
+                workspace: Some(WorkspaceReferenceArg::Id(42)),
+            },
+            Action::UnsetWorkspaceSticky {
+                workspace: Some(WorkspaceReferenceArg::Index(3)),
+            },
+            Action::UnsetWorkspaceSticky {
+                workspace: Some(WorkspaceReferenceArg::Name("home".into())),
+            },
+        ] {
+            let json = serde_json::to_string(&action).expect("serialize");
+            let parsed: Action = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                serde_json::to_string(&parsed).expect("re-serialize"),
+                json,
+            );
+        }
     }
 
     #[test]

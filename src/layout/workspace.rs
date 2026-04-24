@@ -414,6 +414,15 @@ impl<W: LayoutElement> Workspace<W> {
 
     /// Whether this workspace is "sticky" — present on every activity. Default is `false`.
     /// Mutators land in Phase 2; auto-expansion in Phase 1b (DD §3.2).
+    ///
+    /// Contract: `is_sticky` is the *auto-expansion trigger* — `Layout::create_activity`
+    /// and `Layout::reconcile_activities_on_reload_add` expand `activities` to all
+    /// live ids when this flag is set. It is NOT a strict equality invariant:
+    /// runtime narrowing via `RemoveWorkspaceFromActivity` / `SetWorkspaceActivities`
+    /// may leave `activities ⊊ all_ids` while `is_sticky == true`; the next
+    /// `create_activity` / `reconcile_activities_on_reload_add` re-expands. Adding
+    /// a strict `is_sticky → activities == all_ids` invariant is intentionally
+    /// rejected (see DD Phase 2 box 2015).
     pub fn is_sticky(&self) -> bool {
         self.is_sticky
     }

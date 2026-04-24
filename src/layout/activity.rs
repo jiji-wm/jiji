@@ -532,6 +532,71 @@ impl fmt::Display for MoveWorkspaceToActivityError {
 
 impl std::error::Error for MoveWorkspaceToActivityError {}
 
+/// Validation failure for `Layout::set_workspace_sticky`. Single-variant per DD
+/// §5.14 ("No-op if workspace not found"): the only failure mode is a workspace
+/// reference that does not resolve, and the dispatch layer treats that as a
+/// silent no-op so it never reaches the wire. The enum exists so the dispatch
+/// arm can keep its `match e` exhaustive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetWorkspaceStickyError {
+    /// No workspace in the pool matches the supplied reference (or `None`
+    /// was supplied and there is no active workspace, i.e. zero connected
+    /// monitors).
+    WorkspaceNotFound,
+}
+
+impl fmt::Display for SetWorkspaceStickyError {
+    /// Plain lowercase token; sticky actions never produce a wire envelope so
+    /// the DD-section suffix is not assembled by `format_do_action_error` for
+    /// this enum. Kept for symmetry with the other action errors and for
+    /// `warn!` logging.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WorkspaceNotFound => f.write_str("workspace not found"),
+        }
+    }
+}
+
+impl std::error::Error for SetWorkspaceStickyError {}
+
+/// Validation failure for `Layout::unset_workspace_sticky`. Single-variant —
+/// see [`SetWorkspaceStickyError`] for the dispatch-layer silent-drop rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsetWorkspaceStickyError {
+    /// No workspace in the pool matches the supplied reference (or `None`
+    /// was supplied and there is no active workspace).
+    WorkspaceNotFound,
+}
+
+impl fmt::Display for UnsetWorkspaceStickyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WorkspaceNotFound => f.write_str("workspace not found"),
+        }
+    }
+}
+
+impl std::error::Error for UnsetWorkspaceStickyError {}
+
+/// Validation failure for `Layout::toggle_workspace_sticky`. Single-variant —
+/// see [`SetWorkspaceStickyError`] for the dispatch-layer silent-drop rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToggleWorkspaceStickyError {
+    /// No workspace in the pool matches the supplied reference (or `None`
+    /// was supplied and there is no active workspace).
+    WorkspaceNotFound,
+}
+
+impl fmt::Display for ToggleWorkspaceStickyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WorkspaceNotFound => f.write_str("workspace not found"),
+        }
+    }
+}
+
+impl std::error::Error for ToggleWorkspaceStickyError {}
+
 /// Validation failure for config-reload activity removal via
 /// `Layout::reconcile_activities_on_reload_remove`. Each variant corresponds
 /// to one of the rejection rules the outer entry point evaluates before any

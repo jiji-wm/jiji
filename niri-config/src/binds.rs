@@ -414,6 +414,15 @@ pub enum Action {
     // a KDL bind to avoid a silent mode-selection.
     #[knuffel(skip)]
     MoveWorkspaceToActivity(Option<WorkspaceReference>, ActivityReference, bool),
+    ToggleWorkspaceSticky,
+    #[knuffel(skip)]
+    ToggleWorkspaceStickyByRef(#[knuffel(argument)] WorkspaceReference),
+    SetWorkspaceSticky,
+    #[knuffel(skip)]
+    SetWorkspaceStickyByRef(#[knuffel(argument)] WorkspaceReference),
+    UnsetWorkspaceSticky,
+    #[knuffel(skip)]
+    UnsetWorkspaceStickyByRef(#[knuffel(argument)] WorkspaceReference),
 }
 
 impl From<niri_ipc::Action> for Action {
@@ -762,6 +771,22 @@ impl From<niri_ipc::Action> for Action {
                 activity.into(),
                 focus,
             ),
+            niri_ipc::Action::ToggleWorkspaceSticky { workspace: None } => {
+                Self::ToggleWorkspaceSticky
+            }
+            niri_ipc::Action::ToggleWorkspaceSticky {
+                workspace: Some(reference),
+            } => Self::ToggleWorkspaceStickyByRef(WorkspaceReference::from(reference)),
+            niri_ipc::Action::SetWorkspaceSticky { workspace: None } => Self::SetWorkspaceSticky,
+            niri_ipc::Action::SetWorkspaceSticky {
+                workspace: Some(reference),
+            } => Self::SetWorkspaceStickyByRef(WorkspaceReference::from(reference)),
+            niri_ipc::Action::UnsetWorkspaceSticky { workspace: None } => {
+                Self::UnsetWorkspaceSticky
+            }
+            niri_ipc::Action::UnsetWorkspaceSticky {
+                workspace: Some(reference),
+            } => Self::UnsetWorkspaceStickyByRef(WorkspaceReference::from(reference)),
             // niri_ipc::Action is #[non_exhaustive]: any new variant added to
             // niri_ipc without a matching arm here is a coding error that
             // surfaces as a panic when the unmapped action is dispatched.

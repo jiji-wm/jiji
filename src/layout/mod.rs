@@ -61,7 +61,8 @@ pub(crate) use self::activity::ReloadActivityRemovalError;
 pub use self::activity::{
     AddWorkspaceToActivityError, CreateActivityError, MoveWorkspaceToActivityError,
     RemoveActivityError, RemoveWorkspaceFromActivityError, RenameActivityError,
-    SetWorkspaceActivitiesError,
+    SetWorkspaceActivitiesError, SetWorkspaceStickyError, ToggleWorkspaceStickyError,
+    UnsetWorkspaceStickyError,
 };
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{Monitor, WorkspaceSwitch};
@@ -599,6 +600,21 @@ impl From<ActivitySwitchBlock> for DoActionError {
     fn from(block: ActivitySwitchBlock) -> Self {
         Self::ActivitySwitchBlocked(block)
     }
+}
+
+/// Outcome of [`Layout::toggle_workspace_sticky`]. Carries enough information
+/// for the dispatch layer to log the toggle direction and decide whether to
+/// fire the cursor-warp / redraw pair.
+///
+/// `active_affected` is always `false` for toggle-off (Unset never touches the
+/// workspace's `activities` set, so visibility for the active activity does
+/// not change) and bubbles up from the inner `set_workspace_activities` call
+/// for toggle-on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ToggleWorkspaceStickyOutcome {
+    pub(crate) ws_id: WorkspaceId,
+    pub(crate) new_is_sticky: bool,
+    pub(crate) active_affected: bool,
 }
 
 impl fmt::Display for DoActionError {
@@ -5422,6 +5438,191 @@ impl<W: LayoutElement> Layout<W> {
         // extra chain needed here. Return the triple the dispatch layer
         // logs.
         Ok((ws_id, target_id, source_id))
+    }
+
+    /// Set `workspace.is_sticky = true` and expand its `activities` set to all
+    /// live activity ids (DD §3.2 / §4.3 / Phase 2 box 2015).
+    ///
+    /// Resolution order:
+    /// 1. `workspace` → `WorkspaceNotFound`. Dispatch layer treats this as a
+    ///    silent no-op (DD §5.14: "No-op if workspace not found"); the Layout
+    ///    surface returns `Err` for symmetry with `set_workspace_activities`.
+    ///
+    /// No-op cases (return `Ok((ws_id, false))` without mutating):
+    /// - `ws.is_sticky() == true` AND `ws.activities() == all_live_ids` —
+    ///   the typical state for an already-sticky workspace.
+    ///
+    /// Implementation strategy: delegate to [`Self::set_workspace_activities`]
+    /// with the full live id set as the target activity list, then flip
+    /// `is_sticky = true`. The flag flip is deliberately ordered AFTER the
+    /// delegate's symmetric-diff machinery so any intermediate
+    /// `verify_invariants` chain sees a coherent state. The flag flip alone,
+    /// with `activities` already at all_ids, is invariant-preserving by
+    /// construction.
+    ///
+    /// Returns `(workspace_id, active_affected)` where `active_affected`
+    /// bubbles up from the delegate — `true` when the symmetric diff added or
+    /// removed the active activity from the workspace's set, signalling that
+    /// the dispatch layer must redraw.
+    pub(crate) fn set_workspace_sticky(
+        &mut self,
+        workspace: Option<WorkspaceReference>,
+    ) -> Result<(WorkspaceId, bool), SetWorkspaceStickyError> {
+        // Step 1: resolve the workspace.
+        let ws_id = match workspace {
+            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
+            None => self.active_workspace_mut().map(|ws| ws.id()),
+        }
+        .ok_or(SetWorkspaceStickyError::WorkspaceNotFound)?;
+
+        // Step 2: collect the full live id set up front. Two views needed:
+        // a `HashSet<ActivityId>` for the no-op equality check, and a
+        // `Vec<ActivityReferenceArg>` for the delegate call.
+        let all_live_ids: HashSet<ActivityId> =
+            self.activities.iter().map(|a| a.id()).collect();
+
+        // Step 3: no-op early-exit on the typical "already sticky + already
+        // expanded" state. Skip the entire delegate / flag-flip path so we
+        // don't churn animation state or rerun verify_invariants chains.
+        {
+            let ws = self
+                .workspaces
+                .get(&ws_id)
+                .expect("resolved ws_id must be a live pool key");
+            if ws.is_sticky() && ws.activities() == &all_live_ids {
+                return Ok((ws_id, false));
+            }
+        }
+
+        // Step 4: delegate to set_workspace_activities. The delegate handles
+        // animation snap, view patching, and ensure_active_views. All three
+        // delegate error classes are statically impossible here:
+        //   - ActivityNotFound: ids came from the live pool.
+        //   - EmptyActivityList: Activities is non-empty by type (DD §3.2).
+        //   - WorkspaceNotFound: ws_id was resolved in step 1.
+        let all_ids_arg: Vec<ActivityReferenceArg> = all_live_ids
+            .iter()
+            .map(|id| ActivityReferenceArg::Id(id.get()))
+            .collect();
+        let (_, _, active_affected) = self
+            .set_workspace_activities(
+                Some(WorkspaceReference::Id(ws_id.get())),
+                &all_ids_arg,
+            )
+            .expect(
+                "set_workspace_activities cannot fail: ids come from the live activity pool \
+                 (ActivityNotFound impossible), Activities is non-empty by DD §3.2 \
+                 (EmptyActivityList impossible), and ws_id was just resolved \
+                 (WorkspaceNotFound impossible)",
+            );
+
+        // Step 5: flip is_sticky AFTER the delegate so any intermediate
+        // verify_invariants run sees a coherent intermediate state. The flip
+        // alone (with activities already at all_ids) is invariant-preserving.
+        self.workspaces
+            .get_mut(&ws_id)
+            .expect("resolved ws_id must be a live pool key")
+            .is_sticky = true;
+
+        #[cfg(debug_assertions)]
+        self.verify_invariants();
+
+        Ok((ws_id, active_affected))
+    }
+
+    /// Clear `workspace.is_sticky` without touching its `activities` set
+    /// (DD §3.2: `is_sticky` is the auto-expansion trigger; toggling off
+    /// does not narrow `activities`).
+    ///
+    /// Resolution order:
+    /// 1. `workspace` → `WorkspaceNotFound` (silent no-op at dispatch).
+    ///
+    /// No-op cases (return `Ok(ws_id)` without mutating):
+    /// - `ws.is_sticky() == false` — already not sticky.
+    ///
+    /// The workspace's `activities` set is intentionally left intact: the
+    /// user can narrow it via `RemoveWorkspaceFromActivity` /
+    /// `SetWorkspaceActivities` afterwards. Per DD §5.15, config-declared
+    /// `sticky true` workspaces re-expand on the next config reload —
+    /// session-only-effect is the documented contract.
+    pub(crate) fn unset_workspace_sticky(
+        &mut self,
+        workspace: Option<WorkspaceReference>,
+    ) -> Result<WorkspaceId, UnsetWorkspaceStickyError> {
+        let ws_id = match workspace {
+            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
+            None => self.active_workspace_mut().map(|ws| ws.id()),
+        }
+        .ok_or(UnsetWorkspaceStickyError::WorkspaceNotFound)?;
+
+        let ws = self
+            .workspaces
+            .get_mut(&ws_id)
+            .expect("resolved ws_id must be a live pool key");
+        if !ws.is_sticky() {
+            return Ok(ws_id);
+        }
+        ws.is_sticky = false;
+
+        #[cfg(debug_assertions)]
+        self.verify_invariants();
+
+        Ok(ws_id)
+    }
+
+    /// Toggle `workspace.is_sticky`, dispatching to
+    /// [`Self::set_workspace_sticky`] / [`Self::unset_workspace_sticky`].
+    ///
+    /// Resolution order:
+    /// 1. `workspace` → `WorkspaceNotFound` (silent no-op at dispatch).
+    ///
+    /// Dispatches on `is_sticky` alone. The DD §3.2 non-empty `activities`
+    /// invariant makes the `sticky == true ∧ activities == ∅` state
+    /// unreachable, so the flag is a faithful signal of the current sticky
+    /// state.
+    pub(crate) fn toggle_workspace_sticky(
+        &mut self,
+        workspace: Option<WorkspaceReference>,
+    ) -> Result<ToggleWorkspaceStickyOutcome, ToggleWorkspaceStickyError> {
+        let ws_id = match workspace {
+            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
+            None => self.active_workspace_mut().map(|ws| ws.id()),
+        }
+        .ok_or(ToggleWorkspaceStickyError::WorkspaceNotFound)?;
+
+        // Read current flag in a narrow scope so the shared borrow releases
+        // before the delegate call.
+        let currently_sticky = {
+            self.workspaces
+                .get(&ws_id)
+                .expect("resolved ws_id must be a live pool key")
+                .is_sticky()
+        };
+
+        if currently_sticky {
+            self.unset_workspace_sticky(Some(WorkspaceReference::Id(ws_id.get())))
+                .expect(
+                    "unset cannot fail: ws_id was just resolved \
+                     (WorkspaceNotFound impossible)",
+                );
+            Ok(ToggleWorkspaceStickyOutcome {
+                ws_id,
+                new_is_sticky: false,
+                active_affected: false,
+            })
+        } else {
+            let (_, active_affected) = self
+                .set_workspace_sticky(Some(WorkspaceReference::Id(ws_id.get())))
+                .expect(
+                    "set cannot fail: ws_id was just resolved \
+                     (WorkspaceNotFound impossible)",
+                );
+            Ok(ToggleWorkspaceStickyOutcome {
+                ws_id,
+                new_is_sticky: true,
+                active_affected,
+            })
+        }
     }
 
     /// Resolve an [`ActivityReferenceArg`] to an [`ActivityId`] if the pool
