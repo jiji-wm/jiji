@@ -606,15 +606,21 @@ impl From<ActivitySwitchBlock> for DoActionError {
 /// for the dispatch layer to log the toggle direction and decide whether to
 /// fire the cursor-warp / redraw pair.
 ///
-/// `active_affected` is always `false` for toggle-off (Unset never touches the
-/// workspace's `activities` set, so visibility for the active activity does
-/// not change) and bubbles up from the inner `set_workspace_activities` call
-/// for toggle-on.
+/// The sum type makes the `(StickyOff, active_affected: true)` combination
+/// unrepresentable: `active_affected` is only meaningful when toggling on
+/// (Unset never touches `activities`, so toggle-off always has
+/// `active_affected = false`). `StickyOff` simply does not carry the field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ToggleWorkspaceStickyOutcome {
-    pub(crate) ws_id: WorkspaceId,
-    pub(crate) new_is_sticky: bool,
-    pub(crate) active_affected: bool,
+pub(crate) enum ToggleWorkspaceStickyOutcome {
+    /// Toggled from off to on. `active_affected` bubbles up from the inner
+    /// `set_workspace_activities` call and indicates whether the active
+    /// activity's workspace set changed (cursor-warp / redraw trigger).
+    StickyOn {
+        ws_id: WorkspaceId,
+        active_affected: bool,
+    },
+    /// Toggled from on to off. Activities set is unchanged; no redraw needed.
+    StickyOff { ws_id: WorkspaceId },
 }
 
 impl fmt::Display for DoActionError {
@@ -5605,11 +5611,7 @@ impl<W: LayoutElement> Layout<W> {
                     "unset cannot fail: ws_id was just resolved \
                      (WorkspaceNotFound impossible)",
                 );
-            Ok(ToggleWorkspaceStickyOutcome {
-                ws_id,
-                new_is_sticky: false,
-                active_affected: false,
-            })
+            Ok(ToggleWorkspaceStickyOutcome::StickyOff { ws_id })
         } else {
             let (_, active_affected) = self
                 .set_workspace_sticky(Some(WorkspaceReference::Id(ws_id.get())))
@@ -5617,11 +5619,7 @@ impl<W: LayoutElement> Layout<W> {
                     "set cannot fail: ws_id was just resolved \
                      (WorkspaceNotFound impossible)",
                 );
-            Ok(ToggleWorkspaceStickyOutcome {
-                ws_id,
-                new_is_sticky: true,
-                active_affected,
-            })
+            Ok(ToggleWorkspaceStickyOutcome::StickyOn { ws_id, active_affected })
         }
     }
 

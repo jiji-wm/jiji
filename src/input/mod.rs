@@ -2991,19 +2991,29 @@ impl State {
         let arg_ws_log = reference.clone();
         match self.niri.layout.toggle_workspace_sticky(reference) {
             Ok(outcome) => {
-                debug!(
-                    "ToggleWorkspaceSticky: {:?} is_sticky={} (active_affected={})",
-                    outcome.ws_id, outcome.new_is_sticky, outcome.active_affected,
-                );
-                // Cursor-warp / redraw asymmetry: Toggle-on may flip workspace
-                // visibility in the active activity (when the symmetric diff
-                // touched the active id) — same precondition as
-                // SetWorkspaceActivities at input/mod.rs. Toggle-off
-                // (and Toggle-on no-op) leave views untouched. No §5.19 call:
-                // sticky toggles don't flip Activities.active_id.
-                if outcome.active_affected {
-                    self.maybe_warp_cursor_to_focus();
-                    self.niri.queue_redraw_all();
+                match outcome {
+                    crate::layout::ToggleWorkspaceStickyOutcome::StickyOn {
+                        ws_id,
+                        active_affected,
+                    } => {
+                        debug!(
+                            "ToggleWorkspaceSticky: {ws_id:?} is_sticky=true \
+                             (active_affected={active_affected})"
+                        );
+                        // Cursor-warp / redraw asymmetry: Toggle-on may flip
+                        // workspace visibility in the active activity (when the
+                        // symmetric diff touched the active id) — same
+                        // precondition as SetWorkspaceActivities. No §5.19 call:
+                        // sticky toggles don't flip Activities.active_id.
+                        if active_affected {
+                            self.maybe_warp_cursor_to_focus();
+                            self.niri.queue_redraw_all();
+                        }
+                    }
+                    crate::layout::ToggleWorkspaceStickyOutcome::StickyOff { ws_id } => {
+                        debug!("ToggleWorkspaceSticky: {ws_id:?} is_sticky=false");
+                        // Toggle-off never touches views — no cursor-warp / redraw.
+                    }
                 }
             }
             Err(e) => {

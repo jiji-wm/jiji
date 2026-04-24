@@ -13687,6 +13687,61 @@ fn set_workspace_sticky_re_expands_when_activities_was_narrowed_to_subset() {
 }
 
 #[test]
+fn set_workspace_sticky_reports_active_affected_when_active_enters_set() {
+    // Pin the active_affected=true branch: when the active activity id is
+    // NOT already in the workspace's activities set, set_workspace_sticky
+    // adds it and returns active_affected=true.
+    //
+    // This is the cursor-warp / redraw trigger; a regression that always
+    // returns false would silence the redraw and leave the workspace
+    // invisible in the active view.
+    //
+    // We seed ws.activities = {beta} (beta is inactive, alpha is active)
+    // by hand. Going through RemoveWorkspaceFromActivity would surface
+    // the pre-existing "last must be unnamed" limitation (see the
+    // re_expands test above for the full explanation).
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    let mon_out = layout.monitors[0].output_id();
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has seed ws");
+
+    // Seed: activities = {beta} only, so active (alpha) is NOT in the set.
+    {
+        let ws = layout
+            .workspaces
+            .get_mut(&target_ws_id)
+            .expect("live");
+        ws.activities = HashSet::from([beta]);
+    }
+
+    let (ws_id, active_affected) = layout
+        .set_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
+        .expect("set must succeed");
+    assert_eq!(ws_id, target_ws_id);
+    assert!(
+        active_affected,
+        "to_add includes alpha (active activity); active_affected must be true",
+    );
+
+    let ws = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("live");
+    assert!(ws.is_sticky());
+    assert_eq!(ws.activities(), &HashSet::from([alpha, beta]));
+}
+
+#[test]
 fn unset_workspace_sticky_clears_flag_keeps_activities_set() {
     // DD §3.2: "Toggling off … keeps the current `activities` set." Pin the
     // contract: is_sticky flips to false; activities is untouched (even if
@@ -13839,7 +13894,7 @@ fn unset_workspace_sticky_no_op_when_workspace_not_found() {
 #[test]
 fn toggle_workspace_sticky_dispatches_to_set_when_off() {
     // is_sticky=false → Toggle dispatches to SetSticky. Outcome carries
-    // new_is_sticky=true and active_affected bubbled up from the delegate.
+    // StickyOn outcome with active_affected bubbled up from the delegate.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();
@@ -13858,10 +13913,15 @@ fn toggle_workspace_sticky_dispatches_to_set_when_off() {
     let outcome = layout
         .toggle_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
         .expect("toggle must succeed");
-    assert_eq!(outcome.ws_id, target_ws_id);
-    assert!(outcome.new_is_sticky, "toggle-off → on must report sticky=true");
+    let (out_ws_id, out_active_affected) = match outcome {
+        ToggleWorkspaceStickyOutcome::StickyOn { ws_id, active_affected } => (ws_id, active_affected),
+        ToggleWorkspaceStickyOutcome::StickyOff { .. } => {
+            panic!("expected StickyOn outcome for toggle-off → on")
+        }
+    };
+    assert_eq!(out_ws_id, target_ws_id);
     // alpha already in set; to_add = {beta}; active_affected = false.
-    assert!(!outcome.active_affected);
+    assert!(!out_active_affected);
 
     let ws = layout
         .workspaces
@@ -13876,8 +13936,7 @@ fn toggle_workspace_sticky_dispatches_to_set_when_off() {
 #[test]
 fn toggle_workspace_sticky_dispatches_to_unset_when_on() {
     // is_sticky=true → Toggle dispatches to UnsetSticky. Outcome carries
-    // new_is_sticky=false and active_affected=false (Unset never touches
-    // activities).
+    // StickyOff outcome; Unset never touches activities.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();
@@ -13906,12 +13965,14 @@ fn toggle_workspace_sticky_dispatches_to_unset_when_on() {
     let outcome = layout
         .toggle_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
         .expect("toggle must succeed");
-    assert_eq!(outcome.ws_id, target_ws_id);
-    assert!(!outcome.new_is_sticky, "toggle-on → off must report sticky=false");
-    assert!(
-        !outcome.active_affected,
-        "Unset never touches activities; active_affected must always be false on toggle-off",
-    );
+    // StickyOff makes (StickyOff, active_affected: true) unrepresentable.
+    let out_ws_id = match outcome {
+        ToggleWorkspaceStickyOutcome::StickyOff { ws_id } => ws_id,
+        ToggleWorkspaceStickyOutcome::StickyOn { .. } => {
+            panic!("expected StickyOff outcome for toggle-on → off")
+        }
+    };
+    assert_eq!(out_ws_id, target_ws_id);
 
     let ws = layout
         .workspaces
