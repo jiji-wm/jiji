@@ -10244,3 +10244,621 @@ fn reload_promotion_preserves_runtime_name_casing() {
 
     layout.verify_invariants();
 }
+
+// --- Config-reload activity reconciliation — removal half (Phase 1b Part 2 /
+// DD §5.15 bullet 2) ---
+//
+// These tests exercise `Layout::reconcile_activities_on_reload_remove` — the
+// atomic validate-then-mutate entry that drops config-declared activities
+// absent from the reloaded config. Every `Err` test snapshots pool-size,
+// workspace-count, active cursor, and previous cursor before the call and
+// `assert_eq!`'s them after — the atomicity contract is the load-bearing pin.
+
+#[test]
+fn reconcile_remove_no_op_when_config_retains_all_activities() {
+    // Seed: runtime "Default", promoted to config-declared by an initial
+    // reconcile_add. Reload config names `[Default]` (unchanged). Expected:
+    // remove-set is empty, Ok(()), pool unchanged.
+    let mut layout = Layout::<TestWindow>::default();
+    let default_id = layout.active_activity_id();
+
+    let cfg = [niri_config::Activity {
+        name: niri_config::ActivityName("Default".to_owned()),
+    }];
+    layout.reconcile_activities_on_reload_add(&cfg, &[]);
+    assert!(
+        layout
+            .activities
+            .get(default_id)
+            .expect("default must remain in pool")
+            .is_config_declared(),
+        "precondition: Default is config-declared after the seeding add-reconcile",
+    );
+
+    let pool_size_before = layout.activities.len();
+    let workspaces_size_before = layout.workspaces.len();
+
+    layout
+        .reconcile_activities_on_reload_remove(&cfg)
+        .expect("identical config must be Ok(())");
+
+    assert_eq!(layout.activities.len(), pool_size_before, "pool unchanged");
+    assert_eq!(
+        layout.workspaces.len(),
+        workspaces_size_before,
+        "workspaces unchanged",
+    );
+    assert_eq!(layout.active_activity_id(), default_id);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_remove_drops_config_activity_with_no_exclusive_workspaces() {
+    // Seed: config-declared [A, B] (via reconcile_add). No workspaces are
+    // exclusive to B. Reload config names [A]. Expected: B dropped from pool;
+    // workspace count unchanged.
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+
+    let cfg_init = [
+        niri_config::Activity {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Beta".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let beta_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Beta")
+        .expect("Beta was added")
+        .id();
+
+    let pool_before = layout.activities.len();
+    let ws_before = layout.workspaces.len();
+
+    let cfg_reload = [niri_config::Activity {
+        name: niri_config::ActivityName("Default".to_owned()),
+    }];
+    layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect("non-active config activity with no exclusives must drop");
+
+    assert_eq!(
+        layout.activities.len(),
+        pool_before - 1,
+        "exactly one activity dropped",
+    );
+    assert!(!layout.activities.contains(beta_id), "Beta dropped");
+    assert_eq!(
+        layout.workspaces.len(),
+        ws_before,
+        "no workspaces destroyed",
+    );
+    assert_eq!(layout.active_activity_id(), seed_id);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_remove_destroys_empty_unnamed_exclusive_workspace() {
+    // B exclusive over one empty unnamed workspace. Reload drops B. Expected:
+    // workspace destroyed, B removed.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+
+    // Seed config-declared [Default, Beta].
+    let cfg_init = [
+        niri_config::Activity {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Beta".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let beta_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Beta")
+        .expect("Beta was added")
+        .id();
+
+    // Allocate a fresh exclusive unnamed workspace tagged to beta.
+    let output = layout.monitors[0].output.clone();
+    let beta_ws = Workspace::new(
+        &output,
+        HashSet::from([beta_id]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let beta_ws_id = beta_ws.id();
+    assert!(
+        layout.workspaces.insert(beta_ws_id, beta_ws).is_none(),
+        "fresh id is unique",
+    );
+    let ws_baseline = layout.workspaces.len();
+
+    let cfg_reload = [niri_config::Activity {
+        name: niri_config::ActivityName("Default".to_owned()),
+    }];
+    layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect("empty unnamed exclusive must be destroyed without error");
+
+    assert!(!layout.activities.contains(beta_id), "Beta dropped");
+    assert!(
+        !layout.workspaces.contains_key(&beta_ws_id),
+        "exclusive unnamed workspace destroyed",
+    );
+    assert_eq!(
+        layout.workspaces.len(),
+        ws_baseline - 1,
+        "exactly the beta workspace was destroyed",
+    );
+    assert_eq!(layout.active_activity_id(), seed_id);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_remove_destroys_empty_named_exclusive_workspace() {
+    // Named exclusive workspaces are destroyed on reload (unlike IPC
+    // RemoveActivity which rejects them via ExclusiveNamedWorkspace). This pins
+    // the §5.15 asymmetry: reload is user-initiated config churn; the caller
+    // chose to drop the activity by editing the config.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 7,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    // Seed Beta directly via the pool API, mark it config-declared so it
+    // qualifies for the remove-set. Skipping `reconcile_add` avoids the
+    // add-path's debug-assert that every named non-sticky workspace must
+    // appear in `config_workspaces` — this test exercises reload_remove in
+    // isolation, not the full `State::reload_config` prewalk.
+    let beta_activity = super::activity::Activity::new_config_declared("Beta".to_owned());
+    let beta_id = beta_activity.id();
+    layout.activities.insert(beta_activity);
+
+    // Flip the named workspace to exclusively beta.
+    let named_ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"ws7".to_owned()))
+        .expect("named workspace allocated")
+        .id();
+    layout
+        .workspaces
+        .get_mut(&named_ws_id)
+        .expect("live pool key")
+        .activities = std::iter::once(beta_id).collect();
+
+    let cfg_reload = [niri_config::Activity {
+        name: niri_config::ActivityName("Default".to_owned()),
+    }];
+    layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect("empty named exclusive must be destroyed on reload path");
+
+    assert!(!layout.activities.contains(beta_id), "Beta dropped");
+    assert!(
+        !layout.workspaces.contains_key(&named_ws_id),
+        "named exclusive workspace destroyed (reload asymmetry vs IPC RemoveActivity)",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_remove_prunes_shared_workspaces() {
+    // Workspace W has activities == {A, B}. Reload drops B. Expected: W
+    // survives, W.activities shrinks to {A}.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let cfg_init = [
+        niri_config::Activity {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Beta".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let default_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Default")
+        .expect("Default is in pool")
+        .id();
+    let beta_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Beta")
+        .expect("Beta was added")
+        .id();
+
+    // Union beta into the seed workspace.
+    let shared_ws_id = layout
+        .workspaces
+        .values()
+        .map(|ws| ws.id())
+        .next()
+        .expect("seed workspace allocated");
+    layout
+        .workspaces
+        .get_mut(&shared_ws_id)
+        .expect("live pool key")
+        .activities = [default_id, beta_id].into_iter().collect();
+
+    let ws_before = layout.workspaces.len();
+
+    let cfg_reload = [niri_config::Activity {
+        name: niri_config::ActivityName("Default".to_owned()),
+    }];
+    layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect("shared prune must succeed");
+
+    assert!(!layout.activities.contains(beta_id), "Beta dropped");
+    assert_eq!(
+        layout.workspaces.len(),
+        ws_before,
+        "shared workspace is retained, not destroyed",
+    );
+    let shared_ws = layout
+        .workspaces
+        .get(&shared_ws_id)
+        .expect("shared workspace must still exist");
+    assert_eq!(
+        shared_ws.activities(),
+        &HashSet::from([default_id]),
+        "shared workspace must have Beta pruned, Default retained",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_remove_rejects_on_exclusive_workspace_has_windows() {
+    // B exclusive over a workspace with a window. Reload drops B. Expected:
+    // Err(ExclusiveWorkspaceHasWindows), and the entire state — pool,
+    // workspaces, active, previous — is byte-for-byte unchanged. This is the
+    // atomicity pin inherited from Layout::remove_activity.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(99),
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    let cfg_init = [
+        niri_config::Activity {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Beta".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let beta_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Beta")
+        .expect("Beta was added")
+        .id();
+
+    let window_ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.has_windows())
+        .expect("AddWindow allocated a window-carrying workspace")
+        .id();
+    layout
+        .workspaces
+        .get_mut(&window_ws_id)
+        .expect("live pool key")
+        .activities = std::iter::once(beta_id).collect();
+
+    let pool_before = layout.activities.len();
+    let ws_before = layout.workspaces.len();
+    let active_before = layout.active_activity_id();
+    let previous_before = layout.activities.previous_id();
+
+    let cfg_reload = [niri_config::Activity {
+        name: niri_config::ActivityName("Default".to_owned()),
+    }];
+    let err = layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect_err("exclusive-with-windows must err");
+
+    match err {
+        ReloadActivityRemovalError::ExclusiveWorkspaceHasWindows {
+            activity_name,
+            workspace_id,
+        } => {
+            assert_eq!(activity_name, "Beta");
+            assert_eq!(workspace_id, window_ws_id);
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+
+    assert_eq!(layout.activities.len(), pool_before, "pool unchanged");
+    assert_eq!(layout.workspaces.len(), ws_before, "workspaces unchanged");
+    assert_eq!(
+        layout.active_activity_id(),
+        active_before,
+        "active cursor unchanged on Err",
+    );
+    assert_eq!(
+        layout.activities.previous_id(),
+        previous_before,
+        "previous cursor unchanged on Err",
+    );
+    assert!(layout.activities.contains(beta_id), "Beta survives on Err");
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_remove_rejects_would_empty_pool() {
+    // Pool must be purely config-declared (runtime activities survive reload
+    // per §5.15 "Runtime activities on reload" and are not candidates for the
+    // remove-set, so a runtime-seed pool never can hit WouldEmptyPool). Seed
+    // via the startup `with_options_and_workspaces` path which uses
+    // `Activities::from_config_or_default` — an explicit `activity "Solo"`
+    // in the seed config makes the pool `[Solo (config-declared)]`. Reload
+    // declares zero activities. Expected: Err(WouldEmptyPool), no mutation.
+    let config = Config {
+        activities: vec![niri_config::Activity {
+            name: niri_config::ActivityName("Solo".to_owned()),
+        }],
+        ..Config::default()
+    };
+    let mut layout = Layout::<TestWindow>::new(Clock::default(), &config);
+    assert_eq!(layout.activities.len(), 1);
+    let solo_id = layout.active_activity_id();
+    assert!(
+        layout
+            .activities
+            .get(solo_id)
+            .expect("Solo in pool")
+            .is_config_declared(),
+        "precondition: Solo is config-declared",
+    );
+
+    let pool_before = layout.activities.len();
+    let ws_before = layout.workspaces.len();
+    let active_before = layout.active_activity_id();
+
+    let cfg_reload: [niri_config::Activity; 0] = [];
+    let err = layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect_err("would-empty-pool must err");
+
+    match err {
+        ReloadActivityRemovalError::WouldEmptyPool { activity_name } => {
+            assert_eq!(activity_name, "Solo");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+
+    assert_eq!(layout.activities.len(), pool_before, "pool unchanged");
+    assert_eq!(layout.workspaces.len(), ws_before, "workspaces unchanged");
+    assert_eq!(layout.active_activity_id(), active_before);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_remove_cascades_active_cursor_to_previous() {
+    // Pool: [Default, Beta], active == Beta (via switch), previous == Default.
+    // Reload drops Beta. Expected: active flips to Default (previous), Beta
+    // removed.
+    let mut layout = Layout::<TestWindow>::default();
+    let cfg_init = [
+        niri_config::Activity {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Beta".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let default_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Default")
+        .expect("Default in pool")
+        .id();
+    let beta_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Beta")
+        .expect("Beta in pool")
+        .id();
+
+    layout.switch_activity(beta_id);
+    assert_eq!(layout.active_activity_id(), beta_id);
+    assert_eq!(layout.activities.previous_id(), Some(default_id));
+
+    let cfg_reload = [niri_config::Activity {
+        name: niri_config::ActivityName("Default".to_owned()),
+    }];
+    layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect("cascade to previous must succeed");
+
+    assert_eq!(
+        layout.active_activity_id(),
+        default_id,
+        "cascade target was previous (Default)",
+    );
+    assert!(!layout.activities.contains(beta_id), "Beta dropped");
+    assert_eq!(
+        layout.activities.previous_id(),
+        None,
+        "previous pointed at the removed Beta and must be cleared",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_remove_cascades_active_cursor_to_first_when_previous_also_in_remove_set() {
+    // Pool: [Default, Beta, Gamma]. Active == Gamma, previous == Beta.
+    // Reload drops both Beta and Gamma. Expected: cascade target is Default
+    // (first declaration-order id not in remove_set).
+    let mut layout = Layout::<TestWindow>::default();
+    let cfg_init = [
+        niri_config::Activity {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Beta".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Gamma".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let default_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Default")
+        .expect("Default in pool")
+        .id();
+    let beta_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Beta")
+        .expect("Beta in pool")
+        .id();
+    let gamma_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Gamma")
+        .expect("Gamma in pool")
+        .id();
+
+    layout.switch_activity(beta_id);
+    layout.switch_activity(gamma_id);
+    assert_eq!(layout.active_activity_id(), gamma_id);
+    assert_eq!(layout.activities.previous_id(), Some(beta_id));
+
+    let cfg_reload = [niri_config::Activity {
+        name: niri_config::ActivityName("Default".to_owned()),
+    }];
+    layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect("cascade to first surviving in declaration order must succeed");
+
+    assert_eq!(
+        layout.active_activity_id(),
+        default_id,
+        "previous (Beta) was itself in remove_set; cascade must skip to first non-remove-set id \
+         in declaration order (Default)",
+    );
+    assert!(!layout.activities.contains(beta_id));
+    assert!(!layout.activities.contains(gamma_id));
+    assert_eq!(layout.activities.len(), 1);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_remove_rejects_on_hard_block_when_cascade_required() {
+    // Active in remove_set, plus an in-flight interactive_move: cascade is
+    // required but is_activity_switch_hard_blocked returns Some(_). Expected:
+    // Err(HardBlockedCascade), no mutation.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let cfg_init = [
+        niri_config::Activity {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Beta".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let beta_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Beta")
+        .expect("Beta in pool")
+        .id();
+    layout.switch_activity(beta_id);
+    assert_eq!(layout.active_activity_id(), beta_id);
+
+    // Arm a DnD session via the public API (same pattern as
+    // `is_activity_switch_hard_blocked_returns_some_during_dnd`). DnD is
+    // preferred over `interactive_move_begin` because it does not require a
+    // window to exist on the active activity — our test has no windows and
+    // `interactive_move_begin` would fail to arm without one.
+    let output = layout
+        .outputs()
+        .find(|o| o.name() == "output1")
+        .cloned()
+        .expect("output1 must exist");
+    layout.dnd_update(output, Point::from((0., 0.)));
+    assert!(
+        matches!(
+            layout.is_activity_switch_hard_blocked(),
+            Some(super::ActivitySwitchBlock::Dnd),
+        ),
+        "precondition: hard-blocked via DnD",
+    );
+
+    let pool_before = layout.activities.len();
+    let ws_before = layout.workspaces.len();
+    let active_before = layout.active_activity_id();
+    let previous_before = layout.activities.previous_id();
+
+    let cfg_reload = [niri_config::Activity {
+        name: niri_config::ActivityName("Default".to_owned()),
+    }];
+    let err = layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect_err("hard-blocked cascade must err");
+
+    match err {
+        ReloadActivityRemovalError::HardBlockedCascade {
+            activity_name,
+            block,
+        } => {
+            assert_eq!(activity_name, "Beta");
+            assert_eq!(block, super::ActivitySwitchBlock::Dnd);
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+
+    assert_eq!(layout.activities.len(), pool_before, "pool unchanged");
+    assert_eq!(layout.workspaces.len(), ws_before, "workspaces unchanged");
+    assert_eq!(
+        layout.active_activity_id(),
+        active_before,
+        "active cursor unchanged on Err",
+    );
+    assert_eq!(
+        layout.activities.previous_id(),
+        previous_before,
+        "previous cursor unchanged on Err",
+    );
+
+    // Clean up the hard-block so verify_invariants runs under the normal gate.
+    layout.dnd_end();
+    layout.verify_invariants();
+}

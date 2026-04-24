@@ -57,6 +57,7 @@ use tile::{Tile, TileRenderElement};
 use workspace::{WorkspaceAddWindowTarget, WorkspaceId};
 
 use self::activity::{Activities, Activity, ActivityId, WorkspaceView};
+pub(crate) use self::activity::ReloadActivityRemovalError;
 pub use self::activity::{CreateActivityError, RemoveActivityError, RenameActivityError};
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{Monitor, WorkspaceSwitch};
@@ -5437,6 +5438,292 @@ impl<W: LayoutElement> Layout<W> {
         ws_config: &WorkspaceConfig,
     ) -> HashSet<ActivityId> {
         resolve_workspace_activities_for(&self.activities, ws_config)
+    }
+
+    /// Removal half of the config-reload activity reconciliation (DD §5.15).
+    ///
+    /// Walks `self.activities` once, accumulating every live config-declared
+    /// activity whose name is not present (case-insensitively, via the same
+    /// [`Activities::resolve_config_names`] matcher the additive path uses) in
+    /// `config_activities`. Runtime activities survive reload unconditionally
+    /// per §5.15 "Runtime activities on reload" — they are not candidates.
+    ///
+    /// Validation-then-mutation: every rejection class is computed over the
+    /// unmutated state, and `Err` leaves `self` byte-for-byte unchanged. Only
+    /// when validation completes do we touch `self.activities`,
+    /// `self.workspaces`, or the active cursor.
+    ///
+    /// Rejection rules (all evaluated before any mutation):
+    ///
+    /// - Any workspace exclusive to an activity in the remove-set has windows
+    ///   → [`ReloadActivityRemovalError::ExclusiveWorkspaceHasWindows`]. Both
+    ///   named and unnamed exclusives are candidates here; reload is a
+    ///   user-initiated config change that accepts workspace churn, unlike the
+    ///   IPC `RemoveActivity` path's [`RemoveActivityError::ExclusiveNamedWorkspace`]
+    ///   guard.
+    /// - The remove-set covers every activity in the pool (no runtime
+    ///   activities survive to absorb the cascade) →
+    ///   [`ReloadActivityRemovalError::WouldEmptyPool`].
+    /// - The active activity is in the remove-set AND
+    ///   [`Self::is_activity_switch_hard_blocked`] returns `Some(_)` →
+    ///   [`ReloadActivityRemovalError::HardBlockedCascade`]. The cascade step
+    ///   below calls [`Self::switch_activity`], whose entry `debug_assert!`
+    ///   requires the caller to have filtered on the hard-block gate.
+    ///
+    /// Determinism on `Err`: the walks collect candidates before picking a
+    /// reported offender so `HashMap::values()`'s non-deterministic iteration
+    /// order doesn't flip the user-visible error message between runs. Chosen
+    /// offenders are the min by `WorkspaceId::get()` / `ActivityId::get()`
+    /// ascending — same precedent as
+    /// `remove_activity_error_precedence_windows_beats_named` in §5.14.
+    ///
+    /// On success, the mutation sequence is:
+    ///
+    /// 1. **Cascade the active cursor** if the active activity is in the
+    ///    remove-set. The cascade target is `previous_id()` when it is not
+    ///    itself in the remove-set; otherwise the first declaration-order id
+    ///    not in the remove-set. Routed through [`Self::switch_activity`] so
+    ///    in-flight workspace-switch animations snap and `ensure_active_views`
+    ///    runs.
+    /// 2. **Per target in the remove-set (declaration order), destroy every
+    ///    exclusive workspace** — both named and unnamed — by dropping the id
+    ///    from every activity's per-output `views` (the same retain-drop-or-
+    ///    shift recipe [`Self::remove_activity`] uses) and from
+    ///    `self.workspaces`. The `ensure_named_workspace` pass downstream in
+    ///    `State::reload_config` will recreate named config workspaces against
+    ///    the post-remove activity pool.
+    /// 3. **Prune the target from every remaining workspace's `activities`
+    ///    set** where it still appears. The set shrinks by one but remains
+    ///    non-empty: exclusives were destroyed in step 2, so every remaining
+    ///    membership is shared with at least one other activity.
+    /// 4. **Remove the target from the activity pool** via
+    ///    [`Activities::remove`]. Step 1's cascade satisfies the
+    ///    `id != self.active` precondition; step 5's validation guard
+    ///    satisfies the `len() > 1` precondition (evaluated once over the
+    ///    whole remove-set, not per-iteration).
+    ///
+    /// Call ordering: this method must run BEFORE
+    /// [`Self::reconcile_activities_on_reload_add`] so that additive path's
+    /// step 4 (`resolve_workspace_activities_for` on config workspaces) sees
+    /// a post-remove pool. Any config workspace whose `activity` reference
+    /// was dropped from the new config falls through to the additive path's
+    /// `unknown`-name fallback (`{active_id}`).
+    ///
+    /// In debug builds, runs [`Self::verify_invariants`] at the tail so
+    /// callers need not re-check.
+    pub(crate) fn reconcile_activities_on_reload_remove(
+        &mut self,
+        config_activities: &[niri_config::Activity],
+    ) -> Result<(), ReloadActivityRemovalError> {
+        // Validation phase: read-only, no `self` mutation until every error
+        // class has been ruled out. Mirrors the atomicity contract of
+        // `Layout::remove_activity`.
+
+        // Step 1: compute remove_set. Walk `self.activities.iter()` (declaration
+        // order via IndexMap) and keep config-declared activities whose name is
+        // not found in the new config (case-insensitive match, same matcher
+        // `resolve_config_names` uses).
+        let new_names: Vec<&str> = config_activities
+            .iter()
+            .map(|a| a.name.0.as_str())
+            .collect();
+        let remove_set: HashSet<ActivityId> = self
+            .activities
+            .iter()
+            .filter(|a| {
+                a.is_config_declared()
+                    && !new_names
+                        .iter()
+                        .any(|n| n.eq_ignore_ascii_case(a.name()))
+            })
+            .map(|a| a.id())
+            .collect();
+
+        // Step 2: no-op fast path.
+        if remove_set.is_empty() {
+            return Ok(());
+        }
+
+        // Step 3: classify every exclusive workspace of a remove-set activity.
+        // Non-deterministic HashMap::values() order: collect all offenders then
+        // pick the min by WorkspaceId::get() so the user-visible error doesn't
+        // flip between runs. Same precedent as
+        // `remove_activity_error_precedence_windows_beats_named`.
+        let mut has_windows_offenders: Vec<(WorkspaceId, ActivityId)> = Vec::new();
+        for ws in self.workspaces.values() {
+            // Exclusive ⇔ `activities().len() == 1 && sole ∈ remove_set`. For
+            // len == 1, `all(|id| remove_set.contains(id))` is equivalent to
+            // "sole activity is in remove_set", which is the required semantics.
+            if ws.activities().len() == 1
+                && ws.activities().iter().all(|id| remove_set.contains(id))
+                && ws.has_windows()
+            {
+                let sole = *ws
+                    .activities()
+                    .iter()
+                    .next()
+                    .expect("len == 1 check above guarantees one entry");
+                has_windows_offenders.push((ws.id(), sole));
+            }
+        }
+        if let Some((ws_id, act_id)) = has_windows_offenders
+            .into_iter()
+            .min_by_key(|(ws_id, _)| ws_id.get())
+        {
+            let name = self
+                .activities
+                .get(act_id)
+                .expect("offender activity id came from remove_set; still live in pool")
+                .name()
+                .to_owned();
+            return Err(ReloadActivityRemovalError::ExclusiveWorkspaceHasWindows {
+                activity_name: name,
+                workspace_id: ws_id,
+            });
+        }
+
+        // Step 4: would-empty-pool. Evaluated once over the whole remove-set
+        // (not per-iteration) because step 8 iteration asserts `len() > 1`
+        // against the *starting* pool size minus the iteration prefix; the
+        // cleanest guarantee is that the post-remove-set pool has ≥ 1 entry.
+        debug_assert!(
+            remove_set.len() <= self.activities.len(),
+            "remove_set ⊆ live activities, so subtraction cannot overflow",
+        );
+        if remove_set.len() >= self.activities.len() {
+            // Deterministic error-name pick: min by ActivityId::get() across
+            // the remove_set.
+            let act_id = *remove_set
+                .iter()
+                .min_by_key(|id| id.get())
+                .expect("remove_set non-empty (step 2 fast-path handles empty)");
+            let name = self
+                .activities
+                .get(act_id)
+                .expect("remove_set ids came from self.activities.iter() above")
+                .name()
+                .to_owned();
+            return Err(ReloadActivityRemovalError::WouldEmptyPool {
+                activity_name: name,
+            });
+        }
+
+        // Step 5: hard-block guard. Only relevant when the active activity is
+        // in the remove-set (step 7 below will cascade); otherwise no
+        // switch_activity call happens, so no hard-block gate is needed.
+        if remove_set.contains(&self.activities.active_id()) {
+            if let Some(block) = self.is_activity_switch_hard_blocked() {
+                let active_id = self.activities.active_id();
+                let name = self
+                    .activities
+                    .get(active_id)
+                    .expect("active_id is always a live key in the pool")
+                    .name()
+                    .to_owned();
+                return Err(ReloadActivityRemovalError::HardBlockedCascade {
+                    activity_name: name,
+                    block,
+                });
+            }
+        }
+
+        // Mutation phase: atomic from here. Validation ruled out every error
+        // class, so every `.expect()` below names a condition the validator
+        // established.
+
+        // Step 6: cascade the active cursor if the active activity is in the
+        // remove-set. Prefer `previous_id()` when it is not itself in the
+        // remove-set; otherwise the first declaration-order id not in the
+        // remove-set. Resolve the cascade target inside a narrow shared-borrow
+        // scope so the subsequent `&mut self` call via switch_activity compiles.
+        if remove_set.contains(&self.activities.active_id()) {
+            let cascade_target: ActivityId = {
+                let previous = self
+                    .activities
+                    .previous_id()
+                    .filter(|id| !remove_set.contains(id));
+                previous
+                    .or_else(|| {
+                        self.activities
+                            .iter()
+                            .map(|a| a.id())
+                            .find(|id| !remove_set.contains(id))
+                    })
+                    .expect("WouldEmptyPool was rejected above, so at least one id survives")
+            };
+            self.switch_activity(cascade_target);
+        }
+
+        // Step 7: per target in the remove-set, destroy exclusive workspaces
+        // (named and unnamed) and prune shared memberships.
+        //
+        // Iterate `self.activities.iter()` in declaration order and filter by
+        // `remove_set.contains()`. A Vec<ActivityId> snapshot is required
+        // because `Activities::remove` shrinks the map each pass, so iterating
+        // the live Activities would skip entries.
+        let targets: Vec<ActivityId> = self
+            .activities
+            .iter()
+            .map(|a| a.id())
+            .filter(|id| remove_set.contains(id))
+            .collect();
+        for target in targets {
+            // Pre-collect destroy ids to release the shared borrow on
+            // self.workspaces before the `iter_mut()` + `remove()` mutations.
+            let destroy_ids: Vec<WorkspaceId> = self
+                .workspaces
+                .values()
+                .filter(|ws| ws.activities().len() == 1 && ws.activities().contains(&target))
+                .map(|ws| ws.id())
+                .collect();
+
+            // Patch every activity's `views`: drop view entries that would
+            // become empty, shift `active` / `previous` otherwise. Same recipe
+            // `Layout::remove_activity` uses at the exclusive-destroy site.
+            for ws_id in &destroy_ids {
+                for activity in self.activities.iter_mut() {
+                    activity.views_mut().retain(|_output_id, view| {
+                        let Some(pos) = view.position_of(*ws_id) else {
+                            return true;
+                        };
+                        if view.len() == 1 {
+                            return false;
+                        }
+                        view.remove_at(pos);
+                        true
+                    });
+                }
+                assert!(
+                    self.workspaces.remove(ws_id).is_some(),
+                    "destroy id {ws_id:?} came from values() above — must be a live pool key",
+                );
+            }
+
+            // Prune `target` from every remaining workspace's `activities` set
+            // where it still appears. Exclusives were destroyed just above, so
+            // every remaining membership is shared — the set shrinks but stays
+            // non-empty (DD §3.2).
+            for ws in self.workspaces.values_mut() {
+                if ws.activities().contains(&target) {
+                    debug_assert!(
+                        ws.activities().len() > 1,
+                        "exclusives of {target:?} were destroyed in the pass above",
+                    );
+                    ws.activities.remove(&target);
+                }
+            }
+
+            // Remove the activity from the pool. `Activities::remove`'s
+            // preconditions are satisfied: target ≠ active (step 6 cascaded if
+            // it was), and len > 1 (the WouldEmptyPool check ruled out a
+            // would-empty final state).
+            let _ = self.activities.remove(target);
+        }
+
+        #[cfg(debug_assertions)]
+        self.verify_invariants();
+
+        Ok(())
     }
 
     /// Additive half of the config-reload activity reconciliation (DD §5.15).

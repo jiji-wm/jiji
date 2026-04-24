@@ -1446,6 +1446,27 @@ impl State {
 
         self.niri.config_error_notification.hide();
 
+        // Reconcile activity REMOVALS first (DD §5.15): the atomic validate-
+        // then-mutate path rejects the entire reload on violation (exclusive
+        // workspace with windows, would-empty-pool, hard-blocked cascade). We
+        // run this before the unname prewalk so that a rejected reload leaves
+        // workspace names untouched too — `unname_workspace` is irreversible
+        // in a single reload attempt. On rejection, re-show the config-error
+        // notification (just hidden above) and early-return, mirroring the
+        // parse-failure arm.
+        if let Err(err) = self
+            .niri
+            .layout
+            .reconcile_activities_on_reload_remove(&config.activities)
+        {
+            warn!("config reload rejected: {err}");
+            self.niri.config_error_notification.show();
+            self.niri.queue_redraw_all();
+            #[cfg(feature = "dbus")]
+            self.niri.a11y_announce_config_error();
+            return;
+        }
+
         // Find & orphan removed named workspaces.
         let mut removed_workspaces: Vec<String> = vec![];
         for ws in &self.niri.config.borrow().workspaces {

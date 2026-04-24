@@ -383,6 +383,71 @@ impl fmt::Display for RenameActivityError {
 
 impl std::error::Error for RenameActivityError {}
 
+/// Validation failure for config-reload activity removal via
+/// `Layout::reconcile_activities_on_reload_remove`. Each variant corresponds
+/// to one of the rejection rules the outer entry point evaluates before any
+/// mutation (DD §5.15 bullet 2). Callers surface them via `warn!` + the
+/// config-error notification, then early-return the entire reload — the
+/// atomicity contract mirrors `RemoveActivityError` on the IPC path.
+///
+/// Payloads carry owned `String` names (resolved at validation time while the
+/// pool is still intact), so this enum is `Clone` but not `Copy` — sibling
+/// `RemoveActivityError` is `Copy` because its payload is unit-per-variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReloadActivityRemovalError {
+    /// At least one workspace exclusively belonging to an about-to-be-removed
+    /// activity has windows. The user must close / move those windows first;
+    /// the entire reload is rejected (DD §5.15 bullet 2).
+    ExclusiveWorkspaceHasWindows {
+        activity_name: String,
+        workspace_id: super::workspace::WorkspaceId,
+    },
+    /// Removing all in-remove-set activities would leave the pool empty — no
+    /// runtime activities survive to absorb the active-cursor cascade. Parallel
+    /// to [`RemoveActivityError::LastRemaining`] on the IPC path, but evaluated
+    /// across the whole remove-set rather than a single target.
+    WouldEmptyPool { activity_name: String },
+    /// The active activity is in the remove-set (so an active-cursor cascade
+    /// is required) but [`Layout::is_activity_switch_hard_blocked`] returns
+    /// `Some(_)` — an interactive move, DnD, or workspace-switch gesture is in
+    /// flight. Parallel to the caller-side gate the IPC `switch_activity`
+    /// dispatcher enforces (DD §5.11).
+    HardBlockedCascade {
+        activity_name: String,
+        block: super::ActivitySwitchBlock,
+    },
+}
+
+impl fmt::Display for ReloadActivityRemovalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExclusiveWorkspaceHasWindows {
+                activity_name,
+                workspace_id,
+            } => write!(
+                f,
+                "activity {activity_name:?} owns exclusive workspace {workspace_id:?} with \
+                 windows; close or move them first",
+            ),
+            Self::WouldEmptyPool { activity_name } => write!(
+                f,
+                "removing activity {activity_name:?} would empty the pool; at least one \
+                 activity must remain",
+            ),
+            Self::HardBlockedCascade {
+                activity_name,
+                block,
+            } => write!(
+                f,
+                "cannot cascade off active activity {activity_name:?}: activity switch blocked \
+                 by {block} (DD §5.11)",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReloadActivityRemovalError {}
+
 /// Ordered pool of [`Activity`]s plus active / previous cursors.
 ///
 /// Invariants:
