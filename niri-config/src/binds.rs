@@ -408,6 +408,12 @@ pub enum Action {
     // keybinding surface for this action.
     #[knuffel(skip)]
     SetWorkspaceActivities(Option<WorkspaceReference>, Vec<ActivityReference>),
+    // IPC-only: the `focus: bool` parameter distinguishes two hard-block
+    // gates at dispatch (weaker gesture-only vs full
+    // `is_activity_switch_hard_blocked`), so the action is not surfaced as
+    // a KDL bind to avoid a silent mode-selection.
+    #[knuffel(skip)]
+    MoveWorkspaceToActivity(Option<WorkspaceReference>, ActivityReference, bool),
 }
 
 impl From<niri_ipc::Action> for Action {
@@ -746,6 +752,15 @@ impl From<niri_ipc::Action> for Action {
             } => Self::SetWorkspaceActivities(
                 workspace.map(WorkspaceReference::from),
                 activities.into_iter().map(ActivityReference::from).collect(),
+            ),
+            niri_ipc::Action::MoveWorkspaceToActivity {
+                workspace,
+                activity,
+                focus,
+            } => Self::MoveWorkspaceToActivity(
+                workspace.map(WorkspaceReference::from),
+                activity.into(),
+                focus,
             ),
             // niri_ipc::Action is #[non_exhaustive]: any new variant added to
             // niri_ipc without a matching arm here is a coding error that

@@ -5966,6 +5966,21 @@ fn do_action_error_display_matches_wire_contract() {
         format!("{}", DoActionError::SetWorkspaceActivitiesEmptyActivityList),
         "activities list is empty",
     );
+    // DD §5.14 MoveWorkspaceToActivity tokens. ActivityNotFound shares
+    // text with the other §5.14 rows; the workspace-not-in-active text is
+    // the DD §4.3 line 499 wording, minus the "use Add…" suggestion
+    // (docstring concern, not wire token).
+    assert_eq!(
+        format!("{}", DoActionError::MoveWorkspaceToActivityActivityNotFound),
+        "activity not found",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity,
+        ),
+        "workspace not in active activity",
+    );
 }
 
 #[test]
@@ -6028,6 +6043,14 @@ fn do_action_error_envelope_matches_wire_contract() {
         (
             DoActionError::SetWorkspaceActivitiesEmptyActivityList,
             "activities list is empty (DD §3.2)",
+        ),
+        (
+            DoActionError::MoveWorkspaceToActivityActivityNotFound,
+            "activity not found (DD §5.14)",
+        ),
+        (
+            DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity,
+            "workspace not in active activity (DD §5.14)",
         ),
     ] {
         assert_eq!(format_do_action_error(err), expected);
@@ -12887,4 +12910,477 @@ fn set_workspace_activities_blocked_by_gesture_at_dispatch() {
     assert!(layout
         .is_workspace_activity_assignment_blocked_by_gesture()
         .is_none());
+}
+
+// --- MoveWorkspaceToActivity -----------------------------------------------
+
+#[test]
+fn move_workspace_to_activity_atomic_add_then_remove() {
+    // Workspace in {active(alpha)}; move to beta. Final state:
+    // ws.activities = {beta}, alpha's view lost the id, beta's view
+    // (dormant) gained it if a view existed; if beta had no view on the
+    // output, Add fabricates none — final beta view may be absent (lazy).
+    //
+    // Fixture gives beta a pre-existing dormant view so we can assert
+    // the append side of Add-then-Remove.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    // Seed beta's view with an id from alpha's view (distinct from the
+    // named one we'll move, so Move appends to a non-empty view).
+    let seed_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+    layout
+        .activities
+        .get_mut(beta)
+        .expect("beta live")
+        .views_mut()
+        .insert(mon_out.clone(), WorkspaceView::new(vec![seed_ws_id], 0));
+
+    // Pick the named workspace (preserves bookend discipline under remove_at).
+    let target_ws_id = {
+        let ids = layout.active_view(&mon_out).ids().to_vec();
+        *ids.iter()
+            .find(|id| {
+                layout
+                    .workspaces
+                    .get(id)
+                    .expect("view id in pool")
+                    .name()
+                    .is_some()
+            })
+            .expect("named workspace present")
+    };
+    // Precondition: workspace belongs exclusively to alpha.
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&target_ws_id)
+            .expect("live")
+            .activities(),
+        &HashSet::from([alpha]),
+    );
+
+    let (ws_id, target_id, source_id) = layout
+        .move_workspace_to_activity(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("move must succeed");
+    assert_eq!(ws_id, target_ws_id);
+    assert_eq!(target_id, beta);
+    assert_eq!(source_id, alpha);
+
+    // Final set: {beta} (alpha pruned, beta added).
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&target_ws_id)
+            .expect("live")
+            .activities(),
+        &HashSet::from([beta]),
+    );
+    // Beta's view contains both seed_ws_id and target_ws_id.
+    let beta_view_ids: Vec<_> = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view")
+        .ids()
+        .to_vec();
+    assert!(beta_view_ids.contains(&seed_ws_id));
+    assert!(beta_view_ids.contains(&target_ws_id));
+
+    // Alpha's active view lost target_ws_id.
+    assert!(!layout.active_view(&mon_out).ids().contains(&target_ws_id));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn move_workspace_to_activity_preserves_other_memberships() {
+    // Workspace in {active(alpha), X, Y}; move to target. Final state:
+    // {X, Y, target} — workspace leaves active but stays in X, Y.
+    // DD §4.3 "multi-activity semantics" pin.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let x = layout
+        .create_activity("X".to_owned())
+        .expect("create x");
+    let y = layout
+        .create_activity("Y".to_owned())
+        .expect("create y");
+    let target = layout
+        .create_activity("Target".to_owned())
+        .expect("create target");
+
+    // Seed a workspace tagged {alpha, x, y}. Use an existing one from
+    // alpha's view. Place it in X's and Y's dormant views too — otherwise
+    // the post-Remove pool-keys equality invariant fails (X/Y/target have
+    // no view on mon_out, so after Remove prunes alpha the ws has no
+    // reachable view → orphan).
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+    layout
+        .workspaces
+        .get_mut(&target_ws_id)
+        .expect("live")
+        .activities = [alpha, x, y].into_iter().collect();
+    layout
+        .activities
+        .get_mut(x)
+        .expect("x live")
+        .views_mut()
+        .insert(
+            mon_out.clone(),
+            WorkspaceView::new(vec![target_ws_id], 0),
+        );
+    layout
+        .activities
+        .get_mut(y)
+        .expect("y live")
+        .views_mut()
+        .insert(
+            mon_out.clone(),
+            WorkspaceView::new(vec![target_ws_id], 0),
+        );
+
+    let (_, target_id, source_id) = layout
+        .move_workspace_to_activity(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &ActivityReferenceArg::Id(target.get()),
+        )
+        .expect("move must succeed");
+    assert_eq!(target_id, target);
+    assert_eq!(source_id, alpha);
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&target_ws_id)
+            .expect("live")
+            .activities(),
+        &HashSet::from([x, y, target]),
+        "move must leave alpha but keep x, y and add target",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn move_workspace_to_activity_workspace_already_in_target() {
+    // Workspace in {active(alpha), target}; move to target. Final state:
+    // {target} — source removed, target retained.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let target = layout
+        .create_activity("Target".to_owned())
+        .expect("create target");
+
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+    layout
+        .workspaces
+        .get_mut(&target_ws_id)
+        .expect("live")
+        .activities = [alpha, target].into_iter().collect();
+    // Give target a dormant view containing the id so Add is a delegate
+    // no-op.
+    layout
+        .activities
+        .get_mut(target)
+        .expect("target live")
+        .views_mut()
+        .insert(
+            mon_out.clone(),
+            WorkspaceView::new(vec![target_ws_id], 0),
+        );
+
+    layout
+        .move_workspace_to_activity(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &ActivityReferenceArg::Id(target.get()),
+        )
+        .expect("move must succeed");
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&target_ws_id)
+            .expect("live")
+            .activities(),
+        &HashSet::from([target]),
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn move_workspace_to_activity_target_equals_source_no_op() {
+    // Call with target == active. Must return Ok without mutating any
+    // state — the no-op branch subsumes the DD §5.14 "No-op if workspace
+    // already exclusively in target" row (source == target implies the
+    // workspace stays put).
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    let acts_before = layout
+        .workspaces
+        .get(&target_ws_id)
+        .expect("live")
+        .activities()
+        .clone();
+    let view_ids_before = layout.active_view(&mon_out).ids().to_vec();
+
+    let (_, target_id, source_id) = layout
+        .move_workspace_to_activity(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &ActivityReferenceArg::Id(alpha.get()),
+        )
+        .expect("target == source move must succeed");
+    assert_eq!(target_id, alpha);
+    assert_eq!(source_id, alpha);
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&target_ws_id)
+            .expect("live")
+            .activities(),
+        &acts_before,
+    );
+    assert_eq!(layout.active_view(&mon_out).ids(), &view_ids_before[..]);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn move_workspace_to_activity_not_in_active_errors() {
+    // Workspace tagged {x, y} (active=alpha not present). Move must
+    // Err(WorkspaceNotInActiveActivity) without mutating any state.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let output = layout.monitors[0].output.clone();
+
+    let x = layout
+        .create_activity("X".to_owned())
+        .expect("create x");
+    let y = layout
+        .create_activity("Y".to_owned())
+        .expect("create y");
+    let target = layout
+        .create_activity("Target".to_owned())
+        .expect("create target");
+
+    // Allocate a workspace tagged {x, y} only. Place it in x's view so
+    // pool-keys equality holds.
+    let ws = Workspace::new(
+        &output,
+        [x, y].into_iter().collect(),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let ws_id = ws.id();
+    assert!(layout.workspaces.insert(ws_id, ws).is_none());
+    layout
+        .activities
+        .get_mut(x)
+        .expect("x live")
+        .views_mut()
+        .insert(mon_out.clone(), WorkspaceView::new(vec![ws_id], 0));
+    layout
+        .activities
+        .get_mut(y)
+        .expect("y live")
+        .views_mut()
+        .insert(mon_out.clone(), WorkspaceView::new(vec![ws_id], 0));
+    // alpha remains active. Verify precondition.
+    assert_eq!(layout.active_activity_id(), alpha);
+    assert!(!layout
+        .workspaces
+        .get(&ws_id)
+        .expect("live")
+        .activities()
+        .contains(&alpha));
+
+    let acts_before = layout
+        .workspaces
+        .get(&ws_id)
+        .expect("live")
+        .activities()
+        .clone();
+
+    let err = layout
+        .move_workspace_to_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(target.get()),
+        )
+        .expect_err("must err: workspace not in active");
+    assert_eq!(err, MoveWorkspaceToActivityError::WorkspaceNotInActiveActivity);
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&ws_id)
+            .expect("live")
+            .activities(),
+        &acts_before,
+    );
+}
+
+#[test]
+fn move_workspace_to_activity_activity_not_found_errors() {
+    // Unresolvable target. Must Err(ActivityNotFound) before the
+    // workspace-resolution step runs — precedence pin.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let mon_out = layout.monitors[0].output_id();
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    let err = layout
+        .move_workspace_to_activity(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &ActivityReferenceArg::Id(u64::MAX),
+        )
+        .expect_err("unknown target activity must err");
+    assert_eq!(err, MoveWorkspaceToActivityError::ActivityNotFound);
+}
+
+#[test]
+fn move_workspace_to_activity_workspace_not_found_errors() {
+    // Target resolves but workspace does not. Must Err(WorkspaceNotFound).
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let target = layout
+        .create_activity("Target".to_owned())
+        .expect("create target");
+
+    let err = layout
+        .move_workspace_to_activity(
+            Some(WorkspaceReference::Id(u64::MAX)),
+            &ActivityReferenceArg::Id(target.get()),
+        )
+        .expect_err("unknown workspace must err");
+    assert_eq!(err, MoveWorkspaceToActivityError::WorkspaceNotFound);
+}
+
+#[test]
+fn move_workspace_to_activity_focus_false_uses_weaker_gate() {
+    // DnD armed → the full `is_activity_switch_hard_blocked` returns
+    // Some(Dnd), but the weaker gesture-only gate returns None. The
+    // `focus: false` dispatch path uses the weaker gate and therefore
+    // does NOT block on DnD — the Layout call would succeed if run
+    // through. A workspace-switch gesture, by contrast, IS caught by
+    // the weaker gate.
+    //
+    // This test pins the predicate contrast at the Layout level — the
+    // dispatch arm itself is exercised via the production `do_action`
+    // flow in the fixture-level integration suite (out of scope for
+    // Phase 2 box 2009).
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    // Precondition: no block.
+    assert!(layout.is_activity_switch_hard_blocked().is_none());
+    assert!(layout
+        .is_workspace_activity_assignment_blocked_by_gesture()
+        .is_none());
+
+    // Arm DnD — hard-block via `is_activity_switch_hard_blocked`, but
+    // the weaker gate is unaffected (matches the recipe from
+    // `focus_window_hard_block_gate_fires_before_switch`).
+    let output = layout
+        .outputs()
+        .find(|o| o.name() == "output1")
+        .cloned()
+        .expect("output1 exists");
+    layout.dnd_update(output, Point::from((0., 0.)));
+    assert_eq!(
+        layout.is_activity_switch_hard_blocked(),
+        Some(super::ActivitySwitchBlock::Dnd),
+        "DnD must trip the full hard-block predicate",
+    );
+    assert!(
+        layout
+            .is_workspace_activity_assignment_blocked_by_gesture()
+            .is_none(),
+        "DnD must NOT trip the weaker gesture-only gate (Move focus:false \
+         would proceed)",
+    );
+
+    layout.dnd_end();
+}
+
+#[test]
+fn move_workspace_to_activity_focus_true_uses_stronger_gate() {
+    // DnD armed. The `focus: true` dispatch path uses the full
+    // `is_activity_switch_hard_blocked` gate because it chains into
+    // `switch_activity`. This asymmetry is the critical review-stop
+    // concern: collapsing to a single gate would leave the `focus: true`
+    // branch unblocked during interactive_move / DnD, chaining into an
+    // activity switch under an active user drag.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let output = layout
+        .outputs()
+        .find(|o| o.name() == "output1")
+        .cloned()
+        .expect("output1 exists");
+    layout.dnd_update(output, Point::from((0., 0.)));
+    assert_eq!(
+        layout.is_activity_switch_hard_blocked(),
+        Some(super::ActivitySwitchBlock::Dnd),
+        "Move with focus:true must consult this predicate — pinned here",
+    );
+
+    layout.dnd_end();
 }

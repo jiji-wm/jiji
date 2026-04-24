@@ -1907,6 +1907,91 @@ impl State {
                     }
                 }
             }
+            Action::MoveWorkspaceToActivity(ws_ref, activity_ref, focus) => {
+                // Per DD §5.11: gate depth depends on `focus`.
+                //   - focus: false → weaker gesture-only gate (matches the
+                //     Remove leg of Move = Add + Remove).
+                //   - focus: true  → full `is_activity_switch_hard_blocked`
+                //     predicate (same as `SwitchActivity`), because this
+                //     path chains into `switch_activity` and interactive
+                //     move / DnD must block it.
+                // A single unified check here is a review-stop bug — the
+                // `focus: true` path must be gated against DnD /
+                // interactive_move.
+                let block = if focus {
+                    self.niri.layout.is_activity_switch_hard_blocked()
+                } else {
+                    self.niri
+                        .layout
+                        .is_workspace_activity_assignment_blocked_by_gesture()
+                };
+                if let Some(block) = block {
+                    debug!(
+                        "MoveWorkspaceToActivity: hard-blocked by {block:?}, \
+                         ignoring (DD §5.11, focus={focus})"
+                    );
+                    return Err(block.into());
+                }
+                let arg_act: ActivityReferenceArg = activity_ref.into();
+                let arg_ws_log = ws_ref.clone();
+                match self
+                    .niri
+                    .layout
+                    .move_workspace_to_activity(ws_ref, &arg_act)
+                {
+                    Ok((ws_id, target_id, source_id)) => {
+                        debug!(
+                            "MoveWorkspaceToActivity: moved {ws_id:?} from \
+                             {source_id:?} to {target_id:?} ({arg_act:?}, focus={focus})"
+                        );
+                        // The workspace just left the active activity's
+                        // view (unless it was a no-op target == source, in
+                        // which case the layout returned Ok without touching
+                        // state). Visibility for the active activity may
+                        // have flipped — fire cursor warp + redraw.
+                        self.maybe_warp_cursor_to_focus();
+                        self.niri.queue_redraw_all();
+                        if focus {
+                            // Chain into switch_activity. The outer gate at
+                            // step 1 already guaranteed no hard-block state
+                            // is live, so `switch_activity`'s debug_assert
+                            // is satisfied — no inner re-check needed.
+                            self.niri.layout.switch_activity(target_id);
+                            self.maybe_warp_cursor_to_focus();
+                            self.niri.layer_shell_on_demand_focus = None;
+                            self.niri.queue_redraw_all();
+                            // DD §5.19: reconcile inhibitor state with the
+                            // new active-activity visibility. Required on
+                            // every path that flips `Activities.active_id` —
+                            // same pattern as `Action::SwitchActivity`'s arm.
+                            self.niri
+                                .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "MoveWorkspaceToActivity: {e}: workspace={arg_ws_log:?} \
+                             activity={arg_act:?} focus={focus}"
+                        );
+                        let mapped = match e {
+                            crate::layout::MoveWorkspaceToActivityError::ActivityNotFound => {
+                                DoActionError::MoveWorkspaceToActivityActivityNotFound
+                            }
+                            // DD §5.14 table row for Move does not list
+                            // WorkspaceNotFound — match the convention of
+                            // niri's other by-id actions that silently
+                            // no-op on workspace-id misses.
+                            crate::layout::MoveWorkspaceToActivityError::WorkspaceNotFound => {
+                                return Ok(());
+                            }
+                            crate::layout::MoveWorkspaceToActivityError::WorkspaceNotInActiveActivity => {
+                                DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity
+                            }
+                        };
+                        return Err(mapped);
+                    }
+                }
+            }
             Action::SetWorkspaceActivities(ws_ref, activity_refs) => {
                 // Per DD §5.11 line 1082: Set is hard-blocked by an in-flight
                 // workspace-switch gesture (symmetric-diff removes on the

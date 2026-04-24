@@ -346,7 +346,9 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
             | Err(err @ DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound)
             | Err(err @ DoActionError::RemoveWorkspaceFromActivityLastActivity)
             | Err(err @ DoActionError::SetWorkspaceActivitiesActivityNotFound)
-            | Err(err @ DoActionError::SetWorkspaceActivitiesEmptyActivityList) => {
+            | Err(err @ DoActionError::SetWorkspaceActivitiesEmptyActivityList)
+            | Err(err @ DoActionError::MoveWorkspaceToActivityActivityNotFound)
+            | Err(err @ DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity) => {
                 // Terminal errors (DD §5.14). Same shape as `WindowNotFound`:
                 // forward and advance the walk — do not re-block.
                 let _ = waiter.tx.send_blocking(Err(err));
@@ -673,7 +675,11 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                     | Err(err @ DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound)
                     | Err(err @ DoActionError::RemoveWorkspaceFromActivityLastActivity)
                     | Err(err @ DoActionError::SetWorkspaceActivitiesActivityNotFound)
-                    | Err(err @ DoActionError::SetWorkspaceActivitiesEmptyActivityList) => {
+                    | Err(err @ DoActionError::SetWorkspaceActivitiesEmptyActivityList)
+                    | Err(err @ DoActionError::MoveWorkspaceToActivityActivityNotFound)
+                    | Err(
+                        err @ DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity,
+                    ) => {
                         let _ = tx.send_blocking(Err(err));
                     }
                 }

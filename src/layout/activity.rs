@@ -459,7 +459,10 @@ impl std::error::Error for RemoveWorkspaceFromActivityError {}
 /// Precedence: `ActivityNotFound` > `EmptyActivityList` > `WorkspaceNotFound`.
 /// Activity refs are resolved first — an unresolvable ref in the list
 /// short-circuits to `ActivityNotFound` regardless of list length, matching
-/// the `resolve_activity_ref` precedence of `Add` / `Remove`.
+/// the `resolve_activity_ref` precedence of `Add` / `Remove`. Concretely:
+/// `[unresolvable_id]` (length 1, unresolvable) → `ActivityNotFound`, not
+/// `EmptyActivityList`; the empty-list guard is only reached when the list
+/// resolves to zero distinct live activities.
 ///
 /// `WorkspaceNotFound` is total on the `Display` side for symmetry with the
 /// other action errors, but per DD §5.14 the dispatch layer intercepts it and
@@ -492,6 +495,42 @@ impl fmt::Display for SetWorkspaceActivitiesError {
 }
 
 impl std::error::Error for SetWorkspaceActivitiesError {}
+
+/// Validation failure for `Layout::move_workspace_to_activity`. DD §4.3
+/// defines Move as "Add to target + Remove from active" with an explicit
+/// requirement that the workspace be a member of the active activity
+/// (the move verb requires a well-defined source).
+///
+/// Precedence: `ActivityNotFound` > `WorkspaceNotFound` >
+/// `WorkspaceNotInActiveActivity`. Resolution happens before membership
+/// inspection, matching the Part 1 `Remove` precedent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveWorkspaceToActivityError {
+    /// Target activity reference does not resolve to a live activity.
+    ActivityNotFound,
+    /// Workspace reference does not resolve to a live workspace (or
+    /// `None` was supplied and there is no active workspace).
+    WorkspaceNotFound,
+    /// Workspace is not a member of the currently-active activity. DD
+    /// §4.3 / §5.14: Move requires a well-defined source.
+    WorkspaceNotInActiveActivity,
+}
+
+impl fmt::Display for MoveWorkspaceToActivityError {
+    /// Plain lowercase tokens per DD §5.14. Envelope and DD-section
+    /// suffix are assembled by `format_do_action_error`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ActivityNotFound => f.write_str("activity not found"),
+            Self::WorkspaceNotFound => f.write_str("workspace not found"),
+            Self::WorkspaceNotInActiveActivity => {
+                f.write_str("workspace not in active activity")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MoveWorkspaceToActivityError {}
 
 /// Validation failure for config-reload activity removal via
 /// `Layout::reconcile_activities_on_reload_remove`. Each variant corresponds

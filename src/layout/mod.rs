@@ -59,8 +59,9 @@ use workspace::{WorkspaceAddWindowTarget, WorkspaceId};
 use self::activity::{Activities, Activity, ActivityId, WorkspaceView};
 pub(crate) use self::activity::ReloadActivityRemovalError;
 pub use self::activity::{
-    AddWorkspaceToActivityError, CreateActivityError, RemoveActivityError,
-    RemoveWorkspaceFromActivityError, RenameActivityError, SetWorkspaceActivitiesError,
+    AddWorkspaceToActivityError, CreateActivityError, MoveWorkspaceToActivityError,
+    RemoveActivityError, RemoveWorkspaceFromActivityError, RenameActivityError,
+    SetWorkspaceActivitiesError,
 };
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{Monitor, WorkspaceSwitch};
@@ -544,6 +545,13 @@ pub(crate) fn format_activity_switch_block_err(block: ActivitySwitchBlock) -> St
 ///
 /// Any change to the token strings, the envelope wording, or the DD section
 /// reference must update all three pin sites together.
+///
+/// Note on absent `WorkspaceNotFound` variants: `SetWorkspaceActivities` and
+/// `MoveWorkspaceToActivity` have no `WorkspaceNotFound` variant here (unlike
+/// `AddWorkspaceToActivity` and `RemoveWorkspaceFromActivity` which do). Per
+/// DD §5.14 the dispatch layer treats a workspace-not-found outcome from
+/// either of those two actions as a silent no-op and returns `Ok(())` without
+/// surfacing an error to the caller — so the variant has no dispatch path.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DoActionError {
     /// A DD §5.11 hard-block (interactive move, DnD, or workspace-switch
@@ -578,6 +586,13 @@ pub(crate) enum DoActionError {
     /// empty `activities` list — rejected before any mutation. Terminal
     /// error.
     SetWorkspaceActivitiesEmptyActivityList,
+    /// DD §5.14: `Action::MoveWorkspaceToActivity` was dispatched with a
+    /// target activity reference that does not resolve. Terminal error.
+    MoveWorkspaceToActivityActivityNotFound,
+    /// DD §5.14: `Action::MoveWorkspaceToActivity` was dispatched but the
+    /// workspace is not a member of the currently-active activity — Move
+    /// requires a well-defined source. Terminal error.
+    MoveWorkspaceToActivityWorkspaceNotInActiveActivity,
 }
 
 impl From<ActivitySwitchBlock> for DoActionError {
@@ -603,7 +618,8 @@ impl fmt::Display for DoActionError {
             // suffix is added by `format_do_action_error`, not `Display`.
             Self::AddWorkspaceToActivityActivityNotFound
             | Self::RemoveWorkspaceFromActivityActivityNotFound
-            | Self::SetWorkspaceActivitiesActivityNotFound => f.write_str("activity not found"),
+            | Self::SetWorkspaceActivitiesActivityNotFound
+            | Self::MoveWorkspaceToActivityActivityNotFound => f.write_str("activity not found"),
             Self::AddWorkspaceToActivityWorkspaceNotFound
             | Self::RemoveWorkspaceFromActivityWorkspaceNotFound => {
                 f.write_str("workspace not found")
@@ -613,6 +629,9 @@ impl fmt::Display for DoActionError {
             }
             Self::SetWorkspaceActivitiesEmptyActivityList => {
                 f.write_str("activities list is empty")
+            }
+            Self::MoveWorkspaceToActivityWorkspaceNotInActiveActivity => {
+                f.write_str("workspace not in active activity")
             }
         }
     }
@@ -638,7 +657,9 @@ pub(crate) fn format_do_action_error(err: DoActionError) -> String {
         | DoActionError::AddWorkspaceToActivityWorkspaceNotFound
         | DoActionError::RemoveWorkspaceFromActivityActivityNotFound
         | DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound
-        | DoActionError::SetWorkspaceActivitiesActivityNotFound => {
+        | DoActionError::SetWorkspaceActivitiesActivityNotFound
+        | DoActionError::MoveWorkspaceToActivityActivityNotFound
+        | DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity => {
             format!("{err} (DD §5.14)")
         }
         DoActionError::RemoveWorkspaceFromActivityLastActivity
@@ -5278,6 +5299,129 @@ impl<W: LayoutElement> Layout<W> {
         self.verify_invariants();
 
         Ok((ws_id, new_set, active_activity_affected))
+    }
+
+    /// Move `workspace` from the currently-active activity to
+    /// `activity_ref`.
+    ///
+    /// Sugar for `AddWorkspaceToActivity(target) +
+    /// RemoveWorkspaceFromActivity(active)`, applied atomically in that
+    /// order (DD §4.3). The Add-then-Remove ordering guarantees that the
+    /// workspace is never transiently outside every activity, so the §3.2
+    /// non-empty invariant is never violated — even when the workspace was
+    /// previously exclusive to the active activity.
+    ///
+    /// Multi-activity semantics: if the workspace belongs to
+    /// `{active, X, Y}`, after the move it belongs to `{X, Y, target}` —
+    /// the workspace leaves the active activity but stays in the others.
+    ///
+    /// Resolution order:
+    /// 1. `activity_ref` → `ActivityNotFound`.
+    /// 2. `workspace` → `WorkspaceNotFound`.
+    /// 3. If workspace's `activities` set does not contain the active
+    ///    activity id → `WorkspaceNotInActiveActivity` (DD §5.14).
+    ///
+    /// No-op cases (return `Ok` without mutating):
+    /// - `target == active_id`.
+    ///
+    /// Implementation strategy: this method delegates to
+    /// [`Self::add_workspace_to_activity`] + [`Self::remove_workspace_from_activity`]
+    /// rather than reimplementing view-patching inline. Each delegate runs
+    /// its own `verify_invariants`; the intermediate state (workspace
+    /// tagged with both `active` and `target`) satisfies every invariant
+    /// individually, so chaining is correctness-preserving. The DD's
+    /// phrasing "sugar for Add + Remove" is the load-bearing contract —
+    /// inlining view-patching here would make the two paths drift on the
+    /// next bug fix.
+    ///
+    /// If the workspace already has `target` in its activities set (but
+    /// `source != target`), the Add step is a no-op at
+    /// [`Self::add_workspace_to_activity`]; the Remove step still prunes
+    /// source.
+    ///
+    /// The `focus: bool` discriminator is NOT consumed here — the dispatch
+    /// layer chains into [`Self::switch_activity`] after a successful
+    /// move, and fires the §5.19 keyboard-shortcut-inhibitor refresh on
+    /// that path. Keeping focus-flipping out of the Layout method keeps
+    /// this API orthogonal to cursor movement.
+    ///
+    /// Returns `(workspace_id, target_activity_id, source_activity_id)`
+    /// where `source_activity_id` is always the currently-active activity
+    /// id at call time — logged by the dispatch layer.
+    ///
+    /// Callers that dispatch via IPC must first consult the appropriate
+    /// hard-block predicate:
+    /// - `focus: false` → [`Self::is_workspace_activity_assignment_blocked_by_gesture`]
+    /// - `focus: true` → [`Self::is_activity_switch_hard_blocked`]
+    pub(crate) fn move_workspace_to_activity(
+        &mut self,
+        workspace: Option<WorkspaceReference>,
+        activity_ref: &ActivityReferenceArg,
+    ) -> Result<(WorkspaceId, ActivityId, ActivityId), MoveWorkspaceToActivityError> {
+        // Step 1: resolve target activity.
+        let target_id = self
+            .resolve_activity_ref(activity_ref)
+            .ok_or(MoveWorkspaceToActivityError::ActivityNotFound)?;
+
+        // Step 2: resolve workspace id.
+        let ws_id = match workspace {
+            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
+            None => self.active_workspace_mut().map(|ws| ws.id()),
+        }
+        .ok_or(MoveWorkspaceToActivityError::WorkspaceNotFound)?;
+
+        // Step 3: membership check — Move requires the workspace to be a
+        // member of the currently-active activity.
+        let source_id = self.activities.active_id();
+        {
+            let ws = self
+                .workspaces
+                .get(&ws_id)
+                .expect("resolved ws_id must be a live pool key");
+            if !ws.activities().contains(&source_id) {
+                return Err(MoveWorkspaceToActivityError::WorkspaceNotInActiveActivity);
+            }
+        }
+
+        // No-op: target == source implies the workspace stays put.
+        // Subsumes the DD §5.14 "No-op if workspace already exclusively
+        // in target" row — when source == target, the workspace's
+        // activities cannot change. Leaves verify_invariants untouched.
+        if target_id == source_id {
+            return Ok((ws_id, target_id, source_id));
+        }
+
+        // Delegate to Add-then-Remove. Both operations are `&mut self`
+        // and run their own `verify_invariants`. The intermediate state
+        // (workspace tagged with both source and target) is invariant-
+        // preserving — this is the correctness argument for "sugar for
+        // Add + Remove".
+        //
+        // If the workspace already has target (but source != target), the
+        // Add is a no-op at the delegate; the Remove still prunes source.
+        // After Add the workspace has both {source, target, ...} — len >= 2,
+        // so Remove's LastActivity guard will not fire.
+        self.add_workspace_to_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(target_id.get()),
+        )
+        .expect(
+            "Add cannot fail: target was just resolved and ws_id is live; the delegate's only \
+             error classes (ActivityNotFound, WorkspaceNotFound) are already ruled out",
+        );
+        self.remove_workspace_from_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(source_id.get()),
+        )
+        .expect(
+            "Remove cannot fail: source is the active activity (must resolve), ws_id is live, \
+             and Add guaranteed ws.activities.len() >= 2 so LastActivity is not reachable",
+        );
+
+        // Delegates already ran `verify_invariants` in debug builds — no
+        // extra chain needed here. Return the triple the dispatch layer
+        // logs.
+        Ok((ws_id, target_id, source_id))
     }
 
     /// Resolve an [`ActivityReferenceArg`] to an [`ActivityId`] if the pool

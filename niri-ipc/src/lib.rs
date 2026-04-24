@@ -1097,6 +1097,47 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME", num_args = 1..))]
         activities: Vec<ActivityReferenceArg>,
     },
+    /// Move a workspace from the currently-active activity to `activity`.
+    ///
+    /// Sugar for `AddWorkspaceToActivity(activity) +
+    /// RemoveWorkspaceFromActivity(active)`, applied atomically in that
+    /// order. The Add-then-Remove ordering ensures the workspace
+    /// transiently belongs to both the active activity and `activity`, so
+    /// the "every workspace belongs to ≥1 activity" invariant is never
+    /// violated — even when the workspace was previously exclusive to the
+    /// active activity (activities design doc §4.3).
+    ///
+    /// Multi-activity semantics: if the workspace belonged to
+    /// `{active, X, Y}`, after the move it belongs to `{X, Y, activity}`
+    /// — it leaves the active activity but stays in the others.
+    ///
+    /// Returns `Err("workspace not in active activity (DD §5.14)")` when
+    /// the workspace is not a member of the currently-active activity.
+    /// The move verb requires a well-defined source; falling back to
+    /// "just add to target" would silently change semantics. Callers that
+    /// need "add to target regardless of current membership" should use
+    /// `AddWorkspaceToActivity` or `SetWorkspaceActivities`.
+    ///
+    /// No-op when `activity` equals the currently-active activity.
+    ///
+    /// Gesture-block gate is `focus`-dependent:
+    /// - `focus: false` consults the weaker gesture-only gate (matches
+    ///   the `Remove` leg it composes).
+    /// - `focus: true` consults the full
+    ///   `is_activity_switch_hard_blocked` predicate (interactive_move,
+    ///   DnD, or workspace-switch gesture on any monitor) — same gate
+    ///   as `SwitchActivity`, because this path chains into it.
+    MoveWorkspaceToActivity {
+        /// Workspace to modify. Defaults to focused.
+        workspace: Option<WorkspaceReferenceArg>,
+        /// Activity to move the workspace to.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
+        activity: ActivityReferenceArg,
+        /// If true, switch the active activity to `activity` after the
+        /// move. Triggers the §5.19 keyboard-shortcut-inhibitor refresh.
+        #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = false))]
+        focus: bool,
+    },
 }
 
 /// Change in window or column size.
@@ -2847,6 +2888,38 @@ mod tests {
     }
 
     #[test]
+    fn move_workspace_to_activity_action_roundtrips_serde() {
+        // Pin the on-the-wire field names / positional order, including
+        // the `focus` discriminator that selects between the weaker
+        // gesture-only gate and the stronger `is_activity_switch_hard_blocked`
+        // gate at dispatch. Both focus values and both ActivityReferenceArg
+        // arms are covered.
+        let by_id_no_focus = Action::MoveWorkspaceToActivity {
+            workspace: None,
+            activity: ActivityReferenceArg::Id(7),
+            focus: false,
+        };
+        let json = serde_json::to_string(&by_id_no_focus).expect("serialize by-id");
+        let parsed: Action = serde_json::from_str(&json).expect("deserialize by-id");
+        assert_eq!(
+            serde_json::to_string(&parsed).expect("re-serialize by-id"),
+            json,
+        );
+
+        let by_name_with_focus = Action::MoveWorkspaceToActivity {
+            workspace: Some(WorkspaceReferenceArg::Name("ws".into())),
+            activity: ActivityReferenceArg::Name("beta".into()),
+            focus: true,
+        };
+        let json = serde_json::to_string(&by_name_with_focus).expect("serialize by-name");
+        let parsed: Action = serde_json::from_str(&json).expect("deserialize by-name");
+        assert_eq!(
+            serde_json::to_string(&parsed).expect("re-serialize by-name"),
+            json,
+        );
+    }
+
+    #[test]
     fn reply_err_format_for_workspace_activity_assignment() {
         // Roundtrips the DD §5.14 / §3.2 wire envelopes for
         // `AddWorkspaceToActivity` / `RemoveWorkspaceFromActivity` through
@@ -2873,6 +2946,10 @@ mod tests {
             (
                 "activities list is empty (DD §3.2)",
                 r#"{"Err":"activities list is empty (DD §3.2)"}"#,
+            ),
+            (
+                "workspace not in active activity (DD §5.14)",
+                r#"{"Err":"workspace not in active activity (DD §5.14)"}"#,
             ),
         ] {
             let reply: Reply = Err(msg.to_owned());
