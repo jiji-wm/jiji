@@ -12882,6 +12882,95 @@ fn set_workspace_activities_snaps_animation_only_when_active_affected() {
 }
 
 #[test]
+fn set_workspace_activities_active_affected_via_to_add_branch() {
+    // Regression pin for the `to_add` branch of the active_affected predicate:
+    //   active_activity_affected = to_remove.contains(&active_id)
+    //                           || to_add.contains(&active_id)
+    //
+    // Dropping the `to_add` clause would not be caught by the other tests
+    // (which all exercise active_affected=true via to_remove). Fixture:
+    // ws starts in {beta} only; active=alpha; Set(ws, [alpha, beta]) →
+    // to_add={alpha}, to_remove={}, active_affected=true.
+    //
+    // The fixture is a clean slate (single ws owns the active view) to avoid
+    // bookend-ordering complications when to_add appends to alpha's view.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let output = layout.monitors[0].output.clone();
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    // Build a workspace that belongs ONLY to beta (not alpha).
+    let ws = Workspace::new(
+        &output,
+        [beta].into_iter().collect(),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let ws_id = ws.id();
+    assert!(layout.workspaces.insert(ws_id, ws).is_none());
+
+    // Clear alpha's active view to a single-entry view holding ws so the pool
+    // satisfies the active-activity invariant (every monitor's view id is in the
+    // pool). ws.activities remains {beta} — alpha is NOT yet a member.
+    let old_ids: Vec<_> = layout.active_view(&mon_out).ids().to_vec();
+    layout
+        .activities
+        .active_mut()
+        .views_mut()
+        .insert(mon_out.clone(), WorkspaceView::new(vec![ws_id], 0));
+    for id in &old_ids {
+        layout.workspaces.remove(id);
+    }
+    // Beta's dormant view also holds ws so pool-keys equality holds.
+    layout
+        .activities
+        .get_mut(beta)
+        .expect("beta live")
+        .views_mut()
+        .insert(mon_out.clone(), WorkspaceView::new(vec![ws_id], 0));
+    layout.verify_invariants();
+
+    // Sanity: alpha is NOT in ws.activities yet (to_add branch precondition).
+    assert!(
+        !layout
+            .workspaces
+            .get(&ws_id)
+            .expect("live")
+            .activities()
+            .contains(&alpha),
+        "precondition: ws must not be in alpha's activities before the set call",
+    );
+
+    // Set(ws, [alpha, beta]): to_add = {alpha}, to_remove = {}, active_affected = true.
+    let (_, new_set, active_affected) = layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    assert!(
+        active_affected,
+        "alpha (active) is in to_add — active_affected must be true via to_add branch",
+    );
+    assert_eq!(
+        new_set,
+        HashSet::from([alpha, beta]),
+        "new_set must be {{alpha, beta}}",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
 fn set_workspace_activities_blocked_by_gesture_at_dispatch() {
     // Predicate-level pin: the dispatch arm's weaker gate fires on a
     // workspace-switch gesture in flight on any monitor, matching Remove's
