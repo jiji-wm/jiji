@@ -1017,6 +1017,9 @@ impl State {
                 self.maybe_warp_cursor_to_focus();
                 self.niri.layer_shell_on_demand_focus = None;
                 self.niri.queue_redraw_all();
+                // DD §5.19: reconcile inhibitor state with the new visibility.
+                self.niri
+                    .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
 
                 // `focus_window` performs the actual activate + cursor warp
                 // under the newly-active activity.
@@ -1703,6 +1706,12 @@ impl State {
                     self.maybe_warp_cursor_to_focus();
                     self.niri.layer_shell_on_demand_focus = None;
                     self.niri.queue_redraw_all();
+                    // DD §5.19: reconcile inhibitor state with the new
+                    // visibility. Future activity-flipping actions
+                    // (e.g. `MoveWorkspaceToActivity`) must add the same
+                    // call — grep `DD §5.19` for the pattern.
+                    self.niri
+                        .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
                 } else {
                     warn!("switch_activity: activity not found: {arg:?}");
                 }
@@ -1719,6 +1728,9 @@ impl State {
                 self.maybe_warp_cursor_to_focus();
                 self.niri.layer_shell_on_demand_focus = None;
                 self.niri.queue_redraw_all();
+                // DD §5.19: reconcile inhibitor state with the new visibility.
+                self.niri
+                    .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
             }
             Action::CreateActivity(name) => {
                 let name_str = name.clone();
@@ -1781,6 +1793,12 @@ impl State {
                         self.maybe_warp_cursor_to_focus();
                         self.niri.layer_shell_on_demand_focus = None;
                         self.niri.queue_redraw_all();
+                        // DD §5.19: the cascade branch of `remove_activity`
+                        // flips the active activity internally; reconcile
+                        // inhibitor state here (not inside `Layout`) because
+                        // the tracking map lives on `Niri`.
+                        self.niri
+                            .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
                     }
                     Err(e) => warn!("remove_activity: {e}: {arg:?}"),
                 }

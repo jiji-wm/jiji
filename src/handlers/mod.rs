@@ -272,9 +272,21 @@ impl KeyboardShortcutsInhibitHandler for State {
     }
 
     fn inhibitor_destroyed(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        let surface = inhibitor.wl_surface();
         self.niri
             .keyboard_shortcuts_inhibiting_surfaces
-            .remove(&inhibitor.wl_surface().clone());
+            .remove(surface);
+        // DD §5.19: keep the tracking set a subset of the inhibitor map. A
+        // client may destroy an inhibitor while its window is hidden on
+        // another activity — without this removal the surface would leak
+        // into the tracking set and violate the
+        // `deactivated_inhibitors_by_activity_switch ⊆
+        // keys(keyboard_shortcuts_inhibiting_surfaces)` invariant that
+        // [`Niri::refresh_keyboard_shortcut_inhibitors_after_activity_switch`]
+        // `debug_assert!`s.
+        self.niri
+            .deactivated_inhibitors_by_activity_switch
+            .remove(surface);
     }
 }
 

@@ -10,6 +10,10 @@ use std::time::Duration;
 use calloop::EventLoop;
 use calloop_wayland_source::WaylandSource;
 use single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1;
+use smithay::reexports::wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1;
+use smithay::reexports::wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard_shortcuts_inhibitor_v1::{
+    self, ZwpKeyboardShortcutsInhibitorV1,
+};
 use smithay::reexports::wayland_protocols::wp::single_pixel_buffer;
 use smithay::reexports::wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use smithay::reexports::wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
@@ -30,6 +34,7 @@ use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_display::WlDisplay;
 use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
+use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::protocol::wl_surface::{self, WlSurface};
 use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
 
@@ -55,6 +60,8 @@ pub struct State {
     pub layer_shell: Option<ZwlrLayerShellV1>,
     pub spbm: Option<WpSinglePixelBufferManagerV1>,
     pub viewporter: Option<WpViewporter>,
+    pub seat: Option<WlSeat>,
+    pub kb_shortcuts_inhibit_manager: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
 
     pub windows: Vec<Window>,
     pub layers: Vec<LayerSurface>,
@@ -181,6 +188,8 @@ impl Client {
             layer_shell: None,
             spbm: None,
             viewporter: None,
+            seat: None,
+            kb_shortcuts_inhibit_manager: None,
             windows: Vec::new(),
             layers: Vec::new(),
         };
@@ -241,6 +250,26 @@ impl Client {
             .unwrap()
             .0
             .clone()
+    }
+
+    /// Request a keyboard-shortcuts inhibitor on `surface`. The server
+    /// responds to this by routing through its
+    /// `KeyboardShortcutsInhibitHandler::new_inhibitor`, which activates
+    /// the inhibitor and inserts it into
+    /// `Niri::keyboard_shortcuts_inhibiting_surfaces`. A `roundtrip` on this
+    /// client after the call is required before the server-side insertion
+    /// is observable.
+    pub fn create_keyboard_shortcuts_inhibitor(
+        &mut self,
+        surface: &WlSurface,
+    ) -> ZwpKeyboardShortcutsInhibitorV1 {
+        let manager = self
+            .state
+            .kb_shortcuts_inhibit_manager
+            .as_ref()
+            .expect("ZwpKeyboardShortcutsInhibitManagerV1 must be bound");
+        let seat = self.state.seat.as_ref().expect("WlSeat must be bound");
+        manager.inhibit_shortcuts(surface, seat, &self.qh, ())
     }
 }
 
@@ -522,6 +551,14 @@ impl Dispatch<WlRegistry, ()> for State {
                     let version = min(version, WlOutput::interface().version);
                     let output = registry.bind(name, version, qh, ());
                     state.outputs.insert(output, String::new());
+                } else if interface == WlSeat::interface().name {
+                    let version = min(version, WlSeat::interface().version);
+                    state.seat = Some(registry.bind(name, version, qh, ()));
+                } else if interface == ZwpKeyboardShortcutsInhibitManagerV1::interface().name {
+                    let version =
+                        min(version, ZwpKeyboardShortcutsInhibitManagerV1::interface().version);
+                    state.kb_shortcuts_inhibit_manager =
+                        Some(registry.bind(name, version, qh, ()));
                 }
 
                 let global = Global {
@@ -773,5 +810,58 @@ impl Dispatch<WpViewport, ()> for State {
         _qhandle: &QueueHandle<Self>,
     ) {
         unreachable!()
+    }
+}
+
+impl Dispatch<WlSeat, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlSeat,
+        event: <WlSeat as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        // Niri advertises keyboard/pointer capabilities and the seat name.
+        // Tests that exercise keyboard-shortcuts-inhibit don't care about the
+        // details, but the events must be consumed (hence the explicit match).
+        match event {
+            wl_seat::Event::Capabilities { .. } => (),
+            wl_seat::Event::Name { .. } => (),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<ZwpKeyboardShortcutsInhibitManagerV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwpKeyboardShortcutsInhibitManagerV1,
+        _event: <ZwpKeyboardShortcutsInhibitManagerV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
+    }
+}
+
+impl Dispatch<ZwpKeyboardShortcutsInhibitorV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwpKeyboardShortcutsInhibitorV1,
+        event: <ZwpKeyboardShortcutsInhibitorV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        // The server drives active/inactive in response to our inhibit call
+        // and to activity switches. Tests assert via `Niri`'s inhibitor map
+        // (server-side `is_active()`), not by caching client-side state.
+        match event {
+            zwp_keyboard_shortcuts_inhibitor_v1::Event::Active => (),
+            zwp_keyboard_shortcuts_inhibitor_v1::Event::Inactive => (),
+            _ => unreachable!(),
+        }
     }
 }

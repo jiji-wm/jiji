@@ -334,6 +334,21 @@ pub struct Niri {
     pub idle_inhibiting_surfaces: HashSet<WlSurface>,
     pub is_fdo_idle_inhibited: Arc<AtomicBool>,
     pub keyboard_shortcuts_inhibiting_surfaces: HashMap<WlSurface, KeyboardShortcutsInhibitor>,
+    /// `WlSurface`s whose keyboard-shortcuts inhibitors were *deactivated by
+    /// this compositor* because an activity switch hid their window (DD
+    /// §5.19). Populated by
+    /// [`Self::refresh_keyboard_shortcut_inhibitors_after_activity_switch`]
+    /// at each activity-cursor flip site, drained on switch-back when the
+    /// window becomes visible again — so user-driven
+    /// `ToggleKeyboardShortcutsInhibit` inactivations on still-visible windows
+    /// are preserved across switches.
+    ///
+    /// Invariant: every entry here is also a key in
+    /// `keyboard_shortcuts_inhibiting_surfaces`. [`handlers`]'s
+    /// `inhibitor_destroyed` enforces this by removing from the inhibitor map
+    /// and the tracking set symmetrically; the sweep method additionally
+    /// `debug_assert!`s the subset property after each pass.
+    pub deactivated_inhibitors_by_activity_switch: HashSet<WlSurface>,
 
     /// Most recent XKB settings from org.freedesktop.locale1.
     pub xkb_from_locale1: Option<Xkb>,
@@ -1494,6 +1509,14 @@ impl State {
             .layout
             .reconcile_activities_on_reload_add(&config.activities, &config.workspaces);
 
+        // DD §5.19: the `reconcile_activities_on_reload_{remove,add}` pair
+        // above can cascade through `switch_activity` (Part 2 remove path)
+        // and flip the active activity cursor. Reconcile inhibitor state
+        // once afterwards. On pure-add reloads this is a cheap no-op (the
+        // cursor didn't move, so no inhibitor will flip).
+        self.niri
+            .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
+
         self.niri.layout.update_config(&config);
         for mapped in self.niri.mapped_layer_surfaces.values_mut() {
             mapped.update_config(&config);
@@ -2626,6 +2649,7 @@ impl Niri {
             idle_inhibiting_surfaces: HashSet::new(),
             is_fdo_idle_inhibited: Arc::new(AtomicBool::new(false)),
             keyboard_shortcuts_inhibiting_surfaces: HashMap::new(),
+            deactivated_inhibitors_by_activity_switch: HashSet::new(),
             xkb_from_locale1: None,
             cursor_manager,
             cursor_texture_cache: Default::default(),
@@ -6188,6 +6212,107 @@ impl Niri {
             // FIXME: granular.
             self.queue_redraw_all();
         }
+    }
+
+    /// Per DD §5.19, after any activity-cursor change, walk the inhibitor map
+    /// and reconcile each entry's active/inactive state with its owning
+    /// workspace's visibility:
+    ///
+    /// - Inhibitor active & owning workspace now hidden → `inactivate()`;
+    ///   insert surface into
+    ///   [`Self::deactivated_inhibitors_by_activity_switch`] so the switch-
+    ///   back path can restore it.
+    /// - Inhibitor inactive & owning workspace now visible & surface is in
+    ///   `deactivated_inhibitors_by_activity_switch` → `activate()`; remove
+    ///   from tracking set.
+    /// - Anything else (user-inactivated while visible, or the inhibitor is
+    ///   already in the correct state) → leave untouched, preserving
+    ///   `ToggleKeyboardShortcutsInhibit` semantics across switches.
+    /// - Surface not found in any pool workspace → log at `debug!` and skip
+    ///   (likely a subsurface or a destroyed surface; mirrors
+    ///   `find_window_and_output`'s diagnostic posture).
+    ///
+    /// Must be called from each site that flips the active activity
+    /// (`Action::SwitchActivity`, `Action::SwitchActivityPrevious`,
+    /// `Action::FocusWindow` auto-switch branch, `Action::RemoveActivity`
+    /// cascade, `State::reload_config` Part 2). A future Phase 2 action that
+    /// flips the cursor (e.g. `MoveWorkspaceToActivity`) must add its own
+    /// invocation — there is no `Layout`-side enforcement because the
+    /// tracking state lives on `Niri`. Grep for `DD §5.19` to find the
+    /// pattern.
+    pub fn refresh_keyboard_shortcut_inhibitors_after_activity_switch(&mut self) {
+        let _span =
+            tracy_client::span!("Niri::refresh_keyboard_shortcut_inhibitors_after_activity_switch");
+
+        // Pass 1 (shared-borrow safe): collect the (surface, root, is_active)
+        // tuples. Cloning the surface key is cheap (`WlSurface` is `Arc`-backed).
+        // This ends the shared borrow on `keyboard_shortcuts_inhibiting_surfaces`
+        // before pass 2 begins — pass 2 re-borrows the map via `.get()` per-entry
+        // while concurrently mutating `deactivated_inhibitors_by_activity_switch`,
+        // two different fields the borrow-checker cannot split through a single
+        // `&mut self` across loop iterations.
+        let snapshot: Vec<(WlSurface, WlSurface, bool)> = self
+            .keyboard_shortcuts_inhibiting_surfaces
+            .iter()
+            .map(|(surface, inhibitor)| {
+                let root = self.find_root_shell_surface(surface);
+                (surface.clone(), root, inhibitor.is_active())
+            })
+            .collect();
+
+        // Pass 2 (mutable): resolve visibility and flip each inhibitor.
+        for (surface, root, is_active) in snapshot {
+            let inhibitor = self
+                .keyboard_shortcuts_inhibiting_surfaces
+                .get(&surface)
+                .expect(
+                    "key was in the map during pass 1 and no &mut self call occurs between passes",
+                );
+            match self.layout.is_wl_surface_on_active_activity(&root) {
+                Some(true) if !is_active
+                    && self
+                        .deactivated_inhibitors_by_activity_switch
+                        .contains(&surface) =>
+                {
+                    inhibitor.activate();
+                    self.deactivated_inhibitors_by_activity_switch
+                        .remove(&surface);
+                }
+                Some(false) if is_active => {
+                    inhibitor.inactivate();
+                    self.deactivated_inhibitors_by_activity_switch
+                        .insert(surface);
+                }
+                Some(_) => {
+                    // Already in the correct state for current visibility, or
+                    // user-inactivated while visible (not tracked by us) —
+                    // leave untouched so `ToggleKeyboardShortcutsInhibit`
+                    // semantics are preserved across switches.
+                }
+                None => {
+                    // Subsurface / destroyed / never-mapped. Matches the
+                    // pre-existing subsurface limitation in
+                    // `Niri::is_inhibiting_shortcuts` (DD §5.19 out-of-scope
+                    // note).
+                    debug!(
+                        "refresh_keyboard_shortcut_inhibitors_after_activity_switch: \
+                         surface {:?} (protocol id {}) not found in any pool workspace, skipping \
+                         (likely subsurface or destroyed; DD §5.19)",
+                        surface,
+                        surface.id().protocol_id(),
+                    );
+                }
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.deactivated_inhibitors_by_activity_switch
+                .iter()
+                .all(|s| self.keyboard_shortcuts_inhibiting_surfaces.contains_key(s)),
+            "deactivated_inhibitors_by_activity_switch must be a subset of \
+             keyboard_shortcuts_inhibiting_surfaces keys (DD §5.19 invariant)",
+        );
     }
 
     /// Tries to find and return the root shell surface for a given surface.

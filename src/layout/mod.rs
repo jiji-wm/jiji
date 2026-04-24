@@ -2441,6 +2441,32 @@ impl<W: LayoutElement> Layout<W> {
             .any(|ws| ws.is_urgent())
     }
 
+    /// Returns `Some(true)` if `wl_surface` belongs to a window whose workspace
+    /// is in the currently-active activity; `Some(false)` if it belongs to a
+    /// window on a workspace in a different (hidden) activity; `None` if no
+    /// pool workspace owns the surface (destroyed, in-flight interactive move,
+    /// never mapped).
+    ///
+    /// Caller is responsible for resolving the toplevel root surface first
+    /// (typically via `Niri::find_root_shell_surface`) —
+    /// [`LayoutElement::is_wl_surface`] only matches the toplevel's root
+    /// `WlSurface`, so passing a subsurface or popup surface yields `None`.
+    ///
+    /// Does not consult `interactive_move`: per DD §5.11, a window being
+    /// interactively moved hard-blocks activity switch, so its inhibitor
+    /// state doesn't need migration during a switch. If that assumption is
+    /// ever relaxed, mirror the `interactive_move` arm from
+    /// [`Self::find_window_and_output`] here.
+    pub fn is_wl_surface_on_active_activity(&self, wl_surface: &WlSurface) -> Option<bool> {
+        let active = self.activities.active_id();
+        for ws in self.workspaces.values() {
+            if ws.find_wl_surface(wl_surface).is_some() {
+                return Some(ws.activities().contains(&active));
+            }
+        }
+        None
+    }
+
     /// Split-borrow helper: return `(&mut monitors, &mut pool)` for external callers that iterate
     /// monitors and call mutating `Monitor` methods threading `&mut pool`. Returns `(&mut [], ...)`
     /// if no outputs are connected.
