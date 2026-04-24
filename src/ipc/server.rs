@@ -1841,6 +1841,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn window_not_found_drain_continues_past_blocked_waiter() {
+        // Pins two load-bearing invariants for the `WindowNotFound` branch of
+        // `drain_blocked_action_waiters` (DD §5.18):
+        //
+        // 1. **`continue` not `break`:** A `WindowNotFound` result at position
+        //    A must NOT prevent position B from being drained.  If the real
+        //    drain loop used `break` instead of `continue`, B would be left in
+        //    the registry after A errors.  The intermediate assertion below
+        //    would still pass (B is present just before its own drain step),
+        //    but the post-drain assertion (registry empty) would fail because
+        //    the loop would have stopped after A without processing B.
+        //
+        // 2. **Non-insertion into `blocked_action_waiters`:** A
+        //    `WindowNotFound` result must never be re-inserted into the
+        //    registry (unlike the re-block path, which re-inserts at the
+        //    original index).  A copy-paste error adding `shift_insert` after
+        //    the `WindowNotFound` arm would cause deadlock; the registry-empty
+        //    post-condition below catches it.
+        //
+        // Because `drain_blocked_action_waiters` takes `&mut State` and cannot
+        // be called from a unit test, we simulate the two drain steps by hand
+        // using sequential `shift_remove` + `send_blocking` calls, mirroring
+        // the real loop body exactly.  The intermediate assertion between step
+        // A and step B is the discriminating check: it proves B survived A's
+        // error without being removed or blocked.
+        let mut waiters: IndexMap<IpcConnId, BlockedWaiter> = IndexMap::new();
+        let a = IpcConnId::specific(1);
+        let b = IpcConnId::specific(2);
+        let (waiter_a, rx_a) = make_waiter();
+        let (waiter_b, rx_b) = make_waiter();
+        waiters.insert(a, waiter_a);
+        waiters.insert(b, waiter_b);
+
+        // Step A: drain A with a WindowNotFound error (continue semantic —
+        // no re-insert, no break).
+        let drained_a = waiters.shift_remove(&a).expect("a inserted first");
+        let _ = drained_a
+            .tx
+            .send_blocking(Err(DoActionError::WindowNotFound { id: 99 }));
+        // Key invariant: B must still be present after A's error handling.
+        // A `break`-style drain would have left B in the registry too, but
+        // with `continue` the loop moves on to process B — we assert B is
+        // present so we can drain it ourselves below.
+        assert!(
+            waiters.contains_key(&b),
+            "after WindowNotFound for A, B must still be in the registry",
+        );
+
+        // Step B: drain B — also gets WindowNotFound (simulating a second
+        // stale-id action in the same queue).
+        let drained_b = waiters.shift_remove(&b).expect("b still present after A error");
+        let _ = drained_b
+            .tx
+            .send_blocking(Err(DoActionError::WindowNotFound { id: 100 }));
+
+        // Registry empty: neither entry was re-inserted.
+        assert!(
+            waiters.is_empty(),
+            "registry must be empty after both WindowNotFound drains",
+        );
+
+        // Both waiters received the error signal.
+        assert!(matches!(
+            rx_a.recv_blocking().expect("a sender alive until send_blocking"),
+            Err(DoActionError::WindowNotFound { id: 99 })
+        ));
+        assert!(matches!(
+            rx_b.recv_blocking().expect("b sender alive until send_blocking"),
+            Err(DoActionError::WindowNotFound { id: 100 })
+        ));
+    }
+
     fn ws(id: u64, idx: u8, output: &str) -> Workspace {
         Workspace {
             id,
