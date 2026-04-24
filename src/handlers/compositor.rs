@@ -108,6 +108,8 @@ impl CompositorHandler for State {
                         is_full_width,
                         output,
                         workspace_name,
+                        target_activity,
+                        target_workspace_id,
                         is_pending_maximized,
                     } = state
                     {
@@ -116,10 +118,48 @@ impl CompositorHandler for State {
                             output.filter(|o| self.niri.layout.monitor_for_output(o).is_some());
 
                         // Check that the workspace still exists.
-                        let workspace_id = workspace_name
-                            .as_deref()
-                            .and_then(|n| self.niri.layout.find_workspace_by_name(n))
-                            .map(|(_, ws)| ws.id());
+                        //
+                        // Order: (1) trust the configure-time `target_workspace_id`
+                        // when set AND still live in the pool (this is the
+                        // `open-on-activity` path — the configure-time `ws` was
+                        // resolved against the target activity's view, possibly
+                        // landing on a freshly-materialized unnamed empty whose
+                        // `workspace_name` is `None`); (2) fall back to name-based
+                        // re-resolution scoped to `target_activity` if set, else
+                        // (3) the existing active-activity-only lookup.
+                        //
+                        // Callers with no `open-on-activity` rule take path (3)
+                        // unchanged, preserving existing semantics.
+                        // Workspace destroyed between configure and map → all
+                        // three return `None` and the chain falls through to
+                        // `AddWindowTarget::Output` / `Auto` (no error log —
+                        // matches the fall-through discipline for destroyed-
+                        // between-configure-and-map workspaces; this is a
+                        // benign race, not a user error).
+                        // FIXME(test): the `.filter(contains_key)` below covers the case where
+                        // the workspace was destroyed between configure and map time. This path
+                        // is exercised manually but there is no automated regression test —
+                        // `src/tests/fixture.rs` has no workspace-destroy primitive. A test
+                        // would need to: (1) configure a window with `open-on-activity`, (2)
+                        // destroy the target workspace, (3) map the window, and assert it lands
+                        // on the fallback output/workspace rather than panicking.
+                        let workspace_id = target_workspace_id
+                            .filter(|id| self.niri.layout.workspace_pool().contains_key(id))
+                            .or_else(|| {
+                                workspace_name.as_deref().and_then(|n| {
+                                    if let Some(activity_id) = target_activity {
+                                        self.niri
+                                            .layout
+                                            .find_workspace_in_activity_by_name(n, activity_id)
+                                            .map(|ws| ws.id())
+                                    } else {
+                                        self.niri
+                                            .layout
+                                            .find_workspace_by_name(n)
+                                            .map(|(_, ws)| ws.id())
+                                    }
+                                })
+                            });
 
                         (
                             rules,

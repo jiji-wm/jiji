@@ -5,6 +5,8 @@ use smithay::wayland::shell::xdg::ToplevelSurface;
 use smithay::wayland::xdg_activation::XdgActivationTokenData;
 
 use super::ResolvedWindowRules;
+use crate::layout::activity::ActivityId;
+use crate::layout::workspace::WorkspaceId;
 
 #[derive(Debug)]
 pub struct Unmapped {
@@ -67,6 +69,33 @@ pub enum InitialConfigureState {
 
         /// Workspace to open this window on.
         workspace_name: Option<String>,
+
+        /// Activity that scoped the configure-time monitor / workspace
+        /// resolution, when an `open-on-activity` window rule was in
+        /// effect (DD §6.4). `Some(activity_id)` means the
+        /// `workspace_name` lookup at map-time must go through
+        /// [`Layout::find_workspace_in_activity_by_name`] rather than
+        /// `find_workspace_by_name`, so a hidden-activity workspace is
+        /// found. `None` preserves the pre-`open-on-activity` behavior
+        /// (active-activity-only resolution).
+        target_activity: Option<ActivityId>,
+
+        /// Workspace id directly resolved at configure time, used only
+        /// when `target_activity.is_some()` AND the configure-time `ws`
+        /// resolution settled on a workspace in the target activity.
+        ///
+        /// Necessary for the `open-on-activity` "alone" case (DD §6.4
+        /// point 1): the resolved workspace is often a freshly-materialized
+        /// unnamed empty in the hidden activity, so `workspace_name` is
+        /// `None` and re-resolving by name at map-time would fall through
+        /// to the active activity. Carrying the id directly preserves the
+        /// hidden-activity routing.
+        ///
+        /// Validated at map-time against `workspace_pool().contains_key`
+        /// — if the workspace was destroyed between configure and map,
+        /// the chain falls through to `output` / `Auto` (matches the
+        /// `workspace_name` fallthrough discipline; no error log).
+        target_workspace_id: Option<WorkspaceId>,
 
         /// Whether the window should be maximized.
         ///

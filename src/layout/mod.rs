@@ -1533,6 +1533,10 @@ impl<W: LayoutElement> Layout<W> {
             AddWindowTarget::Workspace(ws_id) => {
                 // Visible-target path: the early shortcut above ruled out
                 // hidden-activity ids, so the active view *must* contain `ws_id`.
+                debug_assert!(
+                    views.values().any(|view| view.ids().contains(&ws_id)),
+                    "hidden-target shortcut must have intercepted ws_id not in any active view"
+                );
                 let mon_idx = monitors
                     .iter()
                     .position(|mon| {
@@ -3799,6 +3803,23 @@ impl<W: LayoutElement> Layout<W> {
         self.monitors.iter().find(|mon| mon.output_id() == *output_id)
     }
 
+    /// Reader seam for an arbitrary activity's `WorkspaceView` keyed by
+    /// connected output.
+    ///
+    /// Returns `None` if `activity_id` does not exist or has no view entry
+    /// for `output_id`. Unlike [`Self::active_view`] this is permissive: a
+    /// hidden activity may legitimately lack a view for a given output until
+    /// [`Self::view_in_activity_or_materialize`] populates it. Used by
+    /// `xdg_shell::send_initial_configure` to read a freshly-materialized
+    /// hidden-activity view for `open-on-activity` window-rule wiring.
+    pub(crate) fn view_for(
+        &self,
+        activity_id: ActivityId,
+        output_id: &OutputId,
+    ) -> Option<&WorkspaceView> {
+        self.activities.get(activity_id)?.views().get(output_id)
+    }
+
     /// Reader seam for the active `WorkspaceView` keyed by connected output.
     ///
     /// Reads the view for `output_id` from the currently active activity's
@@ -3868,6 +3889,19 @@ impl<W: LayoutElement> Layout<W> {
     /// `open-on-activity` target activity (DD §6.4 point 3): if the named
     /// workspace is not tagged with the target activity, the chain falls
     /// through to subsequent targets.
+    ///
+    /// **Asymmetry note vs [`Self::find_workspace_in_activity_by_name`]:**
+    /// this helper requires the workspace to be bound to a connected
+    /// output (returns `None` for the empty-`OutputId` sentinel and for
+    /// workspaces whose bound output is currently disconnected). The
+    /// `find_workspace_in_activity_by_name` sibling has no such
+    /// requirement — it returns the pool entry regardless of binding.
+    /// `send_initial_configure` exploits this difference: the `mon`
+    /// resolution chain wants a real monitor (cannot route a window to
+    /// nothing), so unbound matches fall through to active-monitor
+    /// fallback; the `ws` resolution wants the workspace itself (the
+    /// monitor was already chosen above), so unbound matches still
+    /// select the right workspace via the sibling helper.
     pub fn monitor_for_workspace_in_activity(
         &self,
         workspace_name: &str,
@@ -4849,11 +4883,6 @@ impl<W: LayoutElement> Layout<W> {
     /// responsible for handling the missing-entry case after the call (in
     /// practice: `send_initial_configure` will then fall through its
     /// precedence chain to a different target).
-    // `dead_code` allow lifts in commit 3 of this sub-phase, where
-    // `xdg_shell::send_initial_configure` becomes the runtime caller. The
-    // method is exercised by layout-level tests in this commit; release
-    // builds without the test cfg would otherwise warn.
-    #[allow(dead_code)]
     pub(crate) fn view_in_activity_or_materialize(
         &mut self,
         activity_id: ActivityId,

@@ -431,6 +431,25 @@ impl XdgShellHandler for State {
                 InitialConfigureState::Configured {
                     rules,
                     output,
+                    // FIXME (DD §6.4): the maximize mid-flight re-configure
+                    // recomputes its size hints against the active activity's
+                    // view rather than the original target activity. The
+                    // map-time routing is unaffected — `target_activity` and
+                    // `target_workspace_id` are never mutated here, only
+                    // `output` and `is_pending_maximized`, so the window still
+                    // lands on the originally-targeted hidden-activity
+                    // workspace. The size hints may diverge in the rare
+                    // initial-configure → mid-flight maximize → map sequence
+                    // when the target activity's monitor differs in dimensions
+                    // from the active monitor. Edge case: if `ws` is destroyed
+                    // before map AND `output` was mutated mid-flight, the
+                    // carry-id `.filter(contains_key)` drops out and `output`
+                    // becomes the routing target. Sub-caveat: `output` is
+                    // itself filtered through `monitor_for_output` at map time
+                    // (compositor.rs), so a disconnected mid-flight output falls
+                    // through further to `Auto` rather than becoming the target.
+                    target_activity: _,
+                    target_workspace_id: _,
                     is_pending_maximized,
                     ..
                 } => {
@@ -523,6 +542,25 @@ impl XdgShellHandler for State {
                     is_full_width,
                     output,
                     workspace_name,
+                    // FIXME (DD §6.4): the unmaximize mid-flight re-configure
+                    // recomputes its size hints against the active activity's
+                    // view rather than the original target activity. The
+                    // map-time routing is unaffected — `target_activity` and
+                    // `target_workspace_id` are never mutated here, only
+                    // `output` and `is_pending_maximized`, so the window still
+                    // lands on the originally-targeted hidden-activity
+                    // workspace. The size hints may diverge in the rare
+                    // initial-configure → mid-flight unmaximize → map sequence
+                    // when the target activity's monitor differs in dimensions
+                    // from the active monitor. Edge case: if `ws` is destroyed
+                    // before map AND `output` was mutated mid-flight, the
+                    // carry-id `.filter(contains_key)` drops out and `output`
+                    // becomes the routing target. Sub-caveat: `output` is
+                    // itself filtered through `monitor_for_output` at map time
+                    // (compositor.rs), so a disconnected mid-flight output falls
+                    // through further to `Auto` rather than becoming the target.
+                    target_activity: _,
+                    target_workspace_id: _,
                     is_pending_maximized,
                 } => {
                     // Figure out the monitor following a similar logic to initial configure.
@@ -664,7 +702,31 @@ impl XdgShellHandler for State {
 
                     // The required configure will be the initial configure.
                 }
-                InitialConfigureState::Configured { rules, output, .. } => {
+                InitialConfigureState::Configured {
+                    rules,
+                    output,
+                    // FIXME (DD §6.4): the fullscreen mid-flight re-configure
+                    // recomputes its size hints against the active activity's
+                    // view rather than the original target activity. The
+                    // map-time routing is unaffected — `target_activity` and
+                    // `target_workspace_id` are never mutated here, only
+                    // `output`, so the window still lands on the
+                    // originally-targeted hidden-activity workspace. The size
+                    // hints may diverge in the rare initial-configure →
+                    // mid-flight fullscreen → map sequence when the target
+                    // activity's monitor differs in dimensions from the active
+                    // monitor. Edge case: if `ws` is destroyed before map AND
+                    // `output` was mutated mid-flight, the carry-id
+                    // `.filter(contains_key)` drops out and `output` becomes
+                    // the routing target. Sub-caveat: `output` is itself
+                    // filtered through `monitor_for_output` at map time
+                    // (compositor.rs), so a disconnected mid-flight output
+                    // falls through further to `Auto` rather than becoming
+                    // the target.
+                    target_activity: _,
+                    target_workspace_id: _,
+                    ..
+                } => {
                     // Figure out the monitor following a similar logic to initial configure.
                     // FIXME: deduplicate.
                     let mon = requested_output
@@ -751,6 +813,27 @@ impl XdgShellHandler for State {
                     is_full_width,
                     output,
                     workspace_name,
+                    // FIXME (DD §6.4): the unfullscreen mid-flight re-configure
+                    // recomputes its size hints against the active activity's
+                    // view rather than the original target activity. The
+                    // map-time routing is unaffected — `target_activity` and
+                    // `target_workspace_id` are never mutated here, only
+                    // `output` (note: `is_pending_maximized` is read but not
+                    // assigned in this arm), so the window still lands on the
+                    // originally-targeted hidden-activity workspace. The size
+                    // hints may diverge in the rare initial-configure →
+                    // mid-flight unfullscreen → map sequence when the target
+                    // activity's monitor differs in dimensions from the active
+                    // monitor. Edge case: if `ws` is destroyed before map AND
+                    // `output` was mutated mid-flight, the carry-id
+                    // `.filter(contains_key)` drops out and `output` becomes
+                    // the routing target. Sub-caveat: `output` is itself
+                    // filtered through `monitor_for_output` at map time
+                    // (compositor.rs), so a disconnected mid-flight output
+                    // falls through further to `Auto` rather than becoming
+                    // the target.
+                    target_activity: _,
+                    target_workspace_id: _,
                     is_pending_maximized,
                 } => {
                     // Figure out the monitor following a similar logic to initial configure.
@@ -1084,11 +1167,40 @@ impl State {
             return;
         };
 
+        // Resolve the optional `open-on-activity` target. Liberal-accept: an
+        // unknown activity name silently falls back to the active activity
+        // (mirroring `open-on-output`'s precedent for unknown output names).
+        // `target_activity` is `None` when the window rule did not set
+        // `open-on-activity`; the post-resolution workspace lookup at map-time
+        // then goes through `find_workspace_by_name`, which scans only the
+        // active activity's view.
+        let target_activity: Option<crate::layout::activity::ActivityId> =
+            if let Some(name) = rules.open_on_activity.as_deref() {
+                let resolved = self.niri.layout.activities().find_by_name(name).map(|a| a.id());
+                if resolved.is_none() {
+                    warn!(
+                        "open-on-activity {name:?} did not match any activity; \
+                         falling back to the active activity",
+                    );
+                }
+                Some(resolved.unwrap_or_else(|| self.niri.layout.active_activity_id()))
+            } else {
+                None
+            };
+
         // Pick the target monitor. First, check if we had a workspace set in the window rules.
-        let mon = rules
-            .open_on_workspace
-            .as_deref()
-            .and_then(|name| self.niri.layout.monitor_for_workspace(name));
+        // When `open-on-activity` is in effect, scope the named-workspace lookup to that
+        // activity so DD §6.4 point 3 fallback fires when the workspace isn't tagged with the
+        // target activity.
+        let mon = rules.open_on_workspace.as_deref().and_then(|name| {
+            if let Some(activity_id) = target_activity {
+                self.niri
+                    .layout
+                    .monitor_for_workspace_in_activity(name, activity_id)
+            } else {
+                self.niri.layout.monitor_for_workspace(name)
+            }
+        });
 
         // If not, check if we had an output set in the window rules.
         let mon = mon.or_else(|| {
@@ -1145,26 +1257,108 @@ impl State {
         let is_full_width = rules.open_maximized.unwrap_or(false);
         let is_floating = rules.compute_open_floating(toplevel);
 
+        // Materialize the target activity's view for this monitor's output before
+        // taking a shared borrow of `self.niri.layout` for the read chain below.
+        // `view_in_activity_or_materialize` is `&mut self.niri.layout`-scoped and
+        // only allocates when the (activity, output) pair has no entry yet — for
+        // active-activity targets (`target_activity == None` or pointing at the
+        // active id with a pre-existing view) this is a cheap no-op. The
+        // mutable borrow drops before the `let layout = &self.niri.layout` line
+        // below; reads run on a fresh shared borrow.
+        //
+        // Capture the target output id by value first so the `mon` shared borrow
+        // (a `&Monitor<W>` rooted in `self.niri.layout.monitors`) drops before
+        // the `&mut self.niri.layout` call below — `OutputId` owns its bytes.
+        let materialize_output_id = mon.map(|m| m.output_id());
+        if let (Some(activity_id), Some(output_id)) = (target_activity, &materialize_output_id) {
+            self.niri
+                .layout
+                .view_in_activity_or_materialize(activity_id, output_id);
+        }
+        // `mon` was rooted in `self.niri.layout.monitors`; the borrow ends
+        // at the `&mut self.niri.layout` materialize call above, so re-resolve
+        // under a fresh shared borrow before the read chain (purely a
+        // borrow-checker requirement, not aliasing soundness — `monitors`
+        // is a `Vec` and is not mutated by the materialize).
+        let mon = materialize_output_id
+            .as_ref()
+            .and_then(|id| self.niri.layout.monitor_for_output_id(id));
+
         // Tell the surface the preferred size and bounds for its likely output.
+        // For `open-on-activity` targets, route the view lookup through the
+        // target activity so a hidden-activity workspace is reachable. For the
+        // default (no `open-on-activity`) case, fall back to the active view
+        // exactly as before.
         let layout = &self.niri.layout;
-        let ws = rules
-            .open_on_workspace
-            .as_deref()
-            .and_then(|name| {
-                // .map (not .and_then) preserves Option<Option<_>> so that a named workspace
-                // rule with no match does NOT fall through to the active-workspace fallback below.
-                mon.map(|mon| {
-                    let view = layout.active_view(&mon.output_id());
-                    mon.find_named_workspace(layout.workspace_pool(), view, name)
-                })
-            })
-            .unwrap_or_else(|| {
-                mon.map(|mon| {
-                    let view = layout.active_view(&mon.output_id());
-                    mon.active_workspace_ref(layout.workspace_pool(), view)
-                })
-                .or_else(|| layout.active_workspace())
+        let mon_output_id = mon.map(|m| m.output_id());
+        let view_for_mon = mon_output_id.as_ref().map(|output_id| match target_activity {
+            Some(activity_id) => layout
+                .view_for(activity_id, output_id)
+                .expect("view must be materialized before send_initial_configure read chain"),
+            None => layout.active_view(output_id),
+        });
+        let ws = if let Some(activity_id) = target_activity {
+            // `open-on-activity` path (DD §6.4): look up the named workspace by
+            // pool walk scoped to the target activity. This works whether or
+            // not the workspace is in any active view AND whether or not it
+            // is bound to a real output (config-declared workspaces with no
+            // `open-on-output` start with the empty-OutputId sentinel and may
+            // never get rebound — see Appendix C entry 1). On a name miss, or
+            // when no name is set, fall back to the active workspace in the
+            // target activity's view (per §6.4 point 1 / point 3 fallthrough).
+            let by_name = rules.open_on_workspace.as_deref().and_then(|name| {
+                layout.find_workspace_in_activity_by_name(name, activity_id)
             });
+            if rules.open_on_workspace.is_some() && by_name.is_none() {
+                warn!(
+                    "open-on-workspace {:?} did not match any workspace in activity {:?}; \
+                     falling back to the active workspace in the target activity",
+                    rules.open_on_workspace.as_deref().unwrap_or(""),
+                    activity_id,
+                );
+            }
+            // Unbound workspace (config-declared, no `open-on-output`, OutputId "" sentinel):
+            // `find_workspace_in_activity_by_name` returns Some but
+            // `monitor_for_workspace_in_activity` returns None, so `mon` is not derived from
+            // the target workspace — size hints are computed against a different monitor while
+            // the window will land on the unbound workspace at map time.
+            let by_name_has_monitor = rules.open_on_workspace.as_deref().is_some_and(|name| {
+                layout
+                    .monitor_for_workspace_in_activity(name, activity_id)
+                    .is_some()
+            });
+            if by_name.is_some() && !by_name_has_monitor {
+                debug!(
+                    "open-on-workspace {:?} in activity {:?} resolved to an unbound workspace; \
+                     size hints will be computed against the active monitor rather than the \
+                     workspace's output",
+                    rules.open_on_workspace.as_deref().unwrap_or(""),
+                    activity_id,
+                );
+            }
+            by_name.or_else(|| {
+                mon.zip(view_for_mon)
+                    .map(|(mon, view)| mon.active_workspace_ref(layout.workspace_pool(), view))
+                    .or_else(|| layout.active_workspace())
+            })
+        } else {
+            // Default path (no `open-on-activity` rule) — preserves the
+            // `Option<Option<_>>` shape so a named-workspace miss yields `None`
+            // rather than silently falling back to the active workspace.
+            rules
+                .open_on_workspace
+                .as_deref()
+                .and_then(|name| {
+                    mon.zip(view_for_mon).map(|(mon, view)| {
+                        mon.find_named_workspace(layout.workspace_pool(), view, name)
+                    })
+                })
+                .unwrap_or_else(|| {
+                    mon.zip(view_for_mon)
+                        .map(|(mon, view)| mon.active_workspace_ref(layout.workspace_pool(), view))
+                        .or_else(|| layout.active_workspace())
+                })
+        };
 
         let mut is_pending_maximized = false;
         if let Some(ws) = ws {
@@ -1210,6 +1404,15 @@ impl State {
         update_tiled_state(toplevel, config.prefer_no_csd, rules.tiled_state);
 
         // Set the configured settings.
+        // Carry the resolved workspace id for the hidden-activity case so
+        // map-time can route via `AddWindowTarget::Workspace(id)` instead of
+        // re-resolving by name (which would miss freshly-materialized
+        // unnamed empties on hidden activities).
+        let target_workspace_id = if target_activity.is_some() {
+            ws.map(|w| w.id())
+        } else {
+            None
+        };
         *state = InitialConfigureState::Configured {
             rules,
             width,
@@ -1219,6 +1422,8 @@ impl State {
             is_full_width,
             output,
             workspace_name: ws.and_then(|w| w.name().cloned()),
+            target_activity,
+            target_workspace_id,
             is_pending_maximized,
         };
 
