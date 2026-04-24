@@ -9,6 +9,7 @@ mod close_window_cross_activity;
 mod ext_workspace;
 mod find_window_cross_activity;
 mod floating;
+mod focus_window_cross_activity;
 mod fullscreen;
 mod layer_shell;
 mod move_window_to_monitor_by_id_cross_activity;

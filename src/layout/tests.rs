@@ -10862,3 +10862,186 @@ fn reconcile_remove_rejects_on_hard_block_when_cascade_required() {
     layout.dnd_end();
     layout.verify_invariants();
 }
+// -- pick_activity_for_hidden_window tests (DD §5.18) -------------------------
+
+/// Build a no-monitor `Layout` with three activities (seed/alpha, beta, gamma),
+/// pick one workspace, and overwrite its `activities` tag set. Returns
+/// `(layout, seed_id, beta_id, gamma_id, ws_id)`. The caller then calls
+/// `layout.pick_activity_for_hidden_window(ws_id, hint)` to exercise each tier.
+fn prepare_picker_layout(
+    ws_tags: &[&str],
+) -> (
+    Layout<TestWindow>,
+    ActivityId,
+    ActivityId,
+    ActivityId,
+    WorkspaceId,
+) {
+    // Use `AddOutput` so the pool contains at least one workspace — the
+    // no-monitor default ctor builds an empty pool, and the picker needs a
+    // pool workspace to read `activities` from.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let seed_id = layout.active_activity_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    let gamma = super::activity::Activity::new_runtime("gamma".to_owned());
+    let gamma_id = gamma.id();
+    layout.activities.insert(gamma);
+
+    // Pick any pool workspace (there is exactly one — seeded by the
+    // no-monitor Default ctor via the disconnected-pool path).
+    let ws_id = *layout
+        .workspaces
+        .keys()
+        .next()
+        .expect("default layout has at least one pool workspace");
+
+    // Overwrite the `activities` tag set. `ws_tags` names the activities
+    // the workspace should be tagged with — all three names resolve to the
+    // ids captured above.
+    let tag_set: HashSet<ActivityId> = ws_tags
+        .iter()
+        .map(|name| match *name {
+            "alpha" => seed_id,
+            "beta" => beta_id,
+            "gamma" => gamma_id,
+            other => panic!("unknown tag name in test helper: {other}"),
+        })
+        .collect();
+    {
+        let ws = layout
+            .workspaces
+            .get_mut(&ws_id)
+            .expect("ws_id must be a pool key");
+        ws.activities = tag_set;
+    }
+
+    (layout, seed_id, beta_id, gamma_id, ws_id)
+}
+
+#[test]
+fn pick_activity_for_hidden_window_returns_hint_when_hint_in_ws_activities() {
+    // Tier 1: hint is in `ws.activities` and is not the active activity.
+    // Pin that the hint is honored even when `previous_id` and declaration-
+    // order also have valid candidates.
+    let (mut layout, alpha_id, beta_id, gamma_id, ws_id) =
+        prepare_picker_layout(&["beta", "gamma"]);
+    // Populate previous_id = gamma so tier 2 has a valid candidate; the test
+    // must still pick beta via tier 1.
+    layout.switch_activity(gamma_id);
+    layout.switch_activity(alpha_id);
+    assert_eq!(layout.activities.previous_id(), Some(gamma_id));
+
+    // Hint = beta. Expected: beta (tier 1 wins over tier 2 / tier 3).
+    let target = layout.pick_activity_for_hidden_window(ws_id, Some(beta_id));
+    assert_eq!(
+        target, beta_id,
+        "tier 1: in-set hint must win over previous_id and declaration-order candidates",
+    );
+}
+
+#[test]
+fn pick_activity_for_hidden_window_falls_to_previous_when_hint_stale() {
+    // Tier 2: hint is `None` or not in `ws.activities`, but `previous_id`
+    // is valid. Pin that previous_id takes precedence over declaration-order.
+    let (mut layout, alpha_id, beta_id, gamma_id, ws_id) =
+        prepare_picker_layout(&["beta", "gamma"]);
+    // Make previous = gamma, active = alpha.
+    layout.switch_activity(gamma_id);
+    layout.switch_activity(alpha_id);
+    assert_eq!(layout.activities.previous_id(), Some(gamma_id));
+
+    // Hint None → tier 1 skipped. previous = gamma, in ws.activities, != active → tier 2.
+    let target = layout.pick_activity_for_hidden_window(ws_id, None);
+    assert_eq!(
+        target, gamma_id,
+        "tier 2: previous_id wins when hint is absent and previous is a valid candidate",
+    );
+
+    // Hint = alpha (active) → filtered by tier 1's `hint != active_id()`
+    // guard. Tier 2 still fires.
+    let target = layout.pick_activity_for_hidden_window(ws_id, Some(alpha_id));
+    assert_eq!(
+        target, gamma_id,
+        "tier 2: hint == active is filtered, previous wins",
+    );
+
+    // Hint = an id that is not in `ws.activities` at all (synthesize a
+    // never-inserted id via `specific(u64::MAX)`). Tier 1 filter rejects it
+    // via `activities.contains`; tier 2 still fires.
+    let target = layout.pick_activity_for_hidden_window(ws_id, Some(ActivityId::specific(u64::MAX)));
+    assert_eq!(
+        target, gamma_id,
+        "tier 2: out-of-set hint is filtered by `activities.contains`, previous wins",
+    );
+
+    // Silence the unused-variable warning on beta_id; no branch here uses
+    // it, but the helper minted it for symmetry with other tests.
+    let _ = beta_id;
+}
+
+#[test]
+fn pick_activity_for_hidden_window_falls_to_display_order_when_previous_unavailable() {
+    // Tier 3: hint absent, `previous_id` unavailable (either None or not in
+    // `ws.activities`). The picker must return the first activity in
+    // declaration order that is in `ws.activities` and != active.
+    //
+    // Declaration order on the helper is seed → beta → gamma (IndexMap
+    // preserves insertion order). With ws tagged {beta, gamma} and active =
+    // alpha, the first non-active candidate is beta.
+    let (layout, alpha_id, beta_id, _gamma, ws_id) =
+        prepare_picker_layout(&["beta", "gamma"]);
+    // Fresh layout → previous_id is None.
+    assert_eq!(layout.activities.previous_id(), None);
+    assert_eq!(layout.active_activity_id(), alpha_id);
+
+    let target = layout.pick_activity_for_hidden_window(ws_id, None);
+    assert_eq!(
+        target, beta_id,
+        "tier 3: first declaration-order candidate in ws.activities wins",
+    );
+}
+
+#[test]
+fn pick_activity_for_hidden_window_skips_active_in_all_tiers() {
+    // Pin that every tier excludes the currently-active activity. ws is
+    // tagged with all three ids, so a bug that omits the `!= active` guard
+    // on any tier would return alpha (the active id).
+    let (mut layout, alpha_id, beta_id, gamma_id, ws_id) =
+        prepare_picker_layout(&["alpha", "beta", "gamma"]);
+    // Populate previous_id = gamma so tier 2 has a concrete non-active
+    // candidate; we still want to check that no tier returns alpha.
+    layout.switch_activity(gamma_id);
+    layout.switch_activity(alpha_id);
+
+    // Tier 1: hint = alpha (the active). Filtered → falls to tier 2
+    // (previous = gamma, != active, in set).
+    let target = layout.pick_activity_for_hidden_window(ws_id, Some(alpha_id));
+    assert_ne!(target, alpha_id, "tier 1 must not return the active id");
+    assert_eq!(target, gamma_id, "tier 2 fires after tier 1 filters alpha");
+
+    // Tier 1 honored (non-active hint).
+    let target = layout.pick_activity_for_hidden_window(ws_id, Some(beta_id));
+    assert_ne!(target, alpha_id);
+    assert_eq!(target, beta_id);
+}
+
+#[test]
+fn pick_activity_for_hidden_window_degenerate_single_activity_on_hidden_ws() {
+    // Degenerate arm: workspace tagged with *only* one hidden activity (beta).
+    // Hint absent, previous_id absent. Tier 3 must return beta in declaration
+    // order, not fall into the `unreachable!` tail (which is reserved for the
+    // empty-set invariant break) or the trailing `active_id()` return.
+    let (layout, alpha_id, beta_id, _gamma, ws_id) = prepare_picker_layout(&["beta"]);
+    assert_eq!(layout.activities.previous_id(), None);
+    assert_eq!(layout.active_activity_id(), alpha_id);
+
+    let target = layout.pick_activity_for_hidden_window(ws_id, None);
+    assert_eq!(
+        target, beta_id,
+        "single-activity hidden ws: tier 3 picks beta",
+    );
+}

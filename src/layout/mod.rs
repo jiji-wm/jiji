@@ -4031,6 +4031,98 @@ impl<W: LayoutElement> Layout<W> {
         monitors[mon_idx].switch_workspace_previous(view);
     }
 
+    /// Locate the pool workspace owning `window` and return its id plus a
+    /// clone of its `activities` set. Returns `None` if the window id is not
+    /// present anywhere in the pool. Used by the `Action::FocusWindow`
+    /// dispatcher to compute a target activity for a window that lives on a
+    /// dormant workspace.
+    ///
+    /// Trait-agnostic by design: the `Mapped`-specific `last_focused_activity`
+    /// hint is read at the call site and passed into
+    /// [`Self::pick_activity_for_hidden_window`] separately, so that
+    /// `Layout<TestWindow>` tests of the picker do not need a
+    /// `last_focused_activity` plumb on `TestWindow`.
+    pub(crate) fn window_ws_and_activity_hint(&self, window: &W::Id) -> Option<WorkspaceId> {
+        self.workspaces.values().find_map(|ws| {
+            if ws.windows().any(|w| w.id() == window) {
+                Some(ws.id())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Pick a non-active target activity for an `Action::FocusWindow { id }`
+    /// dispatch that resolved a window on a hidden workspace (DD §5.18).
+    ///
+    /// Three-tier tiebreaker, in order — each tier excludes the currently-active
+    /// activity so the picker never returns `active_id()` from a productive path
+    /// (the caller already resolved the "visible" fast-path before reaching here):
+    /// 1. `hint` if `ws.activities.contains(hint) && hint != active_id()`.
+    ///    `hint` is the callee's `Mapped.last_focused_activity` — the activity
+    ///    that was active the last time the user focused *this specific* window.
+    /// 2. `Activities::previous_id()` if that id is in `ws.activities` and is
+    ///    not the current active.
+    /// 3. First activity in `self.activities.iter()` (IndexMap display order)
+    ///    whose id is in `ws.activities` and is not the current active.
+    ///
+    /// Invariant relied on: every workspace's `activities` set is non-empty
+    /// (seeded at construction, enforced by `Layout::verify_invariants`). If
+    /// the set is empty we hit an `unreachable!` with that contract named —
+    /// a silent `.first()?` or `_ => active_id()` fallback is a review-stop
+    /// bug (fork CLAUDE.md §1).
+    ///
+    /// Degenerate tail: if the workspace is tagged *only* with the currently
+    /// active activity (and the caller invoked the picker anyway instead of
+    /// short-circuiting on the visibility fast-path), every tier filters the
+    /// lone candidate out and the function returns `active_id()`. This arm is
+    /// not reached from the production dispatch path — the caller is expected
+    /// to detect `target == active_id()` and no-op.
+    pub(crate) fn pick_activity_for_hidden_window(
+        &self,
+        ws_id: WorkspaceId,
+        hint: Option<ActivityId>,
+    ) -> ActivityId {
+        let active = self.activities.active_id();
+        let ws = self
+            .workspaces
+            .get(&ws_id)
+            .expect("ws_id must be a key in the pool (caller resolved it via windows_all)");
+        let activities = ws.activities();
+
+        if activities.is_empty() {
+            unreachable!(
+                "workspace.activities must be non-empty (Layout invariant, verify_invariants)"
+            );
+        }
+
+        // Tier 1: MRU hint.
+        if let Some(h) = hint {
+            if h != active && activities.contains(&h) {
+                return h;
+            }
+        }
+
+        // Tier 2: Activities::previous_id.
+        if let Some(prev) = self.activities.previous_id() {
+            if prev != active && activities.contains(&prev) {
+                return prev;
+            }
+        }
+
+        // Tier 3: first activity in declaration order whose id is in ws.activities.
+        for act in self.activities.iter() {
+            let id = act.id();
+            if id != active && activities.contains(&id) {
+                return id;
+            }
+        }
+
+        // Degenerate tail — see rustdoc above. Not reached from the production
+        // dispatch path; the caller short-circuits on `target == active_id()`.
+        active
+    }
+
     /// Returns `Some(reason)` when the three live-input conditions from DD
     /// §5.11 forbid switching activities — interactive window move, DnD, or a
     /// workspace-switch gesture in flight on *any* monitor. Returns `None`

@@ -891,11 +891,90 @@ impl State {
                 }
             }
             Action::FocusWindow(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
-                let window = window.map(|(_, m)| m.window.clone());
-                if let Some(window) = window {
+                // DD §5.18: `FocusWindow { id }` auto-switches the active
+                // activity when the resolved window lives on a dormant
+                // workspace. We walk `windows_all()` (pool-span) rather than
+                // `windows()` (active-view scope) so hidden-activity windows
+                // are reachable; the visibility fast-path below preserves the
+                // pre-1b behavior for windows already on the active view.
+                //
+                // Missing id stays a silent `Ok(())` no-op — the Err-on-missing
+                // wire contract is deferred (DD §5.18 / Phase 2).
+                let Some((_oid, mapped)) = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id)
+                else {
+                    debug!("focus_window: id={id} not found in pool — deferred Err-on-missing wire contract (DD §5.18)");
+                    return Ok(());
+                };
+                let window = mapped.window.clone();
+                let hint = mapped.get_last_focused_activity();
+
+                let Some(ws_id) = self.niri.layout.window_ws_and_activity_hint(&window) else {
+                    // Resolved via windows_all but not in the pool — the only
+                    // way this can happen is the interactive-move window, which
+                    // is not owned by any pool workspace. Silent no-op.
+                    debug!("focus_window: id={id} resolved via windows_all but not in pool (interactive-move window), no-op");
+                    return Ok(());
+                };
+
+                // Visibility fast-path: if `ws_id` appears in any of the
+                // active activity's per-output `WorkspaceView::ids()`, the
+                // window is already reachable under the current activity
+                // cursor — just focus it. This matches the spec contract
+                // "its workspace id is in the active activity's
+                // `views[&output_id].ids`" without panicking when the window's
+                // bound output is disconnected or when the window has no
+                // bound output at all.
+                let is_visible = self
+                    .niri
+                    .layout
+                    .activities()
+                    .active()
+                    .views()
+                    .values()
+                    .any(|view| view.ids().contains(&ws_id));
+
+                if is_visible {
                     self.focus_window(&window);
+                    return Ok(());
                 }
+
+                // Hidden workspace — pick the activity to switch into. The
+                // picker excludes the currently-active activity in all three
+                // tiers; a `target == active_id()` here would mean the
+                // workspace is only tagged with the active activity, which
+                // contradicts `is_visible == false` and is handled as a silent
+                // no-op.
+                let target = self
+                    .niri
+                    .layout
+                    .pick_activity_for_hidden_window(ws_id, hint);
+                if target == self.niri.layout.active_activity_id() {
+                    debug!("focus_window: id={id} — picker returned active_id (ws tagged only with active activity, contradicts is_visible==false), no-op");
+                    return Ok(());
+                }
+
+                // DD §5.11 hard-block gate — mirrors the SwitchActivity /
+                // RemoveActivity arms. Returning `Err(block)` preserves the
+                // §5.11 Part 2 IPC-queue semantics: the ipc-server parks the
+                // action and re-dispatches on drain, so the client sees
+                // `Handled` once the switch performs.
+                if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
+                    debug!("focus_window: activity switch hard-blocked by {block:?} (DD §5.11)");
+                    return Err(block);
+                }
+
+                self.niri.layout.switch_activity(target);
+                self.maybe_warp_cursor_to_focus();
+                self.niri.layer_shell_on_demand_focus = None;
+                self.niri.queue_redraw_all();
+
+                // `focus_window` performs the actual activate + cursor warp
+                // under the newly-active activity.
+                self.focus_window(&window);
             }
             Action::FocusWindowInColumn(index) => {
                 self.niri.layout.focus_window_in_column(index);

@@ -23,6 +23,7 @@ use wayland_backend::server::Credentials;
 
 use super::{ResolvedWindowRules, WindowRef};
 use crate::handlers::KdeDecorationsModeState;
+use crate::layout::activity::ActivityId;
 use crate::layout::{
     ConfigureIntent, InteractiveResizeData, LayoutElement, LayoutElementRenderElement,
     LayoutElementRenderSnapshot, SizingMode,
@@ -193,6 +194,25 @@ pub struct Mapped {
 
     /// Most recent monotonic time when the window had the focus.
     focus_timestamp: Option<Duration>,
+
+    /// Id of the activity that was active the last time this window was
+    /// focused, used by `Action::FocusWindow { id }` to decide which activity
+    /// to auto-switch into when the resolved window lives on a dormant
+    /// workspace (DD §5.18 tier 1 hint).
+    ///
+    /// Left as `None` at construction — a freshly-mapped window is focused
+    /// immediately after map via the same `set_focus_timestamp` path in
+    /// [`crate::niri::State::refresh`], so the co-located `set_last_focused_activity`
+    /// call establishes the correct value before any `FocusWindow { id }` can
+    /// target this window. Not updated on activity switch (DD §5.18 is
+    /// explicit: the hint reflects "activity where the user last focused
+    /// *this window*", not the currently-active activity).
+    ///
+    /// A stale id (activity since removed) is intentional: the tier-1
+    /// filter in `Layout::pick_activity_for_hidden_window` is
+    /// `ws.activities.contains(&hint.unwrap())`, which rejects a stale id
+    /// for free without a liveness assertion in `verify_invariants`.
+    last_focused_activity: Option<ActivityId>,
 }
 
 niri_render_elements! {
@@ -308,6 +328,7 @@ impl Mapped {
             is_pending_maximized: false,
             uncommitted_maximized: Vec::new(),
             focus_timestamp: None,
+            last_focused_activity: None,
         };
 
         rv.is_maximized = rv.sizing_mode().is_maximized();
@@ -563,6 +584,14 @@ impl Mapped {
 
     pub fn set_focus_timestamp(&mut self, timestamp: Duration) {
         self.focus_timestamp.replace(timestamp);
+    }
+
+    pub fn get_last_focused_activity(&self) -> Option<ActivityId> {
+        self.last_focused_activity
+    }
+
+    pub fn set_last_focused_activity(&mut self, id: ActivityId) {
+        self.last_focused_activity.replace(id);
     }
 
     pub fn send_frame<T, F>(

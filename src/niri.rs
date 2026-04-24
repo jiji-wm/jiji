@@ -1276,6 +1276,12 @@ impl State {
                 surface: Some(surface),
             } = &focus
             {
+                // Hoisted before the mutable `mapped` borrow per fork CLAUDE.md §5
+                // split-borrow discipline. Co-located with `set_focus_timestamp`
+                // below to carry the DD §5.18 `last_focused_activity` contract: the
+                // hint is updated on every focus commit, not on activity switch.
+                let active_activity = self.niri.layout.active_activity_id();
+
                 if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(surface) {
                     mapped.set_is_focused(true);
 
@@ -1291,6 +1297,7 @@ impl State {
 
                     if mapped.get_focus_timestamp().is_none() || debounce.is_zero() {
                         mapped.set_focus_timestamp(stamp);
+                        mapped.set_last_focused_activity(active_activity);
                     } else {
                         let timer = Timer::from_duration(debounce);
 
@@ -6507,6 +6514,12 @@ impl Niri {
         };
         self.event_loop.remove(pending.token);
 
+        // Hoisted before the mutable pool walk per fork CLAUDE.md §5 split-borrow
+        // discipline. Co-located with `set_focus_timestamp` below per DD §5.18:
+        // `last_focused_activity` is refreshed on every focus commit (debounced or
+        // immediate), never on activity switch.
+        let active_activity = self.layout.active_activity_id();
+
         if let Some(window) = self
             .layout
             .workspaces_mut()
@@ -6514,6 +6527,7 @@ impl Niri {
             .find(|w| w.id() == pending.id)
         {
             window.set_focus_timestamp(pending.stamp);
+            window.set_last_focused_activity(active_activity);
         }
     }
 
