@@ -19,6 +19,8 @@
 
 use niri_config::Action;
 
+use crate::layout::DoActionError;
+
 use super::client::ClientId;
 use super::fixture::{config_with_two_activities, Fixture};
 
@@ -158,5 +160,34 @@ fn focus_window_does_not_bump_last_focused_activity_on_activity_switch() {
         hint_after_switch,
         Some(alpha_id),
         "DD §5.18: last_focused_activity must NOT be updated on activity switch",
+    );
+}
+
+#[test]
+fn focus_window_unknown_id_returns_err_on_wire() {
+    // Pin DD §5.18 line 1316: `Action::FocusWindow { id }` with an id that
+    // does not resolve to any pool-owned window must return
+    // `Err(DoActionError::WindowNotFound { id })` from `do_action_inner`.
+    // The IPC dispatch path flattens this to the wire envelope
+    // `"window not found: id={id} (DD §5.18)"`.
+    //
+    // Dispatch via `do_action_inner` directly rather than `do_action`
+    // (which silently drops both error arms per the §5.11/§5.18 keybind
+    // precedent). This pins the wire-visible surface, not the keybind
+    // silent-drop path.
+    let mut f = Fixture::with_config(config_with_two_activities(&[], &[]));
+    f.add_output(1, (1920, 1080));
+
+    // No windows mapped: any id is guaranteed stale.
+    const BOGUS_ID: u64 = 999_999;
+    let result = f
+        .niri_state()
+        .do_action_inner(Action::FocusWindow(BOGUS_ID), false);
+
+    assert_eq!(
+        result,
+        Err(DoActionError::WindowNotFound { id: BOGUS_ID }),
+        "FocusWindow with an unknown id must return \
+         Err(DoActionError::WindowNotFound) on the wire (DD §5.18)",
     );
 }

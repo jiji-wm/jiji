@@ -36,7 +36,9 @@ use crate::input::pick_window_grab::PickWindowGrab;
 use crate::layout::activity::ActivityId;
 use crate::layout::workspace::WorkspaceId;
 use crate::utils::id::IdCounter;
-use crate::layout::{format_activity_switch_block_err, ActivitySwitchBlock, Layout, LayoutElement};
+use crate::layout::{
+    format_do_action_error, DoActionError, Layout, LayoutElement,
+};
 use crate::niri::State;
 use crate::utils::{version, with_toplevel_role};
 use crate::window::Mapped;
@@ -83,7 +85,7 @@ impl IpcConnId {
 ///   that case.
 struct BlockedWaiter {
     action: niri_config::Action,
-    tx: async_channel::Sender<Result<(), ActivitySwitchBlock>>,
+    tx: async_channel::Sender<Result<(), DoActionError>>,
 }
 
 pub struct IpcServer {
@@ -217,13 +219,19 @@ impl Drop for IpcServer {
 /// - **`Handled` ≡ performed**: a waiter is only signalled `Ok(())` after its
 ///   `do_action_inner` call returned `Ok(())`. The send half is dropped
 ///   without signalling on silent-prune paths (closed receiver).
-/// - **FIFO preserved across re-block**: if `do_action_inner` re-raises a
-///   hard block mid-drain (no current action reaches this; forward-compat
-///   for future gating widening), the waiter is re-inserted at its index at
-///   removal via `shift_insert(original_idx, …)` and the walk **breaks** —
-///   continuing past a re-blocked waiter would promote later waiters ahead
-///   of it. The `// FIFO pin` breadcrumb on the `break` pins this semantic
-///   against accidental refactor.
+/// - **FIFO preserved across re-block** (scoped to
+///   `Err(DoActionError::ActivitySwitchBlocked)`): if `do_action_inner`
+///   re-raises a hard block mid-drain (no current action reaches this;
+///   forward-compat for future gating widening), the waiter is re-inserted
+///   at its index at removal via `shift_insert(original_idx, …)` and the
+///   walk **breaks** — continuing past a re-blocked waiter would promote
+///   later waiters ahead of it. The `// FIFO pin` breadcrumb on the `break`
+///   pins this semantic against accidental refactor.
+/// - **Terminal errors advance the drain** (scoped to
+///   `Err(DoActionError::WindowNotFound)`): a terminal error for one waiter
+///   does not block later waiters. The waiter is signalled
+///   `Err(DoActionError::WindowNotFound { id })` and the walk `continue`s
+///   to the next connection.
 /// - **Closed-receiver prune**: if the client disconnected between enqueue
 ///   and drain (`tx.is_closed()`), the entry is dropped without dispatch.
 ///   No side effects, no replay.
@@ -288,7 +296,7 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
                 // loss (same contract as the initial-dispatch success path).
                 let _ = waiter.tx.send_blocking(Ok(()));
             }
-            Err(block) => {
+            Err(DoActionError::ActivitySwitchBlocked(block)) => {
                 // Re-block mid-drain: re-insert at its index at removal so
                 // later waiters don't promote past this one. Today's
                 // `do_action_inner` surface cannot produce this; forward-
@@ -318,6 +326,19 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
                 // violates FIFO. The drain-re-block invariant is pinned by
                 // `blocked_action_waiters_reblock_leaves_entry`.
                 break;
+            }
+            Err(DoActionError::WindowNotFound { id }) => {
+                // Terminal error — not a block; advance the drain walk.
+                // A stale id for waiter X does not affect waiters Y, Z: the
+                // registry entry was already removed via `shift_remove`
+                // above, and the walk continues to the next connection
+                // (DD §5.18). Do NOT convert this `continue` to `break` —
+                // that would halt drain for all later waiters after one
+                // unknown-id action.
+                let _ = waiter
+                    .tx
+                    .send_blocking(Err(DoActionError::WindowNotFound { id }));
+                continue;
             }
         }
     }
@@ -592,7 +613,7 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
 
             validate_action(&action)?;
 
-            let (tx, rx) = async_channel::bounded::<Result<(), ActivitySwitchBlock>>(1);
+            let (tx, rx) = async_channel::bounded::<Result<(), DoActionError>>(1);
 
             let action = niri_config::Action::from(action);
             let waiters = ctx.blocked_action_waiters.clone();
@@ -610,7 +631,7 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                         // already executed with no state loss.
                         let _ = tx.send_blocking(Ok(()));
                     }
-                    Err(block) => {
+                    Err(DoActionError::ActivitySwitchBlocked(block)) => {
                         // Park; drain on next refresh preserves Handled ≡ performed.
                         let _ = block;
                         let prev = waiters
@@ -621,6 +642,14 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                             "depth-1 admission must keep the registry empty for conn_id={conn_id:?} at insert_idle execution time",
                         );
                     }
+                    Err(DoActionError::WindowNotFound { id }) => {
+                        // Terminal error (DD §5.18): forward immediately.
+                        // Do NOT insert into `blocked_action_waiters` — a
+                        // registry entry would deadlock the connection,
+                        // since no hard-block condition exists to clear
+                        // and the drain site would never re-dispatch.
+                        let _ = tx.send_blocking(Err(DoActionError::WindowNotFound { id }));
+                    }
                 }
             });
 
@@ -630,8 +659,8 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             // receiver parks here until the drain site wakes it.
             match rx.recv().await {
                 Ok(Ok(())) => Response::Handled,
-                Ok(Err(block)) => {
-                    return Err(format_activity_switch_block_err(block));
+                Ok(Err(err)) => {
+                    return Err(format_do_action_error(err));
                 }
                 Err(err) => {
                     warn!("action dispatch channel closed unexpectedly: {err:?}");
@@ -1647,9 +1676,9 @@ mod tests {
 
     fn make_waiter() -> (
         BlockedWaiter,
-        async_channel::Receiver<Result<(), ActivitySwitchBlock>>,
+        async_channel::Receiver<Result<(), DoActionError>>,
     ) {
-        let (tx, rx) = async_channel::bounded::<Result<(), ActivitySwitchBlock>>(1);
+        let (tx, rx) = async_channel::bounded::<Result<(), DoActionError>>(1);
         (
             BlockedWaiter {
                 action: dummy_action(),

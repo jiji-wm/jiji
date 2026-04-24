@@ -47,7 +47,7 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
-use crate::layout::{ActivateWindow, ActivitySwitchBlock, LayoutElement as _};
+use crate::layout::{ActivateWindow, DoActionError, LayoutElement as _};
 use crate::niri::{CastTarget, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
@@ -679,22 +679,23 @@ impl State {
     /// Silent-drop wrapper over [`Self::do_action_inner`].
     ///
     /// Keybinding-triggered actions (and other internal callers like switch
-    /// events) inherit the DD §5.11 contract: when an activity-switch action
-    /// is hard-blocked, the `Err(ActivitySwitchBlock)` is dropped here on
-    /// purpose — the keypress is discarded, not queued. Callers that can
-    /// surface the `Err` to a client (e.g., the IPC `Request::Action`
-    /// dispatch) call `do_action_inner` directly.
+    /// events) inherit the DD §5.11 / §5.18 contract: both error arms of
+    /// [`DoActionError`] — `ActivitySwitchBlocked` (hard-block) and
+    /// `WindowNotFound` (stale id) — are dropped here on purpose. The
+    /// keypress is discarded, not queued, and no error is surfaced to the
+    /// user. Callers that can surface the `Err` to a client (e.g., the IPC
+    /// `Request::Action` dispatch) call `do_action_inner` directly.
     pub fn do_action(&mut self, action: Action, allow_when_locked: bool) {
         let _ = self.do_action_inner(action, allow_when_locked);
     }
 
-    #[must_use = "hard-block Err must be surfaced to IPC callers or explicitly dropped \
-                  (see do_action wrapper for the §5.11 silent-drop contract)"]
+    #[must_use = "dispatch Err must be surfaced to IPC callers or explicitly dropped \
+                  (see do_action wrapper for the §5.11/§5.18 silent-drop contract)"]
     pub(crate) fn do_action_inner(
         &mut self,
         action: Action,
         allow_when_locked: bool,
-    ) -> Result<(), ActivitySwitchBlock> {
+    ) -> Result<(), DoActionError> {
         if self.niri.is_locked() && !(allow_when_locked || allowed_when_locked(&action)) {
             return Ok(());
         }
@@ -898,24 +899,28 @@ impl State {
                 // are reachable; the visibility fast-path below preserves the
                 // pre-1b behavior for windows already on the active view.
                 //
-                // Missing id stays a silent `Ok(())` no-op — the Err-on-missing
-                // wire contract is deferred (DD §5.18 / Phase 2).
+                // Missing id surfaces `Err(DoActionError::WindowNotFound)` —
+                // the §5.18 wire contract. IPC callers see the envelope
+                // `"window not found: id={id} (DD §5.18)"`; keybinding callers
+                // silent-drop via the `do_action` wrapper.
                 let Some((_oid, mapped)) = self
                     .niri
                     .layout
                     .windows_all()
                     .find(|(_, m)| m.id().get() == id)
                 else {
-                    debug!("focus_window: id={id} not found in pool — deferred Err-on-missing wire contract (DD §5.18)");
-                    return Ok(());
+                    debug!("focus_window: id={id} not found in pool (DD §5.18)");
+                    return Err(DoActionError::WindowNotFound { id });
                 };
                 let window = mapped.window.clone();
                 let hint = mapped.get_last_focused_activity();
 
                 let Some(ws_id) = self.niri.layout.window_ws_and_activity_hint(&window) else {
-                    // Resolved via windows_all but not in the pool — the only
-                    // way this can happen is the interactive-move window, which
-                    // is not owned by any pool workspace. Silent no-op.
+                    // Silent no-op — interactive-move window is not "no longer
+                    // exists"; that branch is handled at the genuinely-unknown-id
+                    // case above. Resolved via windows_all but not in the pool
+                    // means the window is mid-flight and not owned by any pool
+                    // workspace.
                     debug!("focus_window: id={id} resolved via windows_all but not in pool (interactive-move window), no-op");
                     return Ok(());
                 };
@@ -964,7 +969,7 @@ impl State {
                 // `Handled` once the switch performs.
                 if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
                     debug!("focus_window: activity switch hard-blocked by {block:?} (DD §5.11)");
-                    return Err(block);
+                    return Err(block.into());
                 }
 
                 self.niri.layout.switch_activity(target);
@@ -1646,7 +1651,7 @@ impl State {
                 // (see the TODO in ipc/server.rs).
                 if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
                     debug!("switch_activity: hard-blocked by {block:?}, ignoring (DD §5.11)");
-                    return Err(block);
+                    return Err(block.into());
                 }
                 // niri-config holds its own ActivityReference to keep config
                 // types independent of niri-ipc's wire enums; layout's API
@@ -1667,7 +1672,7 @@ impl State {
                         "switch_activity_previous: hard-blocked by {block:?}, ignoring \
                          (DD §5.11)"
                     );
-                    return Err(block);
+                    return Err(block.into());
                 }
                 self.niri.layout.switch_activity_previous();
                 self.maybe_warp_cursor_to_focus();
@@ -1723,7 +1728,7 @@ impl State {
                     debug!(
                         "remove_activity: hard-blocked by {block:?}, ignoring (DD §5.11)"
                     );
-                    return Err(block);
+                    return Err(block.into());
                 }
                 let arg: ActivityReferenceArg = reference.into();
                 match self.niri.layout.remove_activity(&arg) {

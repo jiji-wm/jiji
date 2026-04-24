@@ -5905,6 +5905,74 @@ fn activity_switch_block_err_envelope_matches_wire_contract() {
 }
 
 #[test]
+fn do_action_error_display_matches_wire_contract() {
+    // Pins the `Display` tokens for `DoActionError`. The full envelope is
+    // assembled by `format_do_action_error` and pinned by
+    // `do_action_error_envelope_matches_wire_contract` below; the serde
+    // roundtrip `reply_err_format_for_window_not_found` in `niri-ipc` pins
+    // the wire JSON. A change to any token without updating all three
+    // layers will be caught here.
+    use super::{ActivitySwitchBlock, DoActionError};
+    // Delegated tokens — must match the `ActivitySwitchBlock::Display` strings
+    // exactly (byte-identity is load-bearing for the §5.11 envelope).
+    assert_eq!(
+        format!("{}", DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::InteractiveMove)),
+        "interactive window move",
+    );
+    assert_eq!(
+        format!("{}", DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::Dnd)),
+        "drag and drop",
+    );
+    assert_eq!(
+        format!("{}", DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::WorkspaceSwitchGesture)),
+        "workspace switch gesture",
+    );
+    // New token for the §5.18 wire contract.
+    assert_eq!(
+        format!("{}", DoActionError::WindowNotFound { id: 42 }),
+        "window not found: id=42",
+    );
+}
+
+#[test]
+fn do_action_error_envelope_matches_wire_contract() {
+    // Pins the full IPC wire envelopes produced by `format_do_action_error`.
+    //
+    // The `ActivitySwitchBlocked` cases re-assert the three §5.11 envelopes
+    // already pinned by `activity_switch_block_err_envelope_matches_wire_contract`
+    // — this is a deliberate regression guard against byte-identity drift if
+    // `format_do_action_error` ever stops delegating to
+    // `format_activity_switch_block_err`.
+    //
+    // The `WindowNotFound` case pins the new DD §5.18 envelope.
+    use super::{format_do_action_error, ActivitySwitchBlock, DoActionError};
+    for (err, expected) in [
+        (
+            DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::InteractiveMove),
+            "activity switch blocked: interactive window move (DD §5.11)",
+        ),
+        (
+            DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::Dnd),
+            "activity switch blocked: drag and drop (DD §5.11)",
+        ),
+        (
+            DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::WorkspaceSwitchGesture),
+            "activity switch blocked: workspace switch gesture (DD §5.11)",
+        ),
+        (
+            DoActionError::WindowNotFound { id: 42 },
+            "window not found: id=42 (DD §5.18)",
+        ),
+        (
+            DoActionError::WindowNotFound { id: 0 },
+            "window not found: id=0 (DD §5.18)",
+        ),
+    ] {
+        assert_eq!(format_do_action_error(err), expected);
+    }
+}
+
+#[test]
 fn resolve_activity_ref_by_id_and_name() {
     let layout = Layout::<TestWindow>::default();
     let seed_id = layout.active_activity_id();

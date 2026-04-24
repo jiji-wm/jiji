@@ -2745,4 +2745,40 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn reply_err_format_for_window_not_found() {
+        // Roundtrips the DD §5.18 `FocusWindow` "window no longer exists"
+        // wire envelope through serde to pin its JSON representation. The
+        // exact prefix "window not found: id=" and the DD section suffix
+        // "(DD §5.18)" are the observable IPC contract.
+        //
+        // The envelope is assembled by `format_do_action_error` in
+        // `niri/src/layout/mod.rs` and pinned by
+        // `do_action_error_envelope_matches_wire_contract` there; the
+        // `Display` tokens are pinned by
+        // `do_action_error_display_matches_wire_contract`. A regression to
+        // any of the three layers will fail this test or one of its
+        // compositor-side siblings.
+        for (msg, expected_json) in [
+            (
+                "window not found: id=0 (DD §5.18)",
+                r#"{"Err":"window not found: id=0 (DD §5.18)"}"#,
+            ),
+            (
+                "window not found: id=42 (DD §5.18)",
+                r#"{"Err":"window not found: id=42 (DD §5.18)"}"#,
+            ),
+        ] {
+            let reply: Reply = Err(msg.to_owned());
+            let json = serde_json::to_string(&reply).expect("serialize Reply::Err");
+            assert_eq!(json, expected_json);
+            let parsed: Reply =
+                serde_json::from_str(&json).expect("deserialize Reply::Err");
+            match parsed {
+                Err(parsed_msg) => assert_eq!(parsed_msg, msg),
+                Ok(_) => panic!("expected Reply::Err variant"),
+            }
+        }
+    }
 }

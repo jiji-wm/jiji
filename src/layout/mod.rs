@@ -518,6 +518,83 @@ pub(crate) fn format_activity_switch_block_err(block: ActivitySwitchBlock) -> St
     format!("activity switch blocked: {block} (DD §5.11)")
 }
 
+/// Error type returned by [`State::do_action_inner`] for actions that can fail
+/// with either an activity-switch hard-block or a missing window id.
+///
+/// Wraps [`ActivitySwitchBlock`] (the DD §5.11 hard-block reasons) and adds
+/// [`DoActionError::WindowNotFound`] for the DD §5.18 `Action::FocusWindow`
+/// "window no longer exists" wire contract. Kept `pub(crate)` because it is
+/// an internal dispatch error — the IPC surface flattens it to a
+/// `Reply::Err(String)` envelope via [`format_do_action_error`].
+///
+/// The `Display` tokens and envelope format are part of the stable observable
+/// IPC wire contract and are pinned by three layered tests:
+///
+/// - `do_action_error_display_matches_wire_contract` in `src/layout/tests.rs`
+///   — pins each variant's `Display` token.
+/// - `do_action_error_envelope_matches_wire_contract` in `src/layout/tests.rs`
+///   — pins the full envelope string assembled by [`format_do_action_error`],
+///   including byte-identity with the existing §5.11 `ActivitySwitchBlocked`
+///   envelopes.
+/// - `reply_err_format_for_window_not_found` in `niri-ipc` — roundtrips the
+///   wire envelope through `Reply::Err` JSON.
+///
+/// Any change to the token strings, the envelope wording, or the DD section
+/// reference must update all three pin sites together.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DoActionError {
+    /// A DD §5.11 hard-block (interactive move, DnD, or workspace-switch
+    /// gesture) prevented an activity switch. The IPC dispatch path parks
+    /// this error on the per-connection queue and re-dispatches on drain.
+    ActivitySwitchBlocked(ActivitySwitchBlock),
+    /// DD §5.18: `Action::FocusWindow { id }` was dispatched with an id that
+    /// does not resolve to any pool-owned window. Terminal error — the
+    /// waiter is signalled immediately, never parked.
+    WindowNotFound { id: u64 },
+}
+
+impl From<ActivitySwitchBlock> for DoActionError {
+    fn from(block: ActivitySwitchBlock) -> Self {
+        Self::ActivitySwitchBlocked(block)
+    }
+}
+
+impl fmt::Display for DoActionError {
+    /// Stable human-readable token for each error variant.
+    ///
+    /// These strings are part of the observable IPC wire contract. The full
+    /// envelope is assembled by [`format_do_action_error`]; the tokens are
+    /// pinned by `do_action_error_display_matches_wire_contract` in
+    /// `src/layout/tests.rs` and the envelope is pinned by
+    /// `do_action_error_envelope_matches_wire_contract` there and by the
+    /// serde roundtrip `reply_err_format_for_window_not_found` in `niri-ipc`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ActivitySwitchBlocked(block) => write!(f, "{block}"),
+            Self::WindowNotFound { id } => write!(f, "window not found: id={id}"),
+        }
+    }
+}
+
+/// Assemble the full IPC wire error string for a [`DoActionError`].
+///
+/// Parallels [`format_activity_switch_block_err`]. For the
+/// `ActivitySwitchBlocked` variant this function delegates to
+/// [`format_activity_switch_block_err`] so the §5.11 envelope is produced
+/// byte-identical to the pre-1b wire contract — IPC clients that
+/// pattern-match `"activity switch blocked: ..."` continue to work. For
+/// `WindowNotFound` the envelope is `"window not found: id={id} (DD §5.18)"`.
+///
+/// Both `ipc/server.rs` and the `do_action_error_envelope_matches_wire_contract`
+/// pin test call this function, so any regression to the format strings fails
+/// the test before reaching the wire.
+pub(crate) fn format_do_action_error(err: DoActionError) -> String {
+    match err {
+        DoActionError::ActivitySwitchBlocked(block) => format_activity_switch_block_err(block),
+        DoActionError::WindowNotFound { .. } => format!("{err} (DD §5.18)"),
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum InteractiveMoveState<W: LayoutElement> {
