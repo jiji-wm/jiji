@@ -5439,6 +5439,158 @@ impl<W: LayoutElement> Layout<W> {
         resolve_workspace_activities_for(&self.activities, ws_config)
     }
 
+    /// Additive half of the config-reload activity reconciliation (DD §5.15).
+    ///
+    /// For each entry in `config_activities`, in declaration order:
+    /// - If an existing activity resolves case-insensitively against `name`,
+    ///   keep its id (and every workspace's `activities` set referencing it),
+    ///   and flip its `is_config_declared` flag to `true` if it was runtime.
+    ///   The stored name is NOT updated to the config casing — runtime
+    ///   spelling is preserved per DD §5.15 bullet 1.
+    /// - Otherwise, mint a fresh config-declared activity with the given
+    ///   name and append it to the pool.
+    ///
+    /// After the per-entry walk, the pool is reordered so config-declared
+    /// activities occupy positions `[0, N)` in config-declaration order;
+    /// runtime-only activities (those not named in `config_activities`) fall
+    /// to the trailer in their current relative order (AD6 display-order
+    /// semantics).
+    ///
+    /// Sticky workspaces (whose `activities` set must equal every live
+    /// activity id) are re-expanded to the full post-reconcile id set, in
+    /// case newly-added config activities grew the universe.
+    ///
+    /// Workspaces whose `name` matches a `config_workspaces` entry have their
+    /// `activities` set overwritten with
+    /// [`resolve_workspace_activities_for`]'s result — a config-declared
+    /// workspace's activity assignment is always authoritative on reload
+    /// (DD §5.15 "Workspace-activity assignments on reload"). Sticky
+    /// workspaces are skipped (already handled above). Dynamic (unnamed /
+    /// non-config) workspaces keep their runtime assignments.
+    ///
+    /// This covers the additive / same-name-preserving half of DD §5.15.
+    /// Removal-side rules (exclusive-workspace rejection of activities that
+    /// disappear from config, active-cursor cascade when the active activity
+    /// is removed, and destruction of empty exclusive workspaces) are handled
+    /// by a separate entry point on `Layout` keyed off the same DD section.
+    ///
+    /// The active / previous activity cursors are not touched here.
+    ///
+    /// **Preconditions:** callers must have already cleared the name off any
+    /// workspace whose name is not present in `config_workspaces`; see
+    /// `State::reload_config` for the prewalk that does this. In debug builds
+    /// this precondition is enforced via debug-assert. In release builds,
+    /// named workspaces absent from `config_workspaces` are silently skipped —
+    /// the caller contract is the only safeguard.
+    ///
+    /// This must be called *before* [`Self::update_config`] so that
+    /// [`Self::ensure_named_workspace`] (which consults the post-reload
+    /// pool via [`Self::resolve_workspace_activities`]) sees the reconciled
+    /// activities.
+    ///
+    /// In debug builds, runs [`Self::verify_invariants`] at the tail so
+    /// callers need not re-check.
+    pub(crate) fn reconcile_activities_on_reload_add(
+        &mut self,
+        config_activities: &[niri_config::Activity],
+        config_workspaces: &[niri_config::Workspace],
+    ) {
+        // Precondition: every named non-sticky workspace's name must appear in
+        // config_workspaces. The caller (State::reload_config) must have run
+        // the unname_workspace prewalk before calling this function. Enforce in
+        // debug builds so a future caller omitting the prewalk is caught early.
+        #[cfg(debug_assertions)]
+        {
+            let config_ws_names: HashSet<&str> =
+                config_workspaces.iter().map(|w| w.name.0.as_str()).collect();
+            for ws in self.workspaces.values() {
+                if ws.is_sticky() {
+                    continue;
+                }
+                if let Some(name) = ws.name() {
+                    debug_assert!(
+                        config_ws_names.contains(name.as_str()),
+                        "reconcile_activities_on_reload_add: workspace {:?} still named {:?} \
+                         but {:?} is absent from config_workspaces — caller must run the \
+                         unname_workspace prewalk in State::reload_config first",
+                        ws.id(),
+                        name,
+                        name,
+                    );
+                }
+            }
+        }
+
+        // Step 1: walk config activities in declaration order, resolve each
+        // against the live pool, promoting on-match or appending on-miss.
+        // `resolve_config_names` returns at most one match per name because
+        // `ActivityNameSet` at parse time guarantees config names are unique.
+        let mut config_declared_ids: Vec<ActivityId> =
+            Vec::with_capacity(config_activities.len());
+        for entry in config_activities {
+            let name = entry.name.0.clone();
+            // _unknown is intentionally discarded here: names not matched by
+            // any live activity are minted below via `add_config_declared`.
+            let (resolved, _unknown) = self
+                .activities
+                .resolve_config_names(std::slice::from_ref(&name));
+            if let Some(id) = resolved.into_iter().next() {
+                let needs_promotion = !self
+                    .activities
+                    .get(id)
+                    .expect("resolved id must be a live key")
+                    .is_config_declared();
+                if needs_promotion {
+                    self.activities.promote_to_config_declared(id);
+                }
+                config_declared_ids.push(id);
+            } else {
+                let new_id = self.activities.add_config_declared(name);
+                config_declared_ids.push(new_id);
+            }
+        }
+
+        // Step 2: reorder to match config declaration order; runtime-only
+        // activities follow after the prefix in their current relative order.
+        self.activities
+            .reorder_to_match_config(&config_declared_ids);
+
+        // Step 3: sticky re-expansion — snapshot the live id universe before
+        // the mutating walk so the borrow on `self.activities` is released
+        // while we mutate `self.workspaces`.
+        let all_ids: HashSet<ActivityId> =
+            self.activities.iter().map(|a| a.id()).collect();
+        for ws in self.workspaces.values_mut() {
+            if ws.is_sticky() {
+                ws.activities = all_ids.clone();
+            }
+        }
+
+        // Step 4: reset config-declared workspaces' `activities` sets.
+        // Pre-collect (ws_id, new_set) pairs so the shared borrow of
+        // `self.activities` is released before the mutating second walk.
+        let mut resets: Vec<(WorkspaceId, HashSet<ActivityId>)> = Vec::new();
+        for ws in self.workspaces.values() {
+            if ws.is_sticky() {
+                continue;
+            }
+            let Some(name) = ws.name() else { continue };
+            if let Some(ws_config) = config_workspaces.iter().find(|w| w.name.0 == *name) {
+                let new_set = resolve_workspace_activities_for(&self.activities, ws_config);
+                resets.push((ws.id(), new_set));
+            }
+        }
+        for (id, set) in resets {
+            self.workspaces
+                .get_mut(&id)
+                .expect("id came from values() above — still live")
+                .activities = set;
+        }
+
+        #[cfg(debug_assertions)]
+        self.verify_invariants();
+    }
+
     pub fn ensure_named_workspace(&mut self, ws_config: &WorkspaceConfig) {
         if self.find_workspace_by_name(&ws_config.name.0).is_some() {
             return;

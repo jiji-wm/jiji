@@ -654,6 +654,130 @@ impl Activities {
         );
     }
 
+    /// Append a fresh config-declared [`Activity`] with `name` to the pool,
+    /// returning the new id.
+    ///
+    /// No validation: callers (`Layout::reconcile_activities_on_reload_add`)
+    /// have already resolved the name against the existing pool via
+    /// [`Self::resolve_config_names`] and confirmed it is unknown. Parse-time
+    /// `ActivityNameSet` is the primary defense against collisions among
+    /// config-declared names; this method adds a debug-assert as secondary
+    /// defense.
+    ///
+    /// The new activity carries `is_config_declared == true`, an empty
+    /// `views` map, and has no effect on the pool's `active` / `previous`
+    /// cursors — the reload cursor cascade is performed by the removal-side
+    /// reload entry point (DD §5.15).
+    ///
+    /// Panics (debug only) if any existing activity's name matches `name`
+    /// case-insensitively.
+    pub(super) fn add_config_declared(&mut self, name: String) -> ActivityId {
+        debug_assert!(
+            !self
+                .map
+                .values()
+                .any(|a| a.name().eq_ignore_ascii_case(&name)),
+            "add_config_declared: name {name:?} collides with an existing activity; \
+             caller must resolve first",
+        );
+        let activity = Activity::new_config_declared(name);
+        let id = activity.id();
+        self.insert(activity);
+        id
+    }
+
+    /// Flip `is_config_declared` to `true` on the activity identified by `id`.
+    ///
+    /// Used by the config-reload path when an existing runtime activity's
+    /// name matches a newly-declared config activity: its id, stored name
+    /// (with its runtime casing — NOT overwritten with the config entry's
+    /// spelling), per-output `views`, and every workspace's `activities` set
+    /// referencing it are preserved unchanged (DD §5.15 bullet 1). Only the
+    /// config-declared flag flips.
+    ///
+    /// Panics (debug only) if `id` is not a live key in the pool — caller
+    /// must resolve before calling.
+    pub(super) fn promote_to_config_declared(&mut self, id: ActivityId) {
+        debug_assert!(
+            self.map.contains_key(&id),
+            "promote_to_config_declared: id {id:?} is not a live key in the map",
+        );
+        self.map
+            .get_mut(&id)
+            .expect("id must be a live key in the map — caller must resolve before promote")
+            .is_config_declared = true;
+    }
+
+    /// Reorder the pool so ids in `config_order` occupy positions `[0, N)`
+    /// in the given order, preserving the relative order of any activity not
+    /// in `config_order` after the prefix.
+    ///
+    /// **Precondition (caller regime):** every id in `config_order` must
+    /// already sit at or after its target position in the map — i.e.
+    /// `old_pos >= target_pos` for each entry. This is satisfied by the
+    /// additive reload path, which walks config entries in order and places
+    /// each at a monotonically advancing target; a different caller that can
+    /// move entries *forward* must not reuse this method without analysis.
+    ///
+    /// Under that precondition, after `move_index(old, i)` the entry at `old`
+    /// is relocated to position `i` and entries in `[i, old)` shift right by
+    /// one (no other relative order is disturbed). Walking `config_order` with
+    /// an incrementing target position `i = 0..config_order.len()` therefore
+    /// yields the desired `[prefix, trailer]` layout.
+    ///
+    /// Debug-asserts every id in `config_order` is a live, config-declared
+    /// key listed exactly once, and that `config_order` covers all
+    /// config-declared activities.
+    pub(super) fn reorder_to_match_config(&mut self, config_order: &[ActivityId]) {
+        // Uniqueness and presence checks run in all builds (not just debug)
+        // because a duplicate id would cause move_index to silently relocate
+        // the same entry twice and corrupt the order. N ≤ activity count,
+        // so the O(N) cost is negligible.
+        let mut seen: HashSet<ActivityId> = HashSet::with_capacity(config_order.len());
+        for id in config_order {
+            assert!(
+                self.map.contains_key(id),
+                "reorder_to_match_config: id {id:?} is not a live key in the map",
+            );
+            assert!(
+                seen.insert(*id),
+                "reorder_to_match_config: id {id:?} listed more than once",
+            );
+        }
+
+        // Additional invariant assertions that are only cheap enough in debug.
+        #[cfg(debug_assertions)]
+        {
+            for id in config_order {
+                let a = self.map.get(id).unwrap();
+                assert!(
+                    a.is_config_declared(),
+                    "reorder_to_match_config: id {id:?} is not config-declared",
+                );
+            }
+            // config_order must list every config-declared activity exactly once
+            // so that no config-declared activity is left in the trailer.
+            let config_declared_count = self.map.values().filter(|a| a.is_config_declared()).count();
+            assert_eq!(
+                config_order.len(),
+                config_declared_count,
+                "reorder_to_match_config: config_order has {} ids but {} config-declared activities exist",
+                config_order.len(),
+                config_declared_count,
+            );
+        }
+
+        for (target_pos, id) in config_order.iter().enumerate() {
+            let old_pos = self
+                .map
+                .get_index_of(id)
+                .expect("id must be live — confirmed by the uniqueness/presence walk above");
+            if old_pos != target_pos {
+                self.map.move_index(old_pos, target_pos);
+            }
+        }
+    }
+
     /// Remove the activity identified by `id` from the pool, returning the
     /// extracted [`Activity`].
     ///

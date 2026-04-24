@@ -9210,15 +9210,10 @@ fn switch_activity_dormant_view_survives_output_disconnect_and_reconnect() {
     layout.activities.insert(beta);
 
     // Switch to beta and populate its view on output1 with a non-bookend active workspace.
-    // After switch_activity, beta has view=[fresh_ws, active=0] (single entry).
     layout.switch_activity(beta_id);
     layout.verify_invariants();
 
-    // Move active to a middle position: add a window (stays on fresh_ws), then
-    // FocusWorkspaceDown (view=[fresh_ws, new_empty], active=1), then add a window to new_empty
-    // (so it becomes non-empty and persists), then FocusWorkspaceDown again
-    // (view=[fresh_ws, mid_ws, bottom_empty], active=2), then FocusWorkspaceUp
-    // (active=1 = middle = non-bookend).
+    // Move active to a middle position so the restore assertion has teeth.
     layout.add_window(
         TestWindow::new(TestWindowParams::new(10)),
         AddWindowTarget::Auto,
@@ -9456,7 +9451,7 @@ fn setup_two_activities_with_move_workspaces_test(
         ActivateWindow::default(),
     );
     layout.verify_invariants();
-    layout.switch_workspace_down(); // active → ws_b (pos 1); ws_a has window
+    layout.switch_workspace_down();
     layout.verify_invariants();
     layout.add_window(
         TestWindow::new(TestWindowParams::new(21)),
@@ -9468,9 +9463,8 @@ fn setup_two_activities_with_move_workspaces_test(
         ActivateWindow::default(),
     );
     layout.verify_invariants();
-    layout.switch_workspace_down(); // active → ws_c (pos 2); ws_b has window
+    layout.switch_workspace_down();
     layout.verify_invariants();
-    // Now view is [ws_a, ws_b, ws_c(bottom_empty)], active=ws_c (pos 2).
     // Focus up to land at middle position (pos 1 = ws_b).
     layout.switch_workspace_up();
     layout.verify_invariants();
@@ -9498,7 +9492,7 @@ fn move_workspace_down_operates_only_on_active_activity_view() {
     //
     // Anti-triviality: we assert beta's active view.active workspace id changed (the move
     // happened) before checking seed's dormant view is untouched.
-    let (mut layout, seed_id, beta_id, out1, seed_ids_before, seed_active_before) =
+    let (mut layout, seed_id, _beta_id, out1, seed_ids_before, seed_active_before) =
         setup_two_activities_with_move_workspaces_test();
 
     // Snapshot beta's full ids order before the call.
@@ -9537,8 +9531,6 @@ fn move_workspace_down_operates_only_on_active_activity_view() {
         seed_active_before,
         "move_workspace_down must not mutate seed's dormant active workspace id for output1",
     );
-    // Also verify beta's dormant-less (still active) view hasn't touched seed's ids.
-    let _ = beta_id; // consumed by verify only; keep binding for clarity
 }
 
 #[test]
@@ -9546,7 +9538,7 @@ fn move_workspace_up_operates_only_on_active_activity_view() {
     // Symmetric to move_workspace_down_operates_only_on_active_activity_view.
     // move_workspace_up also routes through monitors_pool_view_mut, scoping to the active
     // (beta's) view exclusively. Seed's dormant view must be untouched.
-    let (mut layout, seed_id, beta_id, out1, seed_ids_before, seed_active_before) =
+    let (mut layout, seed_id, _beta_id, out1, seed_ids_before, seed_active_before) =
         setup_two_activities_with_move_workspaces_test();
 
     // Snapshot beta's full ids order before the call.
@@ -9592,14 +9584,13 @@ fn move_workspace_up_operates_only_on_active_activity_view() {
         seed_active_before,
         "move_workspace_up must not mutate seed's dormant active workspace id for output1",
     );
-    let _ = beta_id;
 }
 
 #[test]
 fn move_workspace_to_idx_operates_only_on_active_activity_view() {
     // move_workspace_to_idx (the third _on leaf) also routes through monitors_pool_view_mut
     // → active activity's view only. Seed's dormant view for output1 must be unchanged.
-    let (mut layout, seed_id, beta_id, out1, seed_ids_before, seed_active_before) =
+    let (mut layout, seed_id, _beta_id, out1, seed_ids_before, seed_active_before) =
         setup_two_activities_with_move_workspaces_test();
 
     let beta_active_pos_before = layout.active_view(&out1).active_position();
@@ -9614,9 +9605,7 @@ fn move_workspace_to_idx_operates_only_on_active_activity_view() {
     layout.move_workspace_to_idx(None, target_idx);
     layout.verify_invariants();
 
-    // Teeth check: move_workspace_to_idx must have changed the active workspace's position.
-    // Because the workspace moved to position 0, its id is now at position 0 in ids().
-    // view.active stays the same id but the ids() order changes.
+    // Teeth: active position changes; focused id stays.
     let beta_view_after = layout.active_view(&out1);
     let beta_active_after_pos = beta_view_after.active_position();
     assert_eq!(
@@ -9649,5 +9638,609 @@ fn move_workspace_to_idx_operates_only_on_active_activity_view() {
         seed_active_before,
         "move_workspace_to_idx must not mutate seed's dormant active workspace id for output1",
     );
-    let _ = beta_id;
+}
+
+// --- Config-reload activity reconciliation (Phase 1b Part 1 / DD §5.15) ---
+//
+// These tests exercise `Layout::reconcile_activities_on_reload_add` — the
+// additive / same-name-preserving half of the reload reconciliation.
+// Removals / exclusive-workspace rejection / active-cursor cascade are
+// covered by Part 2.
+
+#[test]
+fn reload_adds_new_config_activity_appends_and_promotes_runtime_name_match() {
+    // Seed pool: runtime "Default". Reload config declares `[Work, Default]`.
+    // Expected post-reconcile:
+    // - "Work" is a fresh config-declared id, position 0.
+    // - "Default" keeps its id but flips to `is_config_declared == true`,
+    //   position 1 (config-declaration order).
+    let mut layout = Layout::<TestWindow>::default();
+    let default_id = layout.active_activity_id();
+    assert!(
+        !layout
+            .activities
+            .get(default_id)
+            .expect("seed must exist")
+            .is_config_declared(),
+        "precondition: default seed is runtime",
+    );
+
+    let cfg = [
+        niri_config::Activity {
+            name: niri_config::ActivityName("Work".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg, &[]);
+
+    let names_in_order: Vec<&str> = layout.activities.iter().map(|a| a.name()).collect();
+    assert_eq!(
+        names_in_order,
+        vec!["Work", "Default"],
+        "pool must be ordered by config declaration",
+    );
+    assert_eq!(layout.activities.len(), 2);
+
+    // The runtime "Default" id is preserved and promoted.
+    let promoted = layout
+        .activities
+        .get(default_id)
+        .expect("default must still be in pool with original id");
+    assert_eq!(promoted.name(), "Default");
+    assert!(
+        promoted.is_config_declared(),
+        "matching config name must promote existing runtime activity",
+    );
+
+    // "Work" is a fresh id distinct from `default_id`.
+    let work = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Work")
+        .expect("Work must be appended");
+    assert_ne!(work.id(), default_id, "Work must be freshly minted");
+    assert!(work.is_config_declared());
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reload_adds_new_config_activity_preserves_views_and_assignments_on_promotion() {
+    // A runtime "Work" carrying a `views` entry and a workspace whose
+    // `activities` set includes its id. Reload declares `activity "Work"`.
+    // Expected: id preserved, views preserved, workspace set preserved.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+
+    // Create a runtime activity "Work" and switch to it so it populates a
+    // per-output view on the connected monitor.
+    let work_id = layout
+        .create_activity("Work".to_owned())
+        .expect("create must succeed");
+    layout.switch_activity(work_id);
+    // Switch back to seed so that the reload flow does not have to juggle
+    // the active cursor; the test only pins views/assignments.
+    layout.switch_activity(seed_id);
+
+    // Snapshot views and workspace sets referencing `work_id` before reload.
+    let work_views_before: HashMap<OutputId, (Vec<WorkspaceId>, WorkspaceId, Option<WorkspaceId>)> =
+        layout
+            .activities
+            .get(work_id)
+            .expect("work must exist")
+            .views()
+            .iter()
+            .map(|(out, v)| (out.clone(), (v.ids().to_vec(), v.active(), v.previous())))
+            .collect();
+    // Precondition: `Work` must hold at least one dormant view before the
+    // reload, otherwise the later "views preserved across promotion" assert
+    // degenerates into comparing two empty maps and stops catching
+    // regressions.
+    assert!(
+        !work_views_before.is_empty(),
+        "precondition: Work has a populated views map from the switch",
+    );
+
+    // Stamp a workspace so its `activities` set includes `work_id`. The
+    // workspace is unnamed (dynamic), so the reload's workspace-reset step
+    // will leave it alone.
+    let dyn_ws_id: WorkspaceId = *layout
+        .workspaces
+        .iter()
+        .find(|(_, ws)| ws.name().is_none())
+        .expect("at least one dynamic workspace present")
+        .0;
+    layout
+        .workspaces
+        .get_mut(&dyn_ws_id)
+        .unwrap()
+        .activities
+        .insert(work_id);
+    let dyn_set_before = layout
+        .workspaces
+        .get(&dyn_ws_id)
+        .unwrap()
+        .activities()
+        .clone();
+
+    // Simulate the State::reload_config prewalk: clear the name off any
+    // workspace whose name is absent from config_workspaces. "ws1" is not in
+    // the config below, so it must be unnamed first — the debug-assert inside
+    // reconcile_activities_on_reload_add enforces this precondition.
+    layout.unname_workspace("ws1");
+
+    let cfg = [niri_config::Activity {
+        name: niri_config::ActivityName("Work".to_owned()),
+    }];
+    layout.reconcile_activities_on_reload_add(&cfg, &[]);
+
+    // Id preserved.
+    let work = layout
+        .activities
+        .get(work_id)
+        .expect("work id must be preserved across promotion");
+    assert_eq!(work.name(), "Work");
+    assert!(work.is_config_declared());
+
+    // Views preserved.
+    let work_views_after: HashMap<OutputId, (Vec<WorkspaceId>, WorkspaceId, Option<WorkspaceId>)> =
+        work.views()
+            .iter()
+            .map(|(out, v)| (out.clone(), (v.ids().to_vec(), v.active(), v.previous())))
+            .collect();
+    assert_eq!(
+        work_views_after, work_views_before,
+        "promotion must not touch views",
+    );
+
+    // Workspace set preserved on the dynamic (unnamed) workspace.
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&dyn_ws_id)
+            .unwrap()
+            .activities(),
+        &dyn_set_before,
+        "dynamic workspace activities set must be preserved on promotion",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reload_reorders_to_match_config_declaration_order() {
+    // Seed pool by creating runtime activities. Initial order: [Default, A, B, C].
+    // Reload config names [C, B, A] → post-reorder the config-declared prefix is
+    // [C, B, A], runtime-only "Default" falls to the trailer.
+    let mut layout = Layout::<TestWindow>::default();
+    let default_id = layout.active_activity_id();
+    let a_id = layout
+        .create_activity("A".to_owned())
+        .expect("create A must succeed");
+    let b_id = layout
+        .create_activity("B".to_owned())
+        .expect("create B must succeed");
+    let c_id = layout
+        .create_activity("C".to_owned())
+        .expect("create C must succeed");
+    // Sanity precondition on order.
+    let order_before: Vec<ActivityId> = layout.activities.iter().map(|a| a.id()).collect();
+    assert_eq!(order_before, vec![default_id, a_id, b_id, c_id]);
+
+    let active_before = layout.active_activity_id();
+    let previous_before = layout.activities.previous_id();
+
+    let cfg = [
+        niri_config::Activity {
+            name: niri_config::ActivityName("C".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("B".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("A".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg, &[]);
+
+    let names: Vec<&str> = layout.activities.iter().map(|a| a.name()).collect();
+    assert_eq!(
+        names,
+        vec!["C", "B", "A", "Default"],
+        "config-declared prefix must be in config order; runtime 'Default' trails",
+    );
+    assert_eq!(
+        layout.active_activity_id(),
+        active_before,
+        "reorder must not flip the active cursor",
+    );
+    assert_eq!(
+        layout.activities.previous_id(),
+        previous_before,
+        "reorder must not touch the previous cursor",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reload_preserves_active_and_previous_cursors_across_reorder() {
+    // Same seed topology as test 3, but with `active = B, previous = A`
+    // established before reload. Reload config `[C, B, A]` must preserve
+    // both cursors.
+    let mut layout = Layout::<TestWindow>::default();
+    let _default_id = layout.active_activity_id();
+    let a_id = layout
+        .create_activity("A".to_owned())
+        .expect("create A must succeed");
+    let b_id = layout
+        .create_activity("B".to_owned())
+        .expect("create B must succeed");
+    let _c_id = layout
+        .create_activity("C".to_owned())
+        .expect("create C must succeed");
+    // Establish active=B, previous=A: switch to A first, then to B.
+    layout.switch_activity(a_id);
+    layout.switch_activity(b_id);
+    assert_eq!(layout.active_activity_id(), b_id);
+    assert_eq!(layout.activities.previous_id(), Some(a_id));
+
+    let cfg = [
+        niri_config::Activity {
+            name: niri_config::ActivityName("C".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("B".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("A".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg, &[]);
+
+    assert_eq!(
+        layout.active_activity_id(),
+        b_id,
+        "reorder must preserve active_id across the move",
+    );
+    assert_eq!(
+        layout.activities.previous_id(),
+        Some(a_id),
+        "reorder must preserve previous_id across the move",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reload_sticky_workspace_reexpands_activities_set_to_all_current() {
+    // Pool starts with runtime "Default" and a sticky workspace whose
+    // `activities` set was narrowed to `{Default}` (inconsistent with sticky
+    // semantics, but we construct that by hand to pin the re-expansion
+    // behavior). Reload adds config-declared `Work`. Sticky set must expand
+    // to `{Default, Work}`.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let default_id = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    // Flip the output-bound named workspace sticky and narrow its activities.
+    let sticky_id = {
+        let sticky_id = layout
+            .workspaces
+            .values()
+            .find(|ws| ws.output_id() == Some(&mon_out) && ws.name().is_some())
+            .expect("at least one named workspace bound to the output")
+            .id();
+        let sticky = layout
+            .workspaces
+            .get_mut(&sticky_id)
+            .expect("sticky candidate must be in the pool");
+        sticky.is_sticky = true;
+        sticky.activities = HashSet::from([default_id]);
+        sticky_id
+    };
+
+    let cfg = [niri_config::Activity {
+        name: niri_config::ActivityName("Work".to_owned()),
+    }];
+    layout.reconcile_activities_on_reload_add(&cfg, &[]);
+
+    let work_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Work")
+        .expect("Work must be appended")
+        .id();
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&sticky_id)
+            .expect("sticky ws still in pool")
+            .activities(),
+        &HashSet::from([default_id, work_id]),
+        "sticky workspace must be re-expanded to the full post-reload id universe",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reload_config_workspace_activities_reset_to_declared_values() {
+    // Pool: runtime "Default" + runtime "Work" (via create_activity). A named
+    // workspace "home" whose runtime activities set is `{Default, Work}`.
+    // Reload declares `activity "Default"`, `activity "Work"`, and
+    // `workspace "home" { activity "Work"; }` → home's activities must reset
+    // to `{Work}`.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 7,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let default_id = layout.active_activity_id();
+    let work_id = layout
+        .create_activity("Work".to_owned())
+        .expect("create must succeed");
+
+    // Find the named workspace and stamp it with both ids.
+    let home_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name().is_some())
+        .expect("at least one named workspace")
+        .id();
+    let home_name = layout
+        .workspaces
+        .get(&home_id)
+        .unwrap()
+        .name()
+        .cloned()
+        .expect("named workspace has a name");
+    layout
+        .workspaces
+        .get_mut(&home_id)
+        .unwrap()
+        .activities = HashSet::from([default_id, work_id]);
+
+    let cfg_activities = [
+        niri_config::Activity {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Work".to_owned()),
+        },
+    ];
+    let cfg_workspaces = [WorkspaceConfig {
+        name: WorkspaceName(home_name),
+        open_on_output: None,
+        layout: None,
+        activities: vec!["Work".to_owned()],
+        sticky: None,
+    }];
+    layout.reconcile_activities_on_reload_add(&cfg_activities, &cfg_workspaces);
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&home_id)
+            .expect("home ws still in pool")
+            .activities(),
+        &HashSet::from([work_id]),
+        "config-declared workspace must have its activities set reset to config value",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reload_dynamic_workspace_keeps_runtime_activity_assignments() {
+    // Pool: Default + Work. A dynamic (unnamed) workspace whose activities
+    // set is `{Default, Work}`. Reload adds `Personal`. The dynamic
+    // workspace's activities set must NOT change (not a config-declared
+    // workspace, not sticky).
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let default_id = layout.active_activity_id();
+    let work_id = layout
+        .create_activity("Work".to_owned())
+        .expect("create must succeed");
+
+    let dyn_ws_id = *layout
+        .workspaces
+        .iter()
+        .find(|(_, ws)| ws.name().is_none())
+        .expect("at least one dynamic workspace present")
+        .0;
+    layout
+        .workspaces
+        .get_mut(&dyn_ws_id)
+        .unwrap()
+        .activities = HashSet::from([default_id, work_id]);
+    let before = layout
+        .workspaces
+        .get(&dyn_ws_id)
+        .unwrap()
+        .activities()
+        .clone();
+
+    let cfg_activities = [
+        niri_config::Activity {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Work".to_owned()),
+        },
+        niri_config::Activity {
+            name: niri_config::ActivityName("Personal".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_activities, &[]);
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&dyn_ws_id)
+            .unwrap()
+            .activities(),
+        &before,
+        "dynamic workspace activities must be untouched on reload",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reload_no_change_is_semantically_noop_on_activities_and_workspaces() {
+    // Build a layout from a config `C`, record all observable state, then
+    // call reconcile with the same `C`. Activities list (id/name/flag) and
+    // workspace state must be unchanged, and invariants must hold.
+    let config = Config {
+        activities: vec![
+            niri_config::Activity {
+                name: niri_config::ActivityName("Work".to_owned()),
+            },
+            niri_config::Activity {
+                name: niri_config::ActivityName("Personal".to_owned()),
+            },
+        ],
+        workspaces: vec![
+            WorkspaceConfig {
+                name: WorkspaceName("chat".to_owned()),
+                open_on_output: None,
+                layout: None,
+                activities: vec!["Work".to_owned(), "Personal".to_owned()],
+                sticky: None,
+            },
+            WorkspaceConfig {
+                name: WorkspaceName("music".to_owned()),
+                open_on_output: None,
+                layout: None,
+                activities: Vec::new(),
+                sticky: None,
+            },
+        ],
+        ..Config::default()
+    };
+    let mut layout = Layout::<TestWindow>::new(Clock::with_time(Duration::ZERO), &config);
+
+    // Observable snapshot: (ordered (id, name, is_config_declared) tuples,
+    // workspace activities sets keyed by id).
+    type ActivityProjection = Vec<(ActivityId, String, bool)>;
+    let activities_before: ActivityProjection = layout
+        .activities
+        .iter()
+        .map(|a| (a.id(), a.name().to_owned(), a.is_config_declared()))
+        .collect();
+    let workspaces_before: HashMap<WorkspaceId, HashSet<ActivityId>> = layout
+        .workspaces
+        .iter()
+        .map(|(id, ws)| (*id, ws.activities().clone()))
+        .collect();
+    let active_before = layout.active_activity_id();
+    let previous_before = layout.activities.previous_id();
+
+    layout.reconcile_activities_on_reload_add(&config.activities, &config.workspaces);
+
+    let activities_after: ActivityProjection = layout
+        .activities
+        .iter()
+        .map(|a| (a.id(), a.name().to_owned(), a.is_config_declared()))
+        .collect();
+    assert_eq!(
+        activities_after, activities_before,
+        "no-op reload must not mutate the activities pool",
+    );
+
+    let workspaces_after: HashMap<WorkspaceId, HashSet<ActivityId>> = layout
+        .workspaces
+        .iter()
+        .map(|(id, ws)| (*id, ws.activities().clone()))
+        .collect();
+    assert_eq!(
+        workspaces_after, workspaces_before,
+        "no-op reload must not mutate any workspace's activities set",
+    );
+
+    assert_eq!(layout.active_activity_id(), active_before);
+    assert_eq!(layout.activities.previous_id(), previous_before);
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reload_promotion_preserves_runtime_name_casing() {
+    // Seed pool with a runtime activity whose name uses all-lowercase "work".
+    // Reload config declares "WORK" (all-caps). Expected: stored name stays
+    // "work" (runtime casing, NOT overwritten by config spelling), id
+    // unchanged, is_config_declared flips to true. Pins DD §5.15 bullet 1.
+    let mut layout = Layout::<TestWindow>::default();
+    let work_id = layout
+        .create_activity("work".to_owned())
+        .expect("create must succeed");
+    assert_eq!(
+        layout
+            .activities
+            .get(work_id)
+            .expect("work must exist")
+            .name(),
+        "work",
+        "precondition: runtime activity must carry lowercase name",
+    );
+    assert!(
+        !layout
+            .activities
+            .get(work_id)
+            .expect("work must exist")
+            .is_config_declared(),
+        "precondition: newly created activity is runtime",
+    );
+
+    // Reload declares "WORK" (all-caps) — case-insensitively matches "work".
+    let cfg = [niri_config::Activity {
+        name: niri_config::ActivityName("WORK".to_owned()),
+    }];
+    layout.reconcile_activities_on_reload_add(&cfg, &[]);
+
+    let promoted = layout
+        .activities
+        .get(work_id)
+        .expect("work must still be in pool with original id");
+    assert_eq!(
+        promoted.name(),
+        "work",
+        "runtime casing must NOT be overwritten by config spelling",
+    );
+    assert_eq!(
+        promoted.id(),
+        work_id,
+        "id must be preserved on promotion",
+    );
+    assert!(
+        promoted.is_config_declared(),
+        "is_config_declared must flip to true on promotion",
+    );
+
+    layout.verify_invariants();
 }

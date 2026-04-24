@@ -1457,6 +1457,15 @@ impl State {
             self.niri.layout.unname_workspace(&name);
         }
 
+        // Reconcile activities BEFORE `update_config` / `ensure_named_workspace`:
+        // the latter reads `self.activities` via `resolve_workspace_activities`
+        // for new named workspaces, so the pool must already reflect the new
+        // config. See `Layout::reconcile_activities_on_reload_add` docs for the
+        // reconciliation rules (DD §5.15).
+        self.niri
+            .layout
+            .reconcile_activities_on_reload_add(&config.activities, &config.workspaces);
+
         self.niri.layout.update_config(&config);
         for mapped in self.niri.mapped_layer_surfaces.values_mut() {
             mapped.update_config(&config);
