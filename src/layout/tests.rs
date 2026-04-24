@@ -9192,3 +9192,462 @@ fn diff_activity_lifecycle_newcomer_routes_to_created_not_renamed() {
         "must NOT emit ActivityRenamed when id-presence drives routing, got {events:?}",
     );
 }
+
+// ── Box 1967: disconnected-output view retention ──────────────────────────────
+
+#[test]
+fn switch_activity_dormant_view_survives_output_disconnect_and_reconnect() {
+    // Beta's dormant view for output1 must survive an output disconnect/reconnect cycle
+    // verbatim — ids and active workspace id are preserved. Only the active activity's view
+    // is evicted on disconnect; inactive activities retain their view entries.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let out1 = layout.monitors[0].output_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    // Switch to beta and populate its view on output1 with a non-bookend active workspace.
+    // After switch_activity, beta has view=[fresh_ws, active=0] (single entry).
+    layout.switch_activity(beta_id);
+    layout.verify_invariants();
+
+    // Move active to a middle position: add a window (stays on fresh_ws), then
+    // FocusWorkspaceDown (view=[fresh_ws, new_empty], active=1), then add a window to new_empty
+    // (so it becomes non-empty and persists), then FocusWorkspaceDown again
+    // (view=[fresh_ws, mid_ws, bottom_empty], active=2), then FocusWorkspaceUp
+    // (active=1 = middle = non-bookend).
+    layout.add_window(
+        TestWindow::new(TestWindowParams::new(10)),
+        AddWindowTarget::Auto,
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::default(),
+    );
+    layout.verify_invariants();
+    layout.switch_workspace_down();
+    layout.verify_invariants();
+    layout.add_window(
+        TestWindow::new(TestWindowParams::new(11)),
+        AddWindowTarget::Auto,
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::default(),
+    );
+    layout.verify_invariants();
+    layout.switch_workspace_down();
+    layout.verify_invariants();
+    layout.switch_workspace_up();
+    layout.verify_invariants();
+
+    // Snapshot beta's active view for output1 before switching away.
+    let beta_view_ids: Vec<WorkspaceId> = layout
+        .active_view(&out1)
+        .ids()
+        .to_vec();
+    let beta_view_active = layout.active_view(&out1).active();
+    // Verify active is in middle position (not a bookend), giving the test real teeth.
+    let beta_active_pos = layout
+        .active_view(&out1)
+        .active_position();
+    assert!(
+        beta_active_pos > 0,
+        "test setup: beta's active workspace must not be at position 0 (bookend)",
+    );
+    assert!(
+        beta_active_pos < layout.active_view(&out1).len() - 1,
+        "test setup: beta's active workspace must not be the trailing bookend",
+    );
+
+    // Switch back to seed. Beta's view becomes dormant.
+    layout.switch_activity(seed_id);
+    layout.verify_invariants();
+
+    // Remove output1. Beta's dormant view for output1 must remain; only seed's (the active
+    // activity's) view is evicted by remove_output.
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
+
+    let beta_dormant = layout
+        .activities
+        .get(beta_id)
+        .expect("beta must still be present after output disconnect")
+        .views()
+        .get(&out1)
+        .expect("beta's dormant view for output1 must survive output disconnect");
+
+    assert_eq!(
+        beta_dormant.ids(),
+        beta_view_ids.as_slice(),
+        "beta's dormant view ids must be unchanged after output1 disconnect",
+    );
+    assert_eq!(
+        beta_dormant.active(),
+        beta_view_active,
+        "beta's dormant view active workspace id must be unchanged after output1 disconnect",
+    );
+    layout.verify_invariants();
+
+    // Reconnect output1. When we switch back to beta, ensure_active_views must reuse
+    // the retained dormant view (contains_key hit) rather than rebuilding a fresh one.
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+    layout.switch_activity(beta_id);
+    layout.verify_invariants();
+
+    let beta_restored = layout
+        .active_view(&out1);
+    assert_eq!(
+        beta_restored.active(),
+        beta_view_active,
+        "after reconnect and switch back, beta's view.active must equal the pre-disconnect id",
+    );
+    // The ids may be a subset (workspaces destroyed as doomed during disconnect are gone), but
+    // the surviving ids and active must match.
+    assert!(
+        beta_restored.ids().contains(&beta_view_active),
+        "the pre-disconnect active workspace must still be present in beta's restored view ids",
+    );
+}
+
+#[test]
+fn switch_activity_active_view_eviction_is_active_only() {
+    // remove_output evicts the view entry only from the *active* activity's views map.
+    // Inactive (dormant) activities retain their view entries for the removed output verbatim.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let out1 = layout.monitors[0].output_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    // Switch to beta so it gets views for both outputs, then switch back to seed.
+    layout.switch_activity(beta_id);
+    layout.verify_invariants();
+    let beta_out1_ids: Vec<WorkspaceId> = layout
+        .active_view(&out1)
+        .ids()
+        .to_vec();
+    let beta_out1_active = layout.active_view(&out1).active();
+
+    layout.switch_activity(seed_id);
+    layout.verify_invariants();
+
+    // Remove output1. Seed is active — seed's view for out1 must be evicted.
+    // Beta is dormant — beta's view for out1 must survive untouched.
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
+
+    assert!(
+        !layout
+            .activities
+            .active()
+            .views()
+            .contains_key(&out1),
+        "active activity (seed) must no longer have a view entry for the disconnected output1",
+    );
+    let beta_dormant = layout
+        .activities
+        .get(beta_id)
+        .expect("beta must remain present after disconnect")
+        .views()
+        .get(&out1)
+        .expect("inactive activity (beta) must still have its view entry for output1");
+    assert_eq!(
+        beta_dormant.ids(),
+        beta_out1_ids.as_slice(),
+        "beta's dormant ids for output1 must be unchanged by remove_output",
+    );
+    assert_eq!(
+        beta_dormant.active(),
+        beta_out1_active,
+        "beta's dormant active workspace id for output1 must be unchanged by remove_output",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconnect_restores_saved_view_active_via_last_active_workspace_id() {
+    // The active activity's reconnect path (Monitor::new → ws_id_to_activate) must restore
+    // view.active to the workspace that was active before the disconnect. This pins the
+    // last_active_workspace_id map as the mechanism for the active activity's reconnect hint.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(0),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusWorkspaceDown,
+        Op::FocusWorkspaceUp,
+    ];
+    let mut layout = check_ops(ops);
+    let out1 = layout.monitors[0].output_id();
+
+    // Verify view.active is in a non-bookend position so the reconnect pin has teeth.
+    let pre_disconnect_active = layout.active_view(&out1).active();
+    let pre_disconnect_pos = layout.active_view(&out1).active_position();
+    let pre_disconnect_len = layout.active_view(&out1).len();
+    assert!(
+        pre_disconnect_pos > 0 && pre_disconnect_pos < pre_disconnect_len - 1,
+        "test setup: active must be in a middle position (pos={pre_disconnect_pos}, \
+         len={pre_disconnect_len})",
+    );
+
+    // Disconnect then reconnect output1.
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1), Op::AddOutput(1)]);
+
+    let post_reconnect_active = layout.active_view(&out1).active();
+    assert_eq!(
+        post_reconnect_active,
+        pre_disconnect_active,
+        "after reconnect, view.active must equal the workspace that was active before disconnect",
+    );
+    layout.verify_invariants();
+}
+
+// ── Box 1968: MoveWorkspace* active-view scoping ──────────────────────────────
+
+/// Set up a layout with two activities.
+///
+/// Beta is left **active** with ≥3 workspaces on output1 and view.active at a middle position
+/// (position 1 of len=3), so MoveWorkspace* operations on beta's active view produce real
+/// mutations. Seed is dormant; its view for output1 (the initial single-empty-workspace view)
+/// is the reference that must not be touched.
+///
+/// Returns `(layout, seed_id, beta_id, out1, seed_dormant_ids, seed_dormant_active)`.
+fn setup_two_activities_with_move_workspaces_test(
+) -> (Layout<TestWindow>, ActivityId, ActivityId, OutputId, Vec<WorkspaceId>, WorkspaceId) {
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let out1 = layout.monitors[0].output_id();
+
+    // Snapshot seed's view for out1 while seed is still active (before switch).
+    // This is the dormant reference that must survive every MoveWorkspace* call on beta.
+    let seed_dormant_ids: Vec<WorkspaceId> = layout.active_view(&out1).ids().to_vec();
+    let seed_dormant_active = layout.active_view(&out1).active();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    layout.activities.insert(beta);
+
+    // Switch to beta (seed becomes dormant; its view snapshot above is now stable).
+    layout.switch_activity(beta_id);
+    layout.verify_invariants();
+
+    // Build beta's view on out1: [ws_a(win), ws_b(win), ws_c(empty)], active at ws_c (pos 2).
+    // Then focus up to ws_b (pos 1) — a non-bookend middle position — so MoveWorkspace* ops
+    // find something to move and actually mutate the ids vec.
+    layout.add_window(
+        TestWindow::new(TestWindowParams::new(20)),
+        AddWindowTarget::Auto,
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::default(),
+    );
+    layout.verify_invariants();
+    layout.switch_workspace_down(); // active → ws_b (pos 1); ws_a has window
+    layout.verify_invariants();
+    layout.add_window(
+        TestWindow::new(TestWindowParams::new(21)),
+        AddWindowTarget::Auto,
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::default(),
+    );
+    layout.verify_invariants();
+    layout.switch_workspace_down(); // active → ws_c (pos 2); ws_b has window
+    layout.verify_invariants();
+    // Now view is [ws_a, ws_b, ws_c(bottom_empty)], active=ws_c (pos 2).
+    // Focus up to land at middle position (pos 1 = ws_b).
+    layout.switch_workspace_up();
+    layout.verify_invariants();
+
+    let beta_view_len = layout.active_view(&out1).len();
+    let beta_active_pos = layout.active_view(&out1).active_position();
+    assert!(
+        beta_view_len >= 3,
+        "test setup: beta's view on out1 must have ≥3 entries; got {beta_view_len}",
+    );
+    assert!(
+        beta_active_pos > 0 && beta_active_pos < beta_view_len - 1,
+        "test setup: beta's active must be at a middle position (pos={beta_active_pos}, \
+         len={beta_view_len})",
+    );
+
+    (layout, seed_id, beta_id, out1, seed_dormant_ids, seed_dormant_active)
+}
+
+#[test]
+fn move_workspace_down_operates_only_on_active_activity_view() {
+    // move_workspace_down operates exclusively on the active activity's (beta's) view via
+    // monitors_pool_view_mut → activities.active_mut().views_mut().
+    // Seed's dormant view for output1 must be unchanged after the call.
+    //
+    // Anti-triviality: we assert beta's active view.active workspace id changed (the move
+    // happened) before checking seed's dormant view is untouched.
+    let (mut layout, seed_id, beta_id, out1, seed_ids_before, seed_active_before) =
+        setup_two_activities_with_move_workspaces_test();
+
+    // Snapshot beta's full ids order before the call.
+    let beta_ids_order_before: Vec<WorkspaceId> = layout.active_view(&out1).ids().to_vec();
+
+    layout.move_workspace_down();
+    layout.verify_invariants();
+
+    // Teeth check: move_workspace_down must have mutated beta's active view. The trailing empty
+    // workspace is replaced by a fresh one (different WorkspaceId), so the ids vec must differ
+    // even if clean_up_workspaces_on restores the active workspace to its original position.
+    let beta_ids_order_after: Vec<WorkspaceId> = layout.active_view(&out1).ids().to_vec();
+    assert_ne!(
+        beta_ids_order_after,
+        beta_ids_order_before,
+        "move_workspace_down must mutate beta's active view ids vec \
+         (trailing empty is recycled, so the vec must differ from the pre-call snapshot); \
+         if equal the operation was a no-op and the test is vacuous",
+    );
+
+    // Scoping check: seed's dormant view for out1 must be untouched.
+    let seed_dormant = layout
+        .activities
+        .get(seed_id)
+        .expect("seed must remain in pool after move_workspace_down")
+        .views()
+        .get(&out1)
+        .expect("seed must retain its dormant view for out1");
+    assert_eq!(
+        seed_dormant.ids(),
+        seed_ids_before.as_slice(),
+        "move_workspace_down must not mutate seed's dormant ids for output1",
+    );
+    assert_eq!(
+        seed_dormant.active(),
+        seed_active_before,
+        "move_workspace_down must not mutate seed's dormant active workspace id for output1",
+    );
+    // Also verify beta's dormant-less (still active) view hasn't touched seed's ids.
+    let _ = beta_id; // consumed by verify only; keep binding for clarity
+}
+
+#[test]
+fn move_workspace_up_operates_only_on_active_activity_view() {
+    // Symmetric to move_workspace_down_operates_only_on_active_activity_view.
+    // move_workspace_up also routes through monitors_pool_view_mut, scoping to the active
+    // (beta's) view exclusively. Seed's dormant view must be untouched.
+    let (mut layout, seed_id, beta_id, out1, seed_ids_before, seed_active_before) =
+        setup_two_activities_with_move_workspaces_test();
+
+    // Snapshot beta's full ids order before the call.
+    let beta_ids_order_before: Vec<WorkspaceId> = layout.active_view(&out1).ids().to_vec();
+    let beta_active_pos_before = layout.active_view(&out1).active_position();
+
+    // Active is at middle position (> 0), so move_workspace_up can move upward.
+    layout.move_workspace_up();
+    layout.verify_invariants();
+
+    // Teeth check: move_workspace_up must have moved the active workspace to a lower position.
+    // view.active (the id) stays the same; the ids order changes.
+    let beta_view_after = layout.active_view(&out1);
+    let beta_active_pos_after = beta_view_after.active_position();
+    assert!(
+        beta_active_pos_after < beta_active_pos_before,
+        "move_workspace_up must move the active workspace to a lower position \
+         (was {beta_active_pos_before}, now {beta_active_pos_after}); \
+         if equal the operation was a no-op and the test is vacuous",
+    );
+    let beta_ids_order_after: Vec<WorkspaceId> = beta_view_after.ids().to_vec();
+    assert_ne!(
+        beta_ids_order_after,
+        beta_ids_order_before,
+        "move_workspace_up must reorder beta's active view ids vec",
+    );
+
+    // Scoping check: seed's dormant view for out1 must be untouched.
+    let seed_dormant = layout
+        .activities
+        .get(seed_id)
+        .expect("seed must remain in pool after move_workspace_up")
+        .views()
+        .get(&out1)
+        .expect("seed must retain its dormant view for out1");
+    assert_eq!(
+        seed_dormant.ids(),
+        seed_ids_before.as_slice(),
+        "move_workspace_up must not mutate seed's dormant ids for output1",
+    );
+    assert_eq!(
+        seed_dormant.active(),
+        seed_active_before,
+        "move_workspace_up must not mutate seed's dormant active workspace id for output1",
+    );
+    let _ = beta_id;
+}
+
+#[test]
+fn move_workspace_to_idx_operates_only_on_active_activity_view() {
+    // move_workspace_to_idx (the third _on leaf) also routes through monitors_pool_view_mut
+    // → active activity's view only. Seed's dormant view for output1 must be unchanged.
+    let (mut layout, seed_id, beta_id, out1, seed_ids_before, seed_active_before) =
+        setup_two_activities_with_move_workspaces_test();
+
+    let beta_active_pos_before = layout.active_view(&out1).active_position();
+    let beta_active_before = layout.active_view(&out1).active();
+
+    // Active is at position 1 (middle). Move it to position 0 — a distinct index.
+    let target_idx = 0;
+    assert_ne!(
+        beta_active_pos_before, target_idx,
+        "test setup: target_idx must differ from current active position",
+    );
+    layout.move_workspace_to_idx(None, target_idx);
+    layout.verify_invariants();
+
+    // Teeth check: move_workspace_to_idx must have changed the active workspace's position.
+    // Because the workspace moved to position 0, its id is now at position 0 in ids().
+    // view.active stays the same id but the ids() order changes.
+    let beta_view_after = layout.active_view(&out1);
+    let beta_active_after_pos = beta_view_after.active_position();
+    assert_eq!(
+        beta_view_after.active(),
+        beta_active_before,
+        "move_workspace_to_idx must keep the same workspace focused (view.active id unchanged)",
+    );
+    assert_ne!(
+        beta_active_after_pos,
+        beta_active_pos_before,
+        "move_workspace_to_idx must change the active workspace's position in ids() \
+         (was {beta_active_pos_before}, still {beta_active_after_pos} — operation was a no-op)",
+    );
+
+    // Scoping check: seed's dormant view for out1 must be untouched.
+    let seed_dormant = layout
+        .activities
+        .get(seed_id)
+        .expect("seed must remain in pool after move_workspace_to_idx")
+        .views()
+        .get(&out1)
+        .expect("seed must retain its dormant view for out1");
+    assert_eq!(
+        seed_dormant.ids(),
+        seed_ids_before.as_slice(),
+        "move_workspace_to_idx must not mutate seed's dormant ids for output1",
+    );
+    assert_eq!(
+        seed_dormant.active(),
+        seed_active_before,
+        "move_workspace_to_idx must not mutate seed's dormant active workspace id for output1",
+    );
+    let _ = beta_id;
+}
