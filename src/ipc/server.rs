@@ -340,6 +340,16 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
                     .send_blocking(Err(DoActionError::WindowNotFound { id }));
                 continue;
             }
+            Err(err @ DoActionError::AddWorkspaceToActivityActivityNotFound)
+            | Err(err @ DoActionError::AddWorkspaceToActivityWorkspaceNotFound)
+            | Err(err @ DoActionError::RemoveWorkspaceFromActivityActivityNotFound)
+            | Err(err @ DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound)
+            | Err(err @ DoActionError::RemoveWorkspaceFromActivityLastActivity) => {
+                // Terminal errors (DD §5.14). Same shape as `WindowNotFound`:
+                // forward and advance the walk — do not re-block.
+                let _ = waiter.tx.send_blocking(Err(err));
+                continue;
+            }
         }
     }
 }
@@ -649,6 +659,18 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                         // since no hard-block condition exists to clear
                         // and the drain site would never re-dispatch.
                         let _ = tx.send_blocking(Err(DoActionError::WindowNotFound { id }));
+                    }
+                    // Terminal errors from DD §5.14 workspace-activity
+                    // assignment actions. Same rationale as `WindowNotFound`:
+                    // no hard-block condition, do not park — forward to the
+                    // waiter so the IPC envelope is produced on the main
+                    // dispatch path.
+                    Err(err @ DoActionError::AddWorkspaceToActivityActivityNotFound)
+                    | Err(err @ DoActionError::AddWorkspaceToActivityWorkspaceNotFound)
+                    | Err(err @ DoActionError::RemoveWorkspaceFromActivityActivityNotFound)
+                    | Err(err @ DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound)
+                    | Err(err @ DoActionError::RemoveWorkspaceFromActivityLastActivity) => {
+                        let _ = tx.send_blocking(Err(err));
                     }
                 }
             });

@@ -1027,6 +1027,45 @@ pub enum Action {
     /// This is history-based, not sequential — activities represent named
     /// contexts, not a linear sequence.
     SwitchActivityPrevious {},
+    /// Add a workspace to an activity.
+    ///
+    /// The workspace is appended to the activity's ordered workspace list on
+    /// the workspace's bound output (if the activity already has a view for
+    /// that output). For dormant activities without a view on the output, the
+    /// view is rebuilt lazily on the next switch to that activity — see
+    /// activities design doc §3.3.
+    ///
+    /// No-op if the workspace is already a member of the activity. Errors if
+    /// either reference does not resolve.
+    ///
+    /// Append is position-invariant within the view, so this action is safe
+    /// during workspace-switch animations AND gestures (activities design doc
+    /// §5.11).
+    AddWorkspaceToActivity {
+        /// Workspace to modify. Defaults to focused.
+        workspace: Option<WorkspaceReferenceArg>,
+        /// Activity to add the workspace to.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
+        activity: ActivityReferenceArg,
+    },
+    /// Remove a workspace from an activity.
+    ///
+    /// No-op if the workspace is already not a member of the activity. `Err`
+    /// if removing would leave the workspace's `activities` set empty — every
+    /// workspace must belong to at least one activity (activities design doc
+    /// §3.2).
+    ///
+    /// Gesture blocks this action: while a workspace-switch gesture is in
+    /// flight on any monitor, the IPC caller is queued until the gesture
+    /// ends. Workspace-switch animations are snapped and the action proceeds
+    /// (activities design doc §5.11).
+    RemoveWorkspaceFromActivity {
+        /// Workspace to modify. Defaults to focused.
+        workspace: Option<WorkspaceReferenceArg>,
+        /// Activity to remove the workspace from.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
+        activity: ActivityReferenceArg,
+    },
 }
 
 /// Change in window or column size.
@@ -2732,6 +2771,43 @@ mod tests {
             (
                 "activity switch blocked: workspace switch gesture (DD §5.11)",
                 r#"{"Err":"activity switch blocked: workspace switch gesture (DD §5.11)"}"#,
+            ),
+        ] {
+            let reply: Reply = Err(msg.to_owned());
+            let json = serde_json::to_string(&reply).expect("serialize Reply::Err");
+            assert_eq!(json, expected_json);
+            let parsed: Reply =
+                serde_json::from_str(&json).expect("deserialize Reply::Err");
+            match parsed {
+                Err(parsed_msg) => assert_eq!(parsed_msg, msg),
+                Ok(_) => panic!("expected Reply::Err variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn reply_err_format_for_workspace_activity_assignment() {
+        // Roundtrips the DD §5.14 / §3.2 wire envelopes for
+        // `AddWorkspaceToActivity` / `RemoveWorkspaceFromActivity` through
+        // serde to pin their JSON representation. The envelope tokens and DD
+        // section references are the observable IPC contract.
+        //
+        // Envelopes are assembled by `format_do_action_error` in
+        // `niri/src/layout/mod.rs` and pinned by
+        // `do_action_error_envelope_matches_wire_contract` there; `Display`
+        // tokens are pinned by `do_action_error_display_matches_wire_contract`.
+        for (msg, expected_json) in [
+            (
+                "activity not found (DD §5.14)",
+                r#"{"Err":"activity not found (DD §5.14)"}"#,
+            ),
+            (
+                "workspace not found (DD §5.14)",
+                r#"{"Err":"workspace not found (DD §5.14)"}"#,
+            ),
+            (
+                "workspace would be left with no activities (DD §3.2)",
+                r#"{"Err":"workspace would be left with no activities (DD §3.2)"}"#,
             ),
         ] {
             let reply: Reply = Err(msg.to_owned());

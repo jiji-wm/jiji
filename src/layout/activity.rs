@@ -383,6 +383,75 @@ impl fmt::Display for RenameActivityError {
 
 impl std::error::Error for RenameActivityError {}
 
+/// Validation failure for adding a workspace to an activity via
+/// `Layout::add_workspace_to_activity`. Each variant corresponds to one of the
+/// rejection rules the outer entry point evaluates before any mutation (DD
+/// §5.14).
+///
+/// Precedence on unresolvable references: `ActivityNotFound` is returned before
+/// `WorkspaceNotFound` (activity is resolved first). The no-op "already a
+/// member" path returns `Ok` and is not surfaced here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddWorkspaceToActivityError {
+    /// No activity in the pool matches the supplied reference.
+    ActivityNotFound,
+    /// No workspace in the pool matches the supplied reference (or `None`
+    /// was supplied and there is no active workspace, i.e. zero connected
+    /// monitors).
+    WorkspaceNotFound,
+}
+
+impl fmt::Display for AddWorkspaceToActivityError {
+    /// Plain lowercase tokens without DD-section punctuation. Matches the DD
+    /// §5.14 wire table wording verbatim. The envelope and `(DD §5.14)` suffix
+    /// are assembled by `format_do_action_error`; token drift here will fail
+    /// the `do_action_error_display_matches_wire_contract` pin test.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ActivityNotFound => f.write_str("activity not found"),
+            Self::WorkspaceNotFound => f.write_str("workspace not found"),
+        }
+    }
+}
+
+impl std::error::Error for AddWorkspaceToActivityError {}
+
+/// Validation failure for removing a workspace from an activity via
+/// `Layout::remove_workspace_from_activity`. Variants mirror the DD §5.14
+/// wire-contract table plus the DD §3.2 non-empty-activities invariant guard.
+///
+/// Precedence: `ActivityNotFound` > `WorkspaceNotFound` > `LastActivity`.
+/// Resolution runs before membership inspection so an unresolvable reference
+/// never leaks into an "already not a member" no-op path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveWorkspaceFromActivityError {
+    /// No activity in the pool matches the supplied reference.
+    ActivityNotFound,
+    /// No workspace in the pool matches the supplied reference (or `None`
+    /// was supplied and there is no active workspace).
+    WorkspaceNotFound,
+    /// Removing the activity id would leave the workspace's `activities` set
+    /// empty (DD §3.2: every workspace must belong to at least one activity).
+    LastActivity,
+}
+
+impl fmt::Display for RemoveWorkspaceFromActivityError {
+    /// Plain lowercase tokens without DD-section punctuation. The envelope and
+    /// DD-section suffix (`(DD §5.14)` / `(DD §3.2)`) are assembled by
+    /// `format_do_action_error`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ActivityNotFound => f.write_str("activity not found"),
+            Self::WorkspaceNotFound => f.write_str("workspace not found"),
+            Self::LastActivity => {
+                f.write_str("workspace would be left with no activities")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RemoveWorkspaceFromActivityError {}
+
 /// Validation failure for config-reload activity removal via
 /// `Layout::reconcile_activities_on_reload_remove`. Each variant corresponds
 /// to one of the rejection rules the outer entry point evaluates before any

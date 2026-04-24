@@ -400,6 +400,10 @@ pub enum Action {
     #[knuffel(skip)]
     SwitchActivity(ActivityReference),
     SwitchActivityPrevious,
+    #[knuffel(skip)]
+    AddWorkspaceToActivity(Option<WorkspaceReference>, ActivityReference),
+    #[knuffel(skip)]
+    RemoveWorkspaceFromActivity(Option<WorkspaceReference>, ActivityReference),
 }
 
 impl From<niri_ipc::Action> for Action {
@@ -718,6 +722,20 @@ impl From<niri_ipc::Action> for Action {
             }
             niri_ipc::Action::SwitchActivity { activity } => Self::SwitchActivity(activity.into()),
             niri_ipc::Action::SwitchActivityPrevious {} => Self::SwitchActivityPrevious,
+            niri_ipc::Action::AddWorkspaceToActivity {
+                workspace,
+                activity,
+            } => Self::AddWorkspaceToActivity(
+                workspace.map(WorkspaceReference::from),
+                activity.into(),
+            ),
+            niri_ipc::Action::RemoveWorkspaceFromActivity {
+                workspace,
+                activity,
+            } => Self::RemoveWorkspaceFromActivity(
+                workspace.map(WorkspaceReference::from),
+                activity.into(),
+            ),
             // niri_ipc::Action is #[non_exhaustive]: any new variant added to
             // niri_ipc without a matching arm here is a coding error that
             // surfaces as a panic when the unmapped action is dispatched.

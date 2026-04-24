@@ -1803,6 +1803,110 @@ impl State {
                     Err(e) => warn!("remove_activity: {e}: {arg:?}"),
                 }
             }
+            Action::AddWorkspaceToActivity(ws_ref, activity_ref) => {
+                // Per DD §5.11 line 1082: Add is position-invariant on the
+                // view, so it is safe during both workspace-switch animations
+                // AND gestures. No hard-block gate here.
+                let arg_act: ActivityReferenceArg = activity_ref.into();
+                let arg_ws_log = ws_ref.clone();
+                match self
+                    .niri
+                    .layout
+                    .add_workspace_to_activity(ws_ref, &arg_act)
+                {
+                    Ok((ws_id, act_id)) => {
+                        debug!(
+                            "AddWorkspaceToActivity: added {ws_id:?} to {act_id:?} \
+                             ({arg_act:?})"
+                        );
+                        // No redraw: visibility only changes on the next
+                        // activity switch. Event-stream emission for the
+                        // workspace's `activities` field flows through the
+                        // existing structural diff at ipc/server.rs
+                        // diff_workspaces — no hand-rolled emit needed.
+                    }
+                    Err(e) => {
+                        warn!(
+                            "AddWorkspaceToActivity: {e}: workspace={arg_ws_log:?} \
+                             activity={arg_act:?}"
+                        );
+                        let mapped = match e {
+                            crate::layout::AddWorkspaceToActivityError::ActivityNotFound => {
+                                DoActionError::AddWorkspaceToActivityActivityNotFound
+                            }
+                            crate::layout::AddWorkspaceToActivityError::WorkspaceNotFound => {
+                                DoActionError::AddWorkspaceToActivityWorkspaceNotFound
+                            }
+                        };
+                        return Err(mapped);
+                    }
+                }
+            }
+            Action::RemoveWorkspaceFromActivity(ws_ref, activity_ref) => {
+                // Per DD §5.11 line 1082: Remove is hard-blocked by an
+                // in-flight workspace-switch gesture (removing from the
+                // current activity's view would invalidate the gesture's
+                // fractional targets). IPC callers are queued by the drain
+                // path; keybinding callers see the same Err and the
+                // keybinding dispatcher drops silently.
+                if let Some(block) = self
+                    .niri
+                    .layout
+                    .is_workspace_activity_assignment_blocked_by_gesture()
+                {
+                    debug!(
+                        "RemoveWorkspaceFromActivity: hard-blocked by {block:?}, \
+                         ignoring (DD §5.11)"
+                    );
+                    return Err(block.into());
+                }
+                let arg_act: ActivityReferenceArg = activity_ref.into();
+                let arg_ws_log = ws_ref.clone();
+                let active_before = self.niri.layout.active_activity_id();
+                match self
+                    .niri
+                    .layout
+                    .remove_workspace_from_activity(ws_ref, &arg_act)
+                {
+                    Ok((ws_id, act_id)) => {
+                        debug!(
+                            "RemoveWorkspaceFromActivity: removed {ws_id:?} from \
+                             {act_id:?} ({arg_act:?})"
+                        );
+                        if act_id == active_before {
+                            // Visibility of `ws_id` just flipped for the
+                            // active activity. `is_in_active_activity` may
+                            // have changed for workspaces that lost their
+                            // active-activity tag — the structural diff at
+                            // ipc/server.rs:1611-1613 emits
+                            // `WorkspaceOpenedOrChanged` for those. Focus
+                            // and frame may need refresh. No §5.19 call
+                            // here: the active activity id is unchanged —
+                            // inhibitor reconciliation fires on flips only.
+                            self.maybe_warp_cursor_to_focus();
+                            self.niri.queue_redraw_all();
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "RemoveWorkspaceFromActivity: {e}: workspace={arg_ws_log:?} \
+                             activity={arg_act:?}"
+                        );
+                        let mapped = match e {
+                            crate::layout::RemoveWorkspaceFromActivityError::ActivityNotFound => {
+                                DoActionError::RemoveWorkspaceFromActivityActivityNotFound
+                            }
+                            crate::layout::RemoveWorkspaceFromActivityError::WorkspaceNotFound => {
+                                DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound
+                            }
+                            crate::layout::RemoveWorkspaceFromActivityError::LastActivity => {
+                                DoActionError::RemoveWorkspaceFromActivityLastActivity
+                            }
+                        };
+                        return Err(mapped);
+                    }
+                }
+            }
             Action::MoveWorkspaceDown => {
                 self.niri.layout.move_workspace_down();
                 // FIXME: granular

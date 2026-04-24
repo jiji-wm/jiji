@@ -58,7 +58,10 @@ use workspace::{WorkspaceAddWindowTarget, WorkspaceId};
 
 use self::activity::{Activities, Activity, ActivityId, WorkspaceView};
 pub(crate) use self::activity::ReloadActivityRemovalError;
-pub use self::activity::{CreateActivityError, RemoveActivityError, RenameActivityError};
+pub use self::activity::{
+    AddWorkspaceToActivityError, CreateActivityError, RemoveActivityError,
+    RemoveWorkspaceFromActivityError, RenameActivityError,
+};
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{Monitor, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
@@ -551,6 +554,23 @@ pub(crate) enum DoActionError {
     /// does not resolve to any pool-owned window. Terminal error — the
     /// waiter is signalled immediately, never parked.
     WindowNotFound { id: u64 },
+    /// DD §5.14: `Action::AddWorkspaceToActivity` was dispatched with an
+    /// activity reference that does not resolve. Terminal error.
+    AddWorkspaceToActivityActivityNotFound,
+    /// DD §5.14: `Action::AddWorkspaceToActivity` was dispatched with a
+    /// workspace reference that does not resolve (or `None` with no active
+    /// workspace). Terminal error.
+    AddWorkspaceToActivityWorkspaceNotFound,
+    /// DD §5.14: `Action::RemoveWorkspaceFromActivity` was dispatched with an
+    /// activity reference that does not resolve. Terminal error.
+    RemoveWorkspaceFromActivityActivityNotFound,
+    /// DD §5.14: `Action::RemoveWorkspaceFromActivity` was dispatched with a
+    /// workspace reference that does not resolve. Terminal error.
+    RemoveWorkspaceFromActivityWorkspaceNotFound,
+    /// DD §3.2: `Action::RemoveWorkspaceFromActivity` would leave the
+    /// workspace's `activities` set empty — rejected before any mutation.
+    /// Terminal error.
+    RemoveWorkspaceFromActivityLastActivity,
 }
 
 impl From<ActivitySwitchBlock> for DoActionError {
@@ -572,6 +592,17 @@ impl fmt::Display for DoActionError {
         match self {
             Self::ActivitySwitchBlocked(block) => write!(f, "{block}"),
             Self::WindowNotFound { id } => write!(f, "window not found: id={id}"),
+            // Plain lowercase tokens (DD §5.14 wire table). The DD-section
+            // suffix is added by `format_do_action_error`, not `Display`.
+            Self::AddWorkspaceToActivityActivityNotFound
+            | Self::RemoveWorkspaceFromActivityActivityNotFound => f.write_str("activity not found"),
+            Self::AddWorkspaceToActivityWorkspaceNotFound
+            | Self::RemoveWorkspaceFromActivityWorkspaceNotFound => {
+                f.write_str("workspace not found")
+            }
+            Self::RemoveWorkspaceFromActivityLastActivity => {
+                f.write_str("workspace would be left with no activities")
+            }
         }
     }
 }
@@ -592,6 +623,13 @@ pub(crate) fn format_do_action_error(err: DoActionError) -> String {
     match err {
         DoActionError::ActivitySwitchBlocked(block) => format_activity_switch_block_err(block),
         DoActionError::WindowNotFound { .. } => format!("{err} (DD §5.18)"),
+        DoActionError::AddWorkspaceToActivityActivityNotFound
+        | DoActionError::AddWorkspaceToActivityWorkspaceNotFound
+        | DoActionError::RemoveWorkspaceFromActivityActivityNotFound
+        | DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound => {
+            format!("{err} (DD §5.14)")
+        }
+        DoActionError::RemoveWorkspaceFromActivityLastActivity => format!("{err} (DD §3.2)"),
     }
 }
 
@@ -4781,6 +4819,262 @@ impl<W: LayoutElement> Layout<W> {
         self.verify_invariants();
 
         Ok(target)
+    }
+
+    /// Returns `Some(ActivitySwitchBlock::WorkspaceSwitchGesture)` if any
+    /// monitor carries an in-flight `WorkspaceSwitch::Gesture(_)`, else `None`.
+    ///
+    /// Per DD §5.11 line 1082, `RemoveWorkspaceFromActivity` (and the future
+    /// `SetWorkspaceActivities`) are hard-blocked by an in-flight
+    /// workspace-switch *gesture* — removing an id from the current activity's
+    /// `view.ids` would invalidate the gesture's fractional position targets.
+    /// `AddWorkspaceToActivity` is not gated: append is position-invariant so
+    /// it is safe during both gestures and animations.
+    ///
+    /// This predicate is weaker than [`Self::is_activity_switch_hard_blocked`]:
+    /// it does **not** consider `self.interactive_move` / `self.dnd` (those are
+    /// orthogonal to workspace-activity membership) and it does **not** block
+    /// on `WorkspaceSwitch::Animation(_)` — animations are snapped by the
+    /// mutator before proceeding, matching `switch_activity`'s snap+proceed
+    /// contract.
+    pub(crate) fn is_workspace_activity_assignment_blocked_by_gesture(
+        &self,
+    ) -> Option<ActivitySwitchBlock> {
+        for mon in &self.monitors {
+            if matches!(mon.workspace_switch, Some(WorkspaceSwitch::Gesture(_))) {
+                return Some(ActivitySwitchBlock::WorkspaceSwitchGesture);
+            }
+        }
+        None
+    }
+
+    /// Add `workspace` to `activity_ref`'s membership set and, if the activity
+    /// has a view for the workspace's bound output, append the id to that
+    /// view's `ids`.
+    ///
+    /// Resolution order:
+    /// 1. `activity_ref` → `AddWorkspaceToActivityError::ActivityNotFound`.
+    /// 2. `workspace` (via [`Self::find_workspace_by_ref`] or, when `None`,
+    ///    the active workspace) →
+    ///    `AddWorkspaceToActivityError::WorkspaceNotFound`.
+    ///
+    /// Semantics per DD §4.3 / §5.14 / §5.17a:
+    /// - No-op when the workspace's `activities` set already contains the
+    ///   target id (returns `Ok`, no state touched).
+    /// - Otherwise `activity_id` is inserted into `ws.activities`. If the
+    ///   target activity already has a view for the workspace's bound
+    ///   output, the id is appended to that view's `ids`. Views are not
+    ///   fabricated: a dormant activity without a view for the output gets
+    ///   its view rebuilt lazily on the next switch (DD §3.3).
+    ///
+    /// Not gated. Append is position-invariant so this is safe during both
+    /// workspace-switch animations and gestures (DD §5.11 line 1082).
+    pub(crate) fn add_workspace_to_activity(
+        &mut self,
+        workspace: Option<WorkspaceReference>,
+        activity_ref: &ActivityReferenceArg,
+    ) -> Result<(WorkspaceId, ActivityId), AddWorkspaceToActivityError> {
+        let activity_id = self
+            .resolve_activity_ref(activity_ref)
+            .ok_or(AddWorkspaceToActivityError::ActivityNotFound)?;
+
+        // Resolve workspace → id only; drop the `&mut self` borrow before
+        // splitting into `&mut self.workspaces` + `&mut self.activities`.
+        let ws_id = match workspace {
+            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
+            None => self.active_workspace_mut().map(|ws| ws.id()),
+        }
+        .ok_or(AddWorkspaceToActivityError::WorkspaceNotFound)?;
+
+        // No-op early-exit: the workspace already belongs to the activity.
+        // Do not touch views or invariants — the state is unchanged.
+        {
+            let ws = self
+                .workspaces
+                .get(&ws_id)
+                .expect("resolved ws_id must be a live pool key");
+            if ws.activities().contains(&activity_id) {
+                return Ok((ws_id, activity_id));
+            }
+        }
+
+        // Hoist split borrows explicitly so the mutation sequence is obvious
+        // and the closure arg in `entry().or_insert_with` would not capture an
+        // overlapping borrow.
+        let pool = &mut self.workspaces;
+        let activities = &mut self.activities;
+
+        let ws = pool
+            .get_mut(&ws_id)
+            .expect("resolved ws_id must be a live pool key");
+        ws.activities.insert(activity_id);
+        let out_id = ws.output_id().cloned();
+
+        if let Some(out_id) = out_id {
+            if let Some(activity) = activities.get_mut(activity_id) {
+                if let Some(view) = activity.views_mut().get_mut(&out_id) {
+                    // Defensive: DD §5.17a's sketch uses the same `contains`
+                    // check before `insert`. Under the no-op early-exit above,
+                    // the view cannot already contain `ws_id` because
+                    // `ws.activities` didn't — the per-view uniqueness
+                    // invariant is derived from pool membership. The guard
+                    // stays as belt-and-braces for any future drift.
+                    if !view.ids().contains(&ws_id) {
+                        let pos = view.len();
+                        view.insert(pos, ws_id);
+                    }
+                }
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        self.verify_invariants();
+
+        Ok((ws_id, activity_id))
+    }
+
+    /// Remove `workspace` from `activity_ref`'s membership set and patch the
+    /// activity's view for the workspace's bound output (if any).
+    ///
+    /// Resolution order:
+    /// 1. `activity_ref` → `RemoveWorkspaceFromActivityError::ActivityNotFound`.
+    /// 2. `workspace` → `RemoveWorkspaceFromActivityError::WorkspaceNotFound`.
+    ///
+    /// Semantics per DD §4.3 / §5.14 / §3.2 / §3.3:
+    /// - No-op when the workspace's `activities` set does not contain the
+    ///   target id (returns `Ok`).
+    /// - If removing would empty `ws.activities`, returns
+    ///   `RemoveWorkspaceFromActivityError::LastActivity` without mutating
+    ///   any state (guard-before-mutate discipline; DD §3.2 invariant is
+    ///   enforced by `Layout::verify_invariants`).
+    /// - Otherwise: if the active activity has an in-flight
+    ///   `WorkspaceSwitch::Animation` on any monitor AND the target activity
+    ///   is the active one, the animation is snapped on every monitor first
+    ///   (matching `switch_activity`'s snap+proceed contract, DD §5.11).
+    ///   Then `activity_id` is removed from `ws.activities`. Finally, the
+    ///   activity's view for `ws.output_id()` (if present) is patched: if
+    ///   the view's single entry was `ws_id` it is dropped entirely
+    ///   (mirroring `destroy_workspaces_cross_activity` behavior); otherwise
+    ///   `WorkspaceView::remove_at` shifts the active / previous cursors.
+    /// - Active-activity special case: when dropping the last view entry on
+    ///   a connected monitor's output for the active activity, the
+    ///   cross-field invariant `active.views.len() == monitors.len()` would
+    ///   be violated — [`Self::ensure_active_views`] is called immediately
+    ///   after the drop to reinstate the view (fresh trailing empty + EWAF
+    ///   leading empty if applicable).
+    ///
+    /// Callers that dispatch via IPC must first consult
+    /// [`Self::is_workspace_activity_assignment_blocked_by_gesture`] — a
+    /// gesture in flight on any monitor blocks the call (DD §5.11 line 1082).
+    /// This method does not re-check that predicate; the caller owns the
+    /// decision to queue vs. proceed.
+    pub(crate) fn remove_workspace_from_activity(
+        &mut self,
+        workspace: Option<WorkspaceReference>,
+        activity_ref: &ActivityReferenceArg,
+    ) -> Result<(WorkspaceId, ActivityId), RemoveWorkspaceFromActivityError> {
+        let activity_id = self
+            .resolve_activity_ref(activity_ref)
+            .ok_or(RemoveWorkspaceFromActivityError::ActivityNotFound)?;
+
+        let ws_id = match workspace {
+            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
+            None => self.active_workspace_mut().map(|ws| ws.id()),
+        }
+        .ok_or(RemoveWorkspaceFromActivityError::WorkspaceNotFound)?;
+
+        // Read-only inspection phase — no mutation until every error class
+        // has been ruled out (DD §3.2 guard-before-mutate).
+        let (is_member, len_before, out_id) = {
+            let ws = self
+                .workspaces
+                .get(&ws_id)
+                .expect("resolved ws_id must be a live pool key");
+            (
+                ws.activities().contains(&activity_id),
+                ws.activities().len(),
+                ws.output_id().cloned(),
+            )
+        };
+
+        if !is_member {
+            // No-op: the workspace is already not a member. DD §5.14 "No-op
+            // if already not in activity".
+            return Ok((ws_id, activity_id));
+        }
+
+        if len_before == 1 {
+            // `activities.len() - 1 == 0` — removing would violate DD §3.2.
+            return Err(RemoveWorkspaceFromActivityError::LastActivity);
+        }
+
+        // Active-activity branch: snap any in-flight workspace-switch
+        // animation on every monitor before patching views. Mirrors
+        // `switch_activity`'s step-4 clear. Only runs when the mutation
+        // would affect the active activity's view that the animation's
+        // fractional positions refer to.
+        if activity_id == self.activities.active_id() {
+            for mon in &mut self.monitors {
+                if matches!(mon.workspace_switch, Some(WorkspaceSwitch::Animation(_))) {
+                    mon.workspace_switch = None;
+                }
+            }
+        }
+
+        // Step 1: mutate `ws.activities`.
+        {
+            let ws = self
+                .workspaces
+                .get_mut(&ws_id)
+                .expect("resolved ws_id must be a live pool key");
+            ws.activities.remove(&activity_id);
+        }
+
+        // Step 2: patch the activity's view for the workspace's output (if
+        // the output is known and the activity has a view there). Track
+        // whether we dropped the last entry of the *active* activity's view
+        // on a connected monitor so the cross-field invariant can be
+        // reinstated below.
+        let mut dropped_active_view_entry = false;
+        if let Some(out_id) = out_id.as_ref() {
+            let is_active_activity = activity_id == self.activities.active_id();
+            let is_connected = self
+                .monitors
+                .iter()
+                .any(|m| &m.output_id() == out_id);
+            let activity = self
+                .activities
+                .get_mut(activity_id)
+                .expect("resolve_activity_ref returned a live id");
+            if let Some(view) = activity.views_mut().get_mut(out_id) {
+                if let Some(pos) = view.position_of(ws_id) {
+                    if view.len() == 1 {
+                        // Drop the single-entry view outright — mirrors the
+                        // `destroy_workspaces_cross_activity` single-entry
+                        // retain-drop path.
+                        activity.views_mut().remove(out_id);
+                        if is_active_activity && is_connected {
+                            dropped_active_view_entry = true;
+                        }
+                    } else {
+                        view.remove_at(pos);
+                    }
+                }
+            }
+        }
+
+        // Step 3: reinstate the active activity's view for the connected
+        // monitor we just emptied. `ensure_active_views` takes `&mut self`,
+        // so every nested borrow above must already be released (they are —
+        // the scope above ended).
+        if dropped_active_view_entry {
+            self.ensure_active_views();
+        }
+
+        #[cfg(debug_assertions)]
+        self.verify_invariants();
+
+        Ok((ws_id, activity_id))
     }
 
     /// Resolve an [`ActivityReferenceArg`] to an [`ActivityId`] if the pool
