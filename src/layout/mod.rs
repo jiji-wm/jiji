@@ -1913,6 +1913,12 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Returns the (index-in-active-view, workspace) for `id` iff the id is in
+    /// some monitor's active view or in `disconnected_workspace_ids`.
+    /// **Active-view + disconnected-pool scoped** — workspaces exclusive to a
+    /// dormant activity yield `None` here even though they exist in the pool.
+    /// Compose with `Layout::resolve_workspace_id` when you need
+    /// pool-membership semantics.
     pub fn find_workspace_by_id(&self, id: WorkspaceId) -> Option<(usize, &Workspace<W>)> {
         for mon in &self.monitors {
             if let Some(index) = self.active_view(&mon.output_id()).position_of(id) {
@@ -5873,6 +5879,29 @@ impl<W: LayoutElement> Layout<W> {
                 active_affected,
             })
         }
+    }
+
+    /// Returns `Some(id)` iff `raw` matches a workspace id in the canonical
+    /// pool — including workspaces that belong only to dormant activities
+    /// (mirror of [`Layout::resolve_activity_ref`]).
+    ///
+    /// Callers that need active-view membership must compose with
+    /// [`Layout::find_workspace_by_id`], which is active-view +
+    /// disconnected-pool scoped.
+    ///
+    /// Do not collapse the chain at the call site (the `Id` arm of
+    /// `Niri::find_output_and_workspace_index`) into a single filter. The two
+    /// scopes (pool-membership vs. active-view + disconnected-pool) are not
+    /// equivalent — a workspace exclusive to a dormant activity is visible to
+    /// the resolver but invisible to the finder, and the chain's
+    /// `?`-propagation depends on this asymmetry. Pinned by
+    /// `resolve_workspace_id_finds_dormant_activity_workspace` in
+    /// `src/layout/tests.rs`.
+    pub(crate) fn resolve_workspace_id(&self, raw: u64) -> Option<WorkspaceId> {
+        self.workspaces
+            .values()
+            .find(|ws| ws.id().get() == raw)
+            .map(|ws| ws.id())
     }
 
     /// Resolve an [`ActivityReferenceArg`] to an [`ActivityId`] if the pool

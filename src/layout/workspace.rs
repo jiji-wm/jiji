@@ -151,7 +151,14 @@ impl WorkspaceId {
         self.0
     }
 
-    pub fn specific(id: u64) -> Self {
+    /// Mint a `WorkspaceId` from a raw `u64`. **Test-only** — production code
+    /// mints `WorkspaceId` values via the counter (`WorkspaceId::next`, called
+    /// transitively from `Workspace::new*` constructors) or looks up existing
+    /// ids via [`Layout::resolve_workspace_id`] (pool-validated). Lifting the
+    /// cfg gate would re-enable unvalidated id minting in production paths and
+    /// is a wire-contract regression.
+    #[cfg(test)]
+    pub(crate) fn specific(id: u64) -> Self {
         Self(id)
     }
 }

@@ -6371,6 +6371,93 @@ fn resolve_activity_ref_by_id_and_name() {
 }
 
 #[test]
+fn resolve_workspace_id_by_raw_returns_pool_match_only() {
+    // A live pool entry resolves; an unminted raw u64 does not.
+    let layout = check_ops([Op::AddOutput(1)]);
+    let seed_id = layout
+        .workspaces
+        .keys()
+        .next()
+        .copied()
+        .expect("AddOutput must have seeded at least one workspace");
+
+    assert_eq!(
+        layout.resolve_workspace_id(seed_id.get()),
+        Some(seed_id),
+        "live pool match must round-trip through resolve_workspace_id",
+    );
+    assert_eq!(
+        layout.resolve_workspace_id(u64::MAX),
+        None,
+        "u64::MAX (never minted) must not match any pool entry",
+    );
+}
+
+#[test]
+fn resolve_workspace_id_finds_dormant_activity_workspace() {
+    // This state (workspace in pool, no view binding, no disconnected entry)
+    // is not reachable through normal `Op`s; the manual `workspaces.insert`
+    // deliberately bypasses `verify_invariants` to pin the resolver/finder
+    // scope asymmetry. Do not promote this fixture to a shared baseline.
+    //
+    // Load-bearing pin for the architectural choice between full-pool and
+    // active-view-scoped resolver. A workspace that belongs exclusively to a
+    // dormant activity (Beta) must be visible to `resolve_workspace_id`
+    // (canonical pool), but invisible to `find_workspace_by_id` (active-view
+    // + disconnected-pool scoped). The two-filter chain at
+    // `find_output_and_workspace_index` therefore returns `None` end-to-end —
+    // the resolver alone is not sufficient to act on a dormant workspace.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta must succeed");
+
+    // Mint a workspace whose `activities` set is exactly `{Beta}` — never
+    // tagged with Alpha, so it cannot appear in Alpha's view. The
+    // workspace stays unbound (no output), which is what makes it
+    // dormant from the active-activity's perspective even though the
+    // pool entry exists.
+    let dormant_id = {
+        let ws = Workspace::<TestWindow>::new_no_outputs(
+            HashSet::from([beta_id]),
+            layout.clock.clone(),
+            layout.options.clone(),
+        );
+        let id = ws.id();
+        layout.workspaces.insert(id, ws);
+        id
+    };
+
+    // Pool-walk resolver sees the dormant entry.
+    assert_eq!(
+        layout.resolve_workspace_id(dormant_id.get()),
+        Some(dormant_id),
+        "resolve_workspace_id must see workspaces on dormant activities",
+    );
+
+    // Active-view-scoped finder does NOT see it: Alpha (current) has no
+    // view entry for `dormant_id`, and the workspace is not in
+    // `disconnected_workspace_ids` (the active monitor is connected).
+    assert!(
+        layout.find_workspace_by_id(dormant_id).is_none(),
+        "find_workspace_by_id must be blind to workspaces exclusive to a dormant activity",
+    );
+
+    // Compose the two filters as `find_output_and_workspace_index` does
+    // (the consumer at `Niri::find_output_and_workspace_index` is not
+    // reachable from this test module — pin the unit-level composition
+    // here): `resolve_workspace_id` succeeds, `find_workspace_by_id`
+    // fails, the chain yields `None`.
+    let chain = layout
+        .resolve_workspace_id(dormant_id.get())
+        .and_then(|id| layout.find_workspace_by_id(id));
+    assert!(
+        chain.is_none(),
+        "two-filter chain must propagate `None` once active-view scope is enforced",
+    );
+}
+
+#[test]
 fn workspaces_all_covers_pool_including_disconnected() {
     // Remove the only output so both named workspaces land in
     // `disconnected_workspace_ids`. `workspaces_all` must still yield them,

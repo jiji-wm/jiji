@@ -139,7 +139,7 @@ use crate::ipc::server::IpcServer;
 use crate::layer::mapped::LayerSurfaceRenderElement;
 use crate::layer::MappedLayer;
 use crate::layout::tile::TileRenderElement;
-use crate::layout::workspace::{Workspace, WorkspaceId};
+use crate::layout::workspace::Workspace;
 use crate::layout::{
     HitType, Layout, LayoutElement as _, LayoutElementRenderElement, MonitorRenderElement,
 };
@@ -3656,6 +3656,14 @@ impl Niri {
         self.output_next_of(active)
     }
 
+    /// Returns `Some((output, index))` for the workspace named by
+    /// `workspace_reference`, or `None` if the reference does not resolve.
+    /// The `Id` arm composes `Layout::resolve_workspace_id` (pool-wide) with
+    /// [`Layout::find_workspace_by_id`] (active-view + disconnected-pool
+    /// scoped) — workspaces exclusive to a dormant activity therefore yield
+    /// `None`. Callers silent-no-op on `None`; the activity-action cohort
+    /// wires this into the carve-out at `niri-ipc::Action` (see
+    /// `niri-ipc/src/lib.rs:959`).
     pub fn find_output_and_workspace_index(
         &self,
         workspace_reference: WorkspaceReference,
@@ -3669,8 +3677,8 @@ impl Niri {
                 (idx, ws.id())
             }
             WorkspaceReference::Id(id) => {
-                let id = WorkspaceId::specific(id);
-                let (idx, ws) = self.layout.find_workspace_by_id(id)?;
+                let ws_id = self.layout.resolve_workspace_id(id)?;
+                let (idx, ws) = self.layout.find_workspace_by_id(ws_id)?;
                 (idx, ws.id())
             }
         };
