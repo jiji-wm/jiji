@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use niri::animation::Clock;
-use niri::layout::{
-    ActivateWindow, AddWindowTarget, LayoutElement as _, Options, SizingMode,
-};
+use niri::layout::{ActivateWindow, AddWindowTarget, LayoutElement as _, Options, SizingMode};
 use niri::render_helpers::{RenderCtx, RenderTarget};
 use niri_config::{Color, OutputName, PresetSize};
 use smithay::backend::renderer::element::RenderElement;

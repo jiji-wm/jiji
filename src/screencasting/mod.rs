@@ -174,7 +174,11 @@ impl State {
         loop {
             let mut windows = self.niri.layout.windows_all();
             let Some((_, mapped)) = windows.find(|(_, mapped)| mapped.id().get() == id) else {
-                warn!(stream_id = stream_id.get(), window_id = id, "redraw_cast: window not found");
+                warn!(
+                    stream_id = stream_id.get(),
+                    window_id = id,
+                    "redraw_cast: window not found"
+                );
                 break;
             };
 

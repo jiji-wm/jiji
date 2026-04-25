@@ -760,7 +760,10 @@ impl From<niri_ipc::Action> for Action {
                 activities,
             } => Self::SetWorkspaceActivities(
                 workspace.map(WorkspaceReference::from),
-                activities.into_iter().map(ActivityReference::from).collect(),
+                activities
+                    .into_iter()
+                    .map(ActivityReference::from)
+                    .collect(),
             ),
             niri_ipc::Action::MoveWorkspaceToActivity {
                 workspace,

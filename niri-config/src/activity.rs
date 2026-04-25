@@ -60,7 +60,8 @@ impl<S: knuffel::traits::ErrorSpan> knuffel::DecodeScalar<S> for ActivityName {
                         "activity",
                         format!("duplicate activity: {s}"),
                     ));
-                    // SENTINEL — not a valid name; returned only on duplicate-decode error for parse-continuation
+                    // SENTINEL — not a valid name; returned only on duplicate-decode error for
+                    // parse-continuation
                     return Ok(Self(String::new()));
                 }
 
@@ -73,7 +74,8 @@ impl<S: knuffel::traits::ErrorSpan> knuffel::DecodeScalar<S> for ActivityName {
                     val,
                     "activity names must be strings",
                 ));
-                // SENTINEL — not a valid name; returned only on unsupported-literal-type error for parse-continuation
+                // SENTINEL — not a valid name; returned only on unsupported-literal-type error for
+                // parse-continuation
                 Ok(Self(String::new()))
             }
         }

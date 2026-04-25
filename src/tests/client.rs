@@ -555,10 +555,11 @@ impl Dispatch<WlRegistry, ()> for State {
                     let version = min(version, WlSeat::interface().version);
                     state.seat = Some(registry.bind(name, version, qh, ()));
                 } else if interface == ZwpKeyboardShortcutsInhibitManagerV1::interface().name {
-                    let version =
-                        min(version, ZwpKeyboardShortcutsInhibitManagerV1::interface().version);
-                    state.kb_shortcuts_inhibit_manager =
-                        Some(registry.bind(name, version, qh, ()));
+                    let version = min(
+                        version,
+                        ZwpKeyboardShortcutsInhibitManagerV1::interface().version,
+                    );
+                    state.kb_shortcuts_inhibit_manager = Some(registry.bind(name, version, qh, ()));
                 }
 
                 let global = Global {
