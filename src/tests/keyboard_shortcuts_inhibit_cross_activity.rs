@@ -323,15 +323,6 @@ fn inhibitor_reactivated_on_switch_activity_previous() {
     // `SwitchActivity(reference)` tested in (1) / (2) — a regression that
     // forgot to add the sweep call to `SwitchActivityPrevious` would pass
     // the first two tests and fail this one.
-    //
-    // Note: the spec's "RemoveActivity cascade" test (its (5)) cannot be
-    // written in this sub-phase because `Layout::remove_activity` rejects
-    // removal of an activity that exclusively owns a workspace with
-    // windows (`ExclusiveWorkspaceHasWindows`). Pinning the cascade
-    // requires a `MoveWorkspaceToActivity`-class mutator (not yet landed).
-    // The State-level hook at the `Action::RemoveActivity` arm
-    // still exists and uses the same refresh call tested here, so the
-    // mechanism is covered.
     let mut f = Fixture::with_config(config_with_two_activities(&[], &[]));
     f.add_output(1, (1920, 1080));
     let client_id = f.add_client();
@@ -369,5 +360,118 @@ fn inhibitor_reactivated_on_switch_activity_previous() {
             .is_empty(),
         "tracking set must drain on switch-back via \
          SwitchActivityPrevious",
+    );
+}
+
+#[test]
+fn inhibitor_reactivated_on_remove_activity_cascade() {
+    // Pin the `Action::RemoveActivity` cascade hook site (fifth of five
+    // sites at input/mod.rs). When the active activity is removed,
+    // `remove_activity` cascades to `switch_activity(previous_id)`, then
+    // the dispatcher calls `refresh_keyboard_shortcut_inhibitors_after_activity_switch`
+    // at input/mod.rs:1784–1785.
+    //
+    // Discriminating regression: deleting that refresh call would leave the
+    // inhibitor inactive after the cascade and leave the tracking set
+    // populated — both final asserts would fail.
+    let mut f = Fixture::with_config(config_with_two_activities(&[], &[]));
+    f.add_output(1, (1920, 1080));
+    let client_id = f.add_client();
+
+    // Inhibitor must precede CreateActivity so the tracking-set bookkeeping
+    // starts in a known state.
+    let client_surface = map_window(&mut f, client_id, 100, 100);
+    f.niri_state().refresh_and_flush_clients();
+
+    let (_inhibitor, server_surface) = create_inhibitor(&mut f, client_id, &client_surface);
+    assert!(
+        f.niri()
+            .keyboard_shortcuts_inhibiting_surfaces
+            .get(&server_surface)
+            .expect("inhibitor must be present in the map after new_inhibitor handler")
+            .is_active(),
+        "precondition: inhibitor is active immediately after new_inhibitor",
+    );
+
+    // Capture alpha's raw ActivityId for the previous_id assertion below.
+    let alpha_raw = f
+        .niri()
+        .layout
+        .activities()
+        .iter()
+        .find(|a| a.name() == "alpha")
+        .expect("alpha must be present in the config-seeded activity pool")
+        .id();
+
+    // Create a runtime activity "gamma" — does not flip active.
+    f.niri_state()
+        .do_action(Action::CreateActivity("gamma".to_string()), false);
+    f.niri_state().refresh_and_flush_clients();
+
+    // Switch to gamma: alpha is hidden, inhibitor deactivates, surface
+    // enters `deactivated_inhibitors_by_activity_switch`, previous_id
+    // becomes alpha.
+    f.niri_state().do_action(
+        Action::SwitchActivity(ActivityReference::Name("gamma".into())),
+        false,
+    );
+    f.niri_state().refresh_and_flush_clients();
+
+    assert!(
+        f.niri()
+            .deactivated_inhibitors_by_activity_switch
+            .contains(&server_surface),
+        "mid-test: inhibitor must be in the tracking set after switch to gamma",
+    );
+    assert_eq!(
+        f.niri().layout.active_activity_id(),
+        f.niri()
+            .layout
+            .activities()
+            .iter()
+            .find(|a| a.name() == "gamma")
+            .expect("gamma must be present after CreateActivity")
+            .id(),
+        "mid-test: gamma must be the active activity after SwitchActivity(gamma)",
+    );
+    // Load-bearing: previous_id == alpha ensures the cascade targets alpha,
+    // not the declaration-order-scan fallback. A regression in previous_id
+    // upkeep would silently route the cascade elsewhere and the final
+    // active_activity_id assert would catch it — but this pin makes the
+    // failure mode explicit.
+    assert_eq!(
+        f.niri().layout.activities().previous_id(),
+        Some(alpha_raw),
+        "mid-test: previous_id must be alpha after switch-to-gamma",
+    );
+
+    // Remove gamma — it is the active activity. The cascade branch fires:
+    // `switch_activity(previous_id = alpha)` is called inside
+    // `remove_activity`, then the dispatcher calls
+    // `refresh_keyboard_shortcut_inhibitors_after_activity_switch`.
+    f.niri_state().do_action(
+        Action::RemoveActivity(ActivityReference::Name("gamma".into())),
+        false,
+    );
+    f.niri_state().refresh_and_flush_clients();
+
+    assert!(
+        f.niri()
+            .keyboard_shortcuts_inhibiting_surfaces
+            .get(&server_surface)
+            .expect("inhibitor must still be present after cascade")
+            .is_active(),
+        "inhibitor must be reactivated when alpha becomes visible via the RemoveActivity cascade",
+    );
+    assert!(
+        f.niri()
+            .deactivated_inhibitors_by_activity_switch
+            .is_empty(),
+        "tracking set must drain on cascade switch-back to alpha",
+    );
+    assert_eq!(
+        f.niri().layout.active_activity_id(),
+        alpha_raw,
+        "cascade must land on alpha",
     );
 }
