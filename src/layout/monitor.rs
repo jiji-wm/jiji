@@ -290,12 +290,12 @@ impl<W: LayoutElement> Monitor<W> {
     /// All `workspace_ids` must already be keys in `pool`. `Monitor::new` binds each of them to
     /// `output`, syncs config, then inserts empty bookend workspace(s) into the pool (top and/or
     /// bottom per `options.layout.empty_workspace_above_first`). Returns the new `Monitor` and
-    /// a `WorkspaceView` whose `ids()` is `[optional_top_empty, ...workspace_ids_in_order..., bottom_empty]`;
-    /// the caller stores the view in the active activity's `views` map.
+    /// a `WorkspaceView` whose `ids()` is `[optional_top_empty, ...workspace_ids_in_order...,
+    /// bottom_empty]`; the caller stores the view in the active activity's `views` map.
     // Hits clippy::too_many_arguments (8/7). Every argument is load-bearing — splitting into
     // helper structs would obscure the call-site contract with `Layout::add_output`; the only
     // call site passes them all in from `Layout` fields. `seed_activity` is required by the
-    // DD §3.2 ctor contract on `Workspace::new*`.
+    // Ctor contract on `Workspace::new*`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         output: Output,
@@ -752,10 +752,7 @@ impl<W: LayoutElement> Monitor<W> {
         if let Some(hint) = &self.insert_hint {
             match hint.workspace {
                 InsertWorkspace::Existing(ws_id) => {
-                    if let Some(ws) = pool
-                        .get(&ws_id)
-                        .filter(|_| view.ids().contains(&ws_id))
-                    {
+                    if let Some(ws) = pool.get(&ws_id).filter(|_| view.ids().contains(&ws_id)) {
                         if let Some(mut area) = ws.insert_hint_area(hint.position) {
                             let scale = ws.scale().fractional_scale();
                             let view_size = ws.view_size();

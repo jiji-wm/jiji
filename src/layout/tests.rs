@@ -1298,20 +1298,24 @@ impl Op {
                     .map(|m| layout.active_view(&m.output_id()).ids().to_vec())
                     .collect();
                 let pool = &layout.workspaces;
-                let Some((old_idx, old_output)) = layout.monitors.iter().zip(views_snapshot.iter()).find_map(|(monitor, ids)| {
-                    ids
-                        .iter()
-                        .enumerate()
-                        .find_map(|(i, id)| {
-                            let ws = pool.get(id).unwrap();
-                            if ws.name == Some(format!("ws{ws_name}")) {
-                                Some(i)
-                            } else {
-                                None
-                            }
-                        })
-                        .map(|i| (i, monitor.output.clone()))
-                }) else {
+                let Some((old_idx, old_output)) = layout
+                    .monitors
+                    .iter()
+                    .zip(views_snapshot.iter())
+                    .find_map(|(monitor, ids)| {
+                        ids.iter()
+                            .enumerate()
+                            .find_map(|(i, id)| {
+                                let ws = pool.get(id).unwrap();
+                                if ws.name == Some(format!("ws{ws_name}")) {
+                                    Some(i)
+                                } else {
+                                    None
+                                }
+                            })
+                            .map(|i| (i, monitor.output.clone()))
+                    })
+                else {
                     return;
                 };
 
@@ -1348,20 +1352,24 @@ impl Op {
                     .map(|m| layout.active_view(&m.output_id()).ids().to_vec())
                     .collect();
                 let pool = &layout.workspaces;
-                let Some((old_idx, old_output)) = layout.monitors.iter().zip(views_snapshot.iter()).find_map(|(monitor, ids)| {
-                    ids
-                        .iter()
-                        .enumerate()
-                        .find_map(|(i, id)| {
-                            let ws = pool.get(id).unwrap();
-                            if ws.name == Some(format!("ws{ws_name}")) {
-                                Some(i)
-                            } else {
-                                None
-                            }
-                        })
-                        .map(|i| (i, monitor.output.clone()))
-                }) else {
+                let Some((old_idx, old_output)) = layout
+                    .monitors
+                    .iter()
+                    .zip(views_snapshot.iter())
+                    .find_map(|(monitor, ids)| {
+                        ids.iter()
+                            .enumerate()
+                            .find_map(|(i, id)| {
+                                let ws = pool.get(id).unwrap();
+                                if ws.name == Some(format!("ws{ws_name}")) {
+                                    Some(i)
+                                } else {
+                                    None
+                                }
+                            })
+                            .map(|i| (i, monitor.output.clone()))
+                    })
+                else {
                     return;
                 };
 
@@ -2464,7 +2472,9 @@ fn open_right_of_on_different_workspace() {
         "the second workspace must remain active"
     );
     assert_eq!(
-        mon.workspace_at(pool, &view, 0).scrolling().active_column_idx(),
+        mon.workspace_at(pool, &view, 0)
+            .scrolling()
+            .active_column_idx(),
         1,
         "the new window must become active"
     );
@@ -2509,7 +2519,9 @@ fn open_right_of_on_different_workspace_ewaf() {
         "the second workspace must remain active"
     );
     assert_eq!(
-        mon.workspace_at(pool, &view, 1).scrolling().active_column_idx(),
+        mon.workspace_at(pool, &view, 1)
+            .scrolling()
+            .active_column_idx(),
         1,
         "the new window must become active"
     );
@@ -4280,7 +4292,7 @@ fn make_test_output(name: &str) -> Output {
 
 #[test]
 fn workspace_activities_initializes_from_ctor_param() {
-    // Pin the DD §3.2 ctor contract: `activities` seeds the workspace's activity
+    // Pin the ctor contract: `activities` seeds the workspace's activity
     // membership verbatim. Both the with-output and no-outputs flavors must honor it.
     let output = make_test_output("output1");
     let seed: HashSet<ActivityId> =
@@ -4323,7 +4335,7 @@ fn workspace_activities_initializes_from_ctor_param() {
 #[test]
 #[should_panic(expected = "activities must be non-empty")]
 fn workspace_new_panics_on_empty_activities() {
-    // DD §3.2: ctors reject an empty activity set.
+    // Ctors reject an empty activity set.
     let _ = Workspace::<TestWindow>::new_no_outputs(
         HashSet::new(),
         Clock::with_time(Duration::ZERO),
@@ -4334,7 +4346,7 @@ fn workspace_new_panics_on_empty_activities() {
 #[test]
 #[should_panic(expected = "activities must be non-empty")]
 fn workspace_new_with_config_panics_on_empty_activities() {
-    // DD §3.2: the caller-facing `new_with_config` ctor also rejects an empty
+    // The caller-facing `new_with_config` ctor also rejects an empty
     // activity set. Distinct from the `new_no_outputs` path so a deletion of
     // the assert in either caller-facing ctor is caught independently.
     let output = make_test_output("output1");
@@ -4462,7 +4474,7 @@ fn layout_seed_stamps_workspace_with_declared_activities() {
 
 #[test]
 fn layout_seed_sticky_stamps_all_activity_ids() {
-    // Sticky beats an explicit `activity "..."` list (DD §3.2): the workspace
+    // Sticky beats an explicit `activity "..."` list: the workspace
     // must be auto-tagged with every activity id in the pool.
     let config = Config {
         activities: vec![
@@ -4597,7 +4609,11 @@ fn build_activities_ipc_mirrors_seed_state() {
     assert_eq!(ipc.len(), 2);
 
     let active_entries: Vec<_> = ipc.iter().filter(|a| a.is_active).collect();
-    assert_eq!(active_entries.len(), 1, "exactly one activity must be active");
+    assert_eq!(
+        active_entries.len(),
+        1,
+        "exactly one activity must be active"
+    );
     assert_eq!(active_entries[0].id, beta_id.get(), "beta must be active");
     assert_eq!(active_entries[0].name, "beta");
 
@@ -4612,7 +4628,7 @@ fn build_activities_ipc_mirrors_seed_state() {
 
 #[test]
 fn backwards_compat_default_config_seeds_single_implicit_default_activity() {
-    // Backwards-compat pin for DD §6.5: when no `activity` blocks appear in
+    // Backwards-compat pin for: when no `activity` blocks appear in
     // the config, exactly one implicit runtime "Default" activity is seeded,
     // it is active, it is not config-declared, and no previous activity exists.
     //
@@ -4646,7 +4662,7 @@ fn backwards_compat_default_config_seeds_single_implicit_default_activity() {
 
 #[test]
 fn backwards_compat_workspaces_stamped_with_default_activity_on_empty_config() {
-    // Backwards-compat pin for DD §6.5: when there are workspace config blocks
+    // Backwards-compat pin for: when there are workspace config blocks
     // but no `activity` blocks, every workspace must be stamped with the
     // implicit Default activity id, must be visible (idx >= 1) on a connected
     // monitor, and must not be sticky.
@@ -4695,8 +4711,7 @@ fn backwards_compat_workspaces_stamped_with_default_activity_on_empty_config() {
     let view = layout.active_view(&mon_out);
     let view_ids: Vec<WorkspaceId> = view.ids().to_vec();
 
-    let snapshot =
-        crate::ipc::server::build_workspace_snapshot(&layout, None, test_window_id_of);
+    let snapshot = crate::ipc::server::build_workspace_snapshot(&layout, None, test_window_id_of);
 
     assert_eq!(
         snapshot.len(),
@@ -4734,7 +4749,7 @@ fn backwards_compat_workspaces_stamped_with_default_activity_on_empty_config() {
 
 #[test]
 fn backwards_compat_switch_activity_self_and_previous_are_noops_with_only_default() {
-    // Backwards-compat pin for DD §6.5: with only the seeded Default activity,
+    // Backwards-compat pin for: with only the seeded Default activity,
     // both switch_activity(default_id) and switch_activity_previous() are
     // pure no-ops — active and previous remain unchanged.
     //
@@ -4743,7 +4758,8 @@ fn backwards_compat_switch_activity_self_and_previous_are_noops_with_only_defaul
     // the individual paths are also covered by
     // `layout_switch_activity_no_op_on_same_target` and
     // `layout_switch_activity_previous_no_op_when_no_previous`.
-    let mut layout = Layout::<TestWindow>::new(Clock::with_time(Duration::ZERO), &Config::default());
+    let mut layout =
+        Layout::<TestWindow>::new(Clock::with_time(Duration::ZERO), &Config::default());
     let default_id = layout.active_activity_id();
     assert_eq!(layout.activities.len(), 1);
 
@@ -4939,10 +4955,7 @@ fn switch_activity_preserves_seed_dormant_view() {
     let out_id = layout.monitors[0].output_id();
 
     // Snapshot seed's view ids before switching away.
-    let seed_view_ids: Vec<_> = layout
-        .active_view(&out_id)
-        .ids()
-        .to_vec();
+    let seed_view_ids: Vec<_> = layout.active_view(&out_id).ids().to_vec();
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
@@ -5133,7 +5146,9 @@ fn switch_activity_tagged_workspace_output_affinity() {
 
     // output2: must contain the pre-tagged id with a fresh trailing empty appended
     // (lift branch — see `ensure_active_views`).
-    let out2_view = beta_views.get(&out2).expect("beta must have a view for out2");
+    let out2_view = beta_views
+        .get(&out2)
+        .expect("beta must have a view for out2");
     assert!(
         out2_view.ids().contains(&pick),
         "beta's out2 view must include the pre-tagged workspace",
@@ -5155,7 +5170,9 @@ fn switch_activity_tagged_workspace_output_affinity() {
     );
 
     // output1: must contain exactly one freshly-minted id — allocation branch.
-    let out1_view = beta_views.get(&out1).expect("beta must have a view for out1");
+    let out1_view = beta_views
+        .get(&out1)
+        .expect("beta must have a view for out1");
     assert_eq!(out1_view.len(), 1, "fresh out1 view holds exactly one id");
     let fresh_id = out1_view.ids()[0];
     assert!(
@@ -5349,7 +5366,10 @@ fn switch_activity_lift_branch_reads_ewaf_from_monitor_not_layout() {
         "global EWAF must stay false so the per-monitor capture is what's exercised",
     );
     assert!(
-        layout.monitors[0].options.layout.empty_workspace_above_first,
+        layout.monitors[0]
+            .options
+            .layout
+            .empty_workspace_above_first,
         "per-monitor EWAF must be true via layout_config merge",
     );
 
@@ -5432,11 +5452,17 @@ fn switch_activity_lift_branch_per_monitor_ewaf_two_monitors_mixed() {
 
     // Discriminator sanity: out1 has EWAF on, out2 has EWAF off.
     assert!(
-        layout.monitors[0].options.layout.empty_workspace_above_first,
+        layout.monitors[0]
+            .options
+            .layout
+            .empty_workspace_above_first,
         "out1 must have per-monitor EWAF enabled",
     );
     assert!(
-        !layout.monitors[1].options.layout.empty_workspace_above_first,
+        !layout.monitors[1]
+            .options
+            .layout
+            .empty_workspace_above_first,
         "out2 must have EWAF disabled so the two monitors differ",
     );
 
@@ -5473,8 +5499,12 @@ fn switch_activity_lift_branch_per_monitor_ewaf_two_monitors_mixed() {
     layout.switch_activity(beta_id);
 
     let beta_views = layout.activities.active().views();
-    let view1 = beta_views.get(&out1).expect("beta must have a view for out1");
-    let view2 = beta_views.get(&out2).expect("beta must have a view for out2");
+    let view1 = beta_views
+        .get(&out1)
+        .expect("beta must have a view for out1");
+    let view2 = beta_views
+        .get(&out2)
+        .expect("beta must have a view for out2");
 
     // out1 (EWAF on): must be [top_empty, pick1, bottom_empty] — len 3, active at 1.
     assert_eq!(
@@ -5633,11 +5663,7 @@ fn switch_activity_focus_follows_active_activity_view() {
 fn switch_activity_preserves_active_monitor_idx_in_range() {
     // Multi-output: make output2 the active monitor, switch activities, and confirm
     // active_monitor_idx is preserved and still in range. Pins the post-condition end-to-end.
-    let ops = [
-        Op::AddOutput(1),
-        Op::AddOutput(2),
-        Op::FocusOutput(2),
-    ];
+    let ops = [Op::AddOutput(1), Op::AddOutput(2), Op::FocusOutput(2)];
     let mut layout = check_ops(ops);
     let mon_idx_before = layout.active_monitor_idx;
     assert!(mon_idx_before < layout.monitors.len());
@@ -5889,15 +5915,15 @@ fn activity_switch_block_err_envelope_matches_wire_contract() {
     for (block, expected) in [
         (
             ActivitySwitchBlock::InteractiveMove,
-            "activity switch blocked: interactive window move (DD §5.11)",
+            "activity switch blocked: interactive window move",
         ),
         (
             ActivitySwitchBlock::Dnd,
-            "activity switch blocked: drag and drop (DD §5.11)",
+            "activity switch blocked: drag and drop",
         ),
         (
             ActivitySwitchBlock::WorkspaceSwitchGesture,
-            "activity switch blocked: workspace switch gesture (DD §5.11)",
+            "activity switch blocked: workspace switch gesture",
         ),
     ] {
         assert_eq!(format_activity_switch_block_err(block), expected);
@@ -5914,28 +5940,37 @@ fn do_action_error_display_matches_wire_contract() {
     // layers will be caught here.
     use super::{ActivitySwitchBlock, DoActionError};
     // Delegated tokens — must match the `ActivitySwitchBlock::Display` strings
-    // exactly (byte-identity is load-bearing for the §5.11 envelope).
+    // exactly (byte-identity is load-bearing for the envelope).
     assert_eq!(
-        format!("{}", DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::InteractiveMove)),
+        format!(
+            "{}",
+            DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::InteractiveMove)
+        ),
         "interactive window move",
     );
     assert_eq!(
-        format!("{}", DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::Dnd)),
+        format!(
+            "{}",
+            DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::Dnd)
+        ),
         "drag and drop",
     );
     assert_eq!(
-        format!("{}", DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::WorkspaceSwitchGesture)),
+        format!(
+            "{}",
+            DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::WorkspaceSwitchGesture)
+        ),
         "workspace switch gesture",
     );
-    // New token for the §5.18 wire contract.
+    // New token for the wire contract.
     assert_eq!(
         format!("{}", DoActionError::WindowNotFound { id: 42 }),
         "window not found: id=42",
     );
-    // DD §5.14 workspace-activity assignment tokens — plain lowercase, no
+    // Workspace-activity assignment tokens — plain lowercase, no
     // payload interpolation. Add and Remove share "activity not found" /
-    // "workspace not found" text; the DD-section suffix at the envelope layer
-    // disambiguates which DD clause is load-bearing.
+    // "workspace not found" text; the envelope test confirms byte-identity
+    // and disambiguates which clause is load-bearing.
     assert_eq!(
         format!("{}", DoActionError::AddWorkspaceToActivityActivityNotFound),
         "activity not found",
@@ -5945,19 +5980,25 @@ fn do_action_error_display_matches_wire_contract() {
         "workspace not found",
     );
     assert_eq!(
-        format!("{}", DoActionError::RemoveWorkspaceFromActivityActivityNotFound),
+        format!(
+            "{}",
+            DoActionError::RemoveWorkspaceFromActivityActivityNotFound
+        ),
         "activity not found",
     );
     assert_eq!(
-        format!("{}", DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound),
+        format!(
+            "{}",
+            DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound
+        ),
         "workspace not found",
     );
     assert_eq!(
         format!("{}", DoActionError::RemoveWorkspaceFromActivityLastActivity),
         "workspace would be left with no activities",
     );
-    // DD §5.14 / §3.2 SetWorkspaceActivities tokens. ActivityNotFound shares
-    // text with Add / Remove — byte-identity pins the shared DD §5.14 row.
+    // SetWorkspaceActivities tokens. ActivityNotFound shares
+    // text with Add / Remove — byte-identity pins the shared row.
     assert_eq!(
         format!("{}", DoActionError::SetWorkspaceActivitiesActivityNotFound),
         "activity not found",
@@ -5966,9 +6007,9 @@ fn do_action_error_display_matches_wire_contract() {
         format!("{}", DoActionError::SetWorkspaceActivitiesEmptyActivityList),
         "activities list is empty",
     );
-    // DD §5.14 MoveWorkspaceToActivity tokens. ActivityNotFound shares
-    // text with the other §5.14 rows; the workspace-not-in-active text is
-    // the DD §4.3 line 499 wording, minus the "use Add…" suggestion
+    // MoveWorkspaceToActivity tokens. ActivityNotFound shares
+    // text with the other rows; the workspace-not-in-active text is
+    // the wire-contract wording, minus the "use Add…" suggestion
     // (docstring concern, not wire token).
     assert_eq!(
         format!("{}", DoActionError::MoveWorkspaceToActivityActivityNotFound),
@@ -5987,70 +6028,70 @@ fn do_action_error_display_matches_wire_contract() {
 fn do_action_error_envelope_matches_wire_contract() {
     // Pins the full IPC wire envelopes produced by `format_do_action_error`.
     //
-    // The `ActivitySwitchBlocked` cases re-assert the three §5.11 envelopes
+    // The `ActivitySwitchBlocked` cases re-assert the three envelopes
     // already pinned by `activity_switch_block_err_envelope_matches_wire_contract`
     // — this is a deliberate regression guard against byte-identity drift if
     // `format_do_action_error` ever stops delegating to
     // `format_activity_switch_block_err`.
     //
-    // The `WindowNotFound` case pins the new DD §5.18 envelope.
+    // The `WindowNotFound` case pins the new envelope.
     use super::{format_do_action_error, ActivitySwitchBlock, DoActionError};
     for (err, expected) in [
         (
             DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::InteractiveMove),
-            "activity switch blocked: interactive window move (DD §5.11)",
+            "activity switch blocked: interactive window move",
         ),
         (
             DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::Dnd),
-            "activity switch blocked: drag and drop (DD §5.11)",
+            "activity switch blocked: drag and drop",
         ),
         (
             DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::WorkspaceSwitchGesture),
-            "activity switch blocked: workspace switch gesture (DD §5.11)",
+            "activity switch blocked: workspace switch gesture",
         ),
         (
             DoActionError::WindowNotFound { id: 42 },
-            "window not found: id=42 (DD §5.18)",
+            "window not found: id=42",
         ),
         (
             DoActionError::WindowNotFound { id: 0 },
-            "window not found: id=0 (DD §5.18)",
+            "window not found: id=0",
         ),
         (
             DoActionError::AddWorkspaceToActivityActivityNotFound,
-            "activity not found (DD §5.14)",
+            "activity not found",
         ),
         (
             DoActionError::AddWorkspaceToActivityWorkspaceNotFound,
-            "workspace not found (DD §5.14)",
+            "workspace not found",
         ),
         (
             DoActionError::RemoveWorkspaceFromActivityActivityNotFound,
-            "activity not found (DD §5.14)",
+            "activity not found",
         ),
         (
             DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound,
-            "workspace not found (DD §5.14)",
+            "workspace not found",
         ),
         (
             DoActionError::RemoveWorkspaceFromActivityLastActivity,
-            "workspace would be left with no activities (DD §3.2)",
+            "workspace would be left with no activities",
         ),
         (
             DoActionError::SetWorkspaceActivitiesActivityNotFound,
-            "activity not found (DD §5.14)",
+            "activity not found",
         ),
         (
             DoActionError::SetWorkspaceActivitiesEmptyActivityList,
-            "activities list is empty (DD §3.2)",
+            "activities list is empty",
         ),
         (
             DoActionError::MoveWorkspaceToActivityActivityNotFound,
-            "activity not found (DD §5.14)",
+            "activity not found",
         ),
         (
             DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity,
-            "workspace not in active activity (DD §5.14)",
+            "workspace not in active activity",
         ),
     ] {
         assert_eq!(format_do_action_error(err), expected);
@@ -6165,7 +6206,7 @@ fn workspaces_with_activity_filters_by_membership() {
     //
     // Assertions:
     //   alpha filter: exact set {alpha_ws_id} — no more, no less.
-    //   beta  filter: exact set {beta_ws_id}.
+    //   beta filter: exact set {beta_ws_id}.
     let ops = [
         Op::AddOutput(1),
         Op::AddNamedWorkspace {
@@ -6199,7 +6240,7 @@ fn workspaces_with_activity_filters_by_membership() {
     layout.activities.insert(beta_activity);
 
     // Stamp the first workspace (lowest id) with beta-only; leave the rest
-    // as alpha-only.  Direct field mutation is legal here: tests live in
+    // as alpha-only. Direct field mutation is legal here: tests live in
     // the `super` module and `Workspace::activities` is `pub(super)`.
     let beta_ws_id = on_output[0];
     let expected_alpha_ids: HashSet<WorkspaceId> = on_output[1..].iter().copied().collect();
@@ -6214,8 +6255,7 @@ fn workspaces_with_activity_filters_by_membership() {
         .map(|ws| ws.id())
         .collect();
     assert_eq!(
-        alpha_ids,
-        expected_alpha_ids,
+        alpha_ids, expected_alpha_ids,
         "alpha filter must yield exactly the alpha-only workspaces",
     );
 
@@ -6309,7 +6349,7 @@ fn workspaces_with_activity_includes_sticky() {
 
 #[test]
 fn layout_activity_is_urgent_aggregates_workspace_urgency() {
-    // Aggregation rule pin (DD §3.1 bubble: window → workspace → activity).
+    // Aggregation rule pin ( bubble: window → workspace → activity).
     // Build two activities that share a workspace and one activity that does
     // not; flip window urgency on the shared workspace and assert the two
     // sharing activities report urgent, while the unrelated one does not.
@@ -6435,7 +6475,7 @@ fn test_window_id_of(win: &TestWindow) -> u64 {
 fn ipc_workspace_snapshot_hidden_workspace_has_idx_zero_and_flag_false() {
     // A workspace whose activity set is disjoint from the active activity's
     // id must surface through pass 2 of the snapshot builder with the
-    // DD §3.5 sentinel `idx: 0`, `is_in_active_activity: false`, and neither
+    // Sentinel `idx: 0`, `is_in_active_activity: false`, and neither
     // is_active nor is_focused (pass 2 hardcodes both to false).
     let ops = [
         Op::AddOutput(1),
@@ -6649,7 +6689,10 @@ fn ipc_workspace_snapshot_mixed_visibility_preserves_pass_disjointness() {
 
     let snapshot = crate::ipc::server::build_workspace_snapshot(&layout, None, test_window_id_of);
 
-    let pool_ids: HashSet<u64> = layout.workspaces_all().map(|(_, ws)| ws.id().get()).collect();
+    let pool_ids: HashSet<u64> = layout
+        .workspaces_all()
+        .map(|(_, ws)| ws.id().get())
+        .collect();
     let snapshot_ids: HashSet<u64> = snapshot.iter().map(|ws| ws.id).collect();
     assert_eq!(
         snapshot_ids, pool_ids,
@@ -6815,12 +6858,16 @@ fn create_activity_duplicate_name_errs_case_insensitive_runtime() {
         .create_activity("BETA".to_owned())
         .expect_err("case-insensitive collision with runtime activity must be rejected");
     assert_eq!(err, CreateActivityError::DuplicateName);
-    assert_eq!(layout.activities.len(), 2, "pool must not grow on rejection");
+    assert_eq!(
+        layout.activities.len(),
+        2,
+        "pool must not grow on rejection"
+    );
 }
 
 #[test]
 fn create_activity_expands_sticky_workspaces() {
-    // A sticky workspace is "present on every activity" by DD semantics. When
+    // A sticky workspace is "present on every activity" by the activities contract. When
     // a new runtime activity is created, its id must be unioned into every
     // sticky workspace's `activities` set; non-sticky workspaces' sets must
     // be untouched.
@@ -6895,7 +6942,7 @@ fn create_activity_expands_sticky_workspaces() {
 
 #[test]
 fn create_activity_no_view_population() {
-    // Lazy view creation (DD §5.3): create_activity does not populate per-output
+    // Lazy view creation: create_activity does not populate per-output
     // views — those materialize on the first switch_activity to the new id.
     let mut layout = Layout::<TestWindow>::default();
     let id = layout
@@ -7053,7 +7100,10 @@ fn rename_activity_config_declared_errs() {
     let work_id = layout.active_activity_id();
 
     let err = layout
-        .rename_activity(&ActivityReferenceArg::Id(work_id.get()), "Office".to_owned())
+        .rename_activity(
+            &ActivityReferenceArg::Id(work_id.get()),
+            "Office".to_owned(),
+        )
         .expect_err("config-declared rename must err");
     assert_eq!(err, RenameActivityError::ConfigDeclared);
     assert_eq!(
@@ -7262,7 +7312,7 @@ fn remove_activity_unknown_reference_errs_not_found() {
 
 #[test]
 fn remove_activity_config_declared_errs() {
-    // A config-declared activity cannot be removed at runtime (DD §5.14
+    // A config-declared activity cannot be removed at runtime (
     // bullet 1). Seed a config-declared "Alpha" as the first activity, create
     // a runtime "Beta", then attempt to remove Alpha → ConfigDeclared.
     let cfg = vec![niri_config::Activity {
@@ -7306,7 +7356,7 @@ fn remove_activity_config_declared_errs() {
 #[test]
 fn remove_activity_last_remaining_errs() {
     // Fresh default layout has exactly one activity; removing it must fail
-    // with LastRemaining (DD §5.14 bullet 3).
+    // with LastRemaining ( bullet 3).
     let mut layout = Layout::<TestWindow>::default();
     let seed_id = layout.active_activity_id();
     assert_eq!(layout.activities.len(), 1);
@@ -7327,7 +7377,7 @@ fn remove_activity_last_remaining_errs() {
 #[test]
 fn remove_activity_exclusive_workspace_with_windows_errs() {
     // Exclusive (activities == {beta}) workspace carrying windows must block
-    // removal (DD §5.14 bullet 2). Test that the pool is untouched after the
+    // removal ( bullet 2). Test that the pool is untouched after the
     // rejection — no partial mutation.
     let ops = [
         Op::AddOutput(1),
@@ -7371,7 +7421,7 @@ fn remove_activity_exclusive_workspace_with_windows_errs() {
 
 #[test]
 fn remove_activity_exclusive_named_workspace_errs() {
-    // Exclusive named workspace blocks removal even when empty (DD §5.14
+    // Exclusive named workspace blocks removal even when empty (
     // "Exclusive workspace destruction semantics" — named-empty is preserved
     // specifically because the user gave it a name).
     let ops = [
@@ -7778,12 +7828,10 @@ fn remove_activity_view_patching_both_branches() {
     // Exercises BOTH branches of the retain closure in the exclusive-workspace
     // destruction loop (mod.rs:4097-4113):
     //
-    //   - Drop branch (view.len() == 1 → return false): gamma's dormant view
-    //     for the output contains only beta_ws_id; after removal the whole
-    //     entry is dropped.
-    //   - Patch branch (view.len() > 1 → remove_at): alpha's active view for
-    //     the output contains [alpha_default_ws, beta_ws_id]; after removal
-    //     only [alpha_default_ws] remains.
+    //   - Drop branch (view.len() == 1 → return false): gamma's dormant view for the output
+    //     contains only beta_ws_id; after removal the whole entry is dropped.
+    //   - Patch branch (view.len() > 1 → remove_at): alpha's active view for the output contains
+    //     [alpha_default_ws, beta_ws_id]; after removal only [alpha_default_ws] remains.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
 
@@ -7834,10 +7882,7 @@ fn remove_activity_view_patching_both_branches() {
         .get_mut(gamma)
         .expect("gamma must be a live activity")
         .views_mut()
-        .insert(
-            mon_out.clone(),
-            WorkspaceView::new(vec![beta_ws_id], 0),
-        );
+        .insert(mon_out.clone(), WorkspaceView::new(vec![beta_ws_id], 0));
 
     // Sanity: both branches are populated before removal.
     assert_eq!(
@@ -7883,7 +7928,10 @@ fn remove_activity_view_patching_both_branches() {
     );
 
     assert!(!layout.activities.contains(beta), "beta removed");
-    assert!(!layout.workspaces.contains_key(&beta_ws_id), "beta_ws destroyed");
+    assert!(
+        !layout.workspaces.contains_key(&beta_ws_id),
+        "beta_ws destroyed"
+    );
 
     layout.verify_invariants();
 }
@@ -8274,7 +8322,7 @@ fn destroy_workspaces_cross_activity_patches_other_activity_views() {
         id
     };
     // Seed Beta's view with a stale reference to doomed_id. doomed_id.activities
-    // remains {Alpha} (exclusive), so the §5.4 guard clears and destroy proceeds.
+    // remains {Alpha} (exclusive), so the guard clears and destroy proceeds.
     // The retain closure patches Beta's view because it iterates every activity's
     // views regardless of workspace membership.
     layout
@@ -8302,10 +8350,7 @@ fn destroy_workspaces_cross_activity_patches_other_activity_views() {
         "doomed id must be gone from the pool",
     );
     assert!(
-        !layout
-            .active_view(&mon_out)
-            .ids()
-            .contains(&doomed_id),
+        !layout.active_view(&mon_out).ids().contains(&doomed_id),
         "active view must no longer contain doomed id",
     );
     let beta_view = layout
@@ -8344,7 +8389,7 @@ fn destroy_workspaces_cross_activity_drops_single_entry_view() {
         .create_activity("Beta".to_owned())
         .expect("create beta");
     // Seed Beta's view with a stale reference to doomed_id. doomed_id.activities
-    // remains {Alpha} (exclusive), so the §5.4 guard clears and destroy proceeds.
+    // remains {Alpha} (exclusive), so the guard clears and destroy proceeds.
     // The retain closure patches Beta's view because it iterates every activity's
     // views regardless of workspace membership.
     layout
@@ -8376,7 +8421,7 @@ fn destroy_workspaces_cross_activity_drops_single_entry_view() {
     );
 }
 
-// Baseline for the DD §5.4 shared-workspace cleanup rule: a workspace owned
+// Baseline for the shared-workspace cleanup rule: a workspace owned
 // by exactly one activity is safe to reclaim.
 #[test]
 fn workspace_is_safe_to_reclaim_true_for_single_activity_membership() {
@@ -8404,8 +8449,8 @@ fn workspace_is_safe_to_reclaim_true_for_single_activity_membership() {
 }
 
 // Guard's primary correctness: a workspace shared between two activities
-// must NOT be safe to reclaim (DD §5.4: "a workspace with
-// `activities = {A, B}` that becomes empty is not removed").
+// must NOT be safe to reclaim — per the contract, "a workspace with
+// `activities = {A, B}` that becomes empty is not removed".
 #[test]
 fn workspace_is_safe_to_reclaim_false_for_shared_membership() {
     let mut layout = check_ops([Op::AddOutput(1)]);
@@ -8756,7 +8801,10 @@ fn take_workspace_ids_doomed_flushed_from_other_activity_view_on_remove_output()
     // Grab the trailing empty bookend id — this is what `take_workspace_ids`
     // will peel off as a doomed id when the output disconnects.
     let alpha_view = layout.active_view(&mon_out);
-    let e_bottom_id = *alpha_view.ids().last().expect("view must have a trailing bookend");
+    let e_bottom_id = *alpha_view
+        .ids()
+        .last()
+        .expect("view must have a trailing bookend");
     assert!(
         !layout
             .workspaces
@@ -8789,7 +8837,7 @@ fn take_workspace_ids_doomed_flushed_from_other_activity_view_on_remove_output()
         id
     };
     // Seed Beta's view with a stale reference to doomed_id. doomed_id.activities
-    // remains {Alpha} (exclusive), so the §5.4 guard clears and destroy proceeds.
+    // remains {Alpha} (exclusive), so the guard clears and destroy proceeds.
     // The retain closure patches Beta's view because it iterates every activity's
     // views regardless of workspace membership.
     layout
@@ -8864,7 +8912,7 @@ fn advance_animations_destroy_flushes_after_loop_scope() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1b Part 1 — cross-activity window iteration helpers.
+// cross-activity window iteration helpers.
 // Pin the activity-scoped default of `Layout::windows()` / `Layout::workspaces()`
 // against the pool-spanning `windows_all()` / `with_windows_all` /
 // `with_windows_all_mut`. The `WindowMru::new` call site at
@@ -8875,8 +8923,8 @@ fn advance_animations_destroy_flushes_after_loop_scope() {
 
 /// Seeds a two-activity layout with one window on each activity:
 /// - seed activity gets window id 1 on a single connected output;
-/// - beta activity gets window id 2 on the same output (after switching to
-///   beta so `Op::AddWindow` lands on beta's active workspace).
+/// - beta activity gets window id 2 on the same output (after switching to beta so `Op::AddWindow`
+///   lands on beta's active workspace).
 ///
 /// Returns the layout with the active activity switched back to `seed`.
 fn seed_two_activities_with_one_window_each() -> (Layout<TestWindow>, ActivityId, ActivityId) {
@@ -8972,7 +9020,8 @@ fn windows_all_output_id_follows_workspace_binding() {
     for (oid, win) in layout.windows_all() {
         let oid = oid.expect("all pool workspaces here are bound to the single connected output");
         assert_eq!(
-            *oid, expected_oid,
+            *oid,
+            expected_oid,
             "windows_all must pair each window with its owning workspace's \
              bound output id (window id {:?})",
             win.id(),
@@ -9249,7 +9298,10 @@ fn create_activity_refresh_emits_activity_created() {
         !activity.is_active,
         "create does not flip the active cursor",
     );
-    assert!(!activity.is_urgent, "fresh runtime activity has no urgent windows");
+    assert!(
+        !activity.is_urgent,
+        "fresh runtime activity has no urgent windows"
+    );
 
     // Extended coverage: is_urgent=true branch. Re-seed from the current
     // pool (seeded at {default, Work}), create "Urgent", switch to it, add an
@@ -9281,7 +9333,11 @@ fn create_activity_refresh_emits_activity_created() {
             _ => None,
         })
         .collect();
-    assert_eq!(created.len(), 1, "exactly one ActivityCreated, got {events2:?}");
+    assert_eq!(
+        created.len(),
+        1,
+        "exactly one ActivityCreated, got {events2:?}"
+    );
     let urgent_activity = created[0];
     assert_eq!(urgent_activity.id, urgent_id.get());
     assert!(
@@ -9342,7 +9398,8 @@ fn rename_activity_refresh_emits_activity_renamed() {
 }
 
 #[test]
-fn refresh_first_tick_seeds_silently_then_live_activities_emit_created_with_correct_derived_fields() {
+fn refresh_first_tick_seeds_silently_then_live_activities_emit_created_with_correct_derived_fields()
+{
     // Regression pin for the first-tick seeding invariant: on a fresh
     // `EventStreamState::activities` (empty map), the combined refresh pass
     // emits `ActivityCreated` for every live activity — NOT `ActivitySwitched`
@@ -9351,8 +9408,8 @@ fn refresh_first_tick_seeds_silently_then_live_activities_emit_created_with_corr
     //
     // Pin targets (see the spec Risks section):
     // - No spurious `ActivitySwitched { previous_id: None }` on first tick.
-    // - `ActivityCreated` payload freshness: `to_ipc_activity` must read
-    //   live `Layout` state, not reuse a stale snapshot.
+    // - `ActivityCreated` payload freshness: `to_ipc_activity` must read live `Layout` state, not
+    //   reuse a stale snapshot.
     let mut layout = Layout::<TestWindow>::default();
     let seed_id = layout.active_activity_id();
 
@@ -9420,7 +9477,7 @@ fn remove_active_activity_cascade_refresh_emits_removed_before_switch() {
     //   [ActivityRemoved { id: B }, ActivitySwitched { id: A, previous_id: Some(B) }]
     //
     // The production call order (`lifecycle → active → urgency`) is guarded
-    // by the block comment on `ipc_refresh_layout` (naming DD §4.6), not by
+    // by the block comment on `ipc_refresh_layout` (naming), not by
     // this test — the helper `test_diff_activities_against_state` bakes that
     // order in. Swapping the two `ipc_refresh_*` calls in production would
     // leave this test passing. Accepted trade-off: no `State`-level test
@@ -9443,7 +9500,11 @@ fn remove_active_activity_cascade_refresh_emits_removed_before_switch() {
     layout
         .remove_activity(&ActivityReferenceArg::Id(beta.get()))
         .expect("active removal with previous cascade");
-    assert_eq!(layout.active_activity_id(), alpha, "cascade target is alpha");
+    assert_eq!(
+        layout.active_activity_id(),
+        alpha,
+        "cascade target is alpha"
+    );
 
     let all_events = crate::ipc::server::test_diff_activities_against_state(&layout, &seed);
     assert_eq!(all_events.len(), 2, "got {all_events:?}");
@@ -9453,7 +9514,10 @@ fn remove_active_activity_cascade_refresh_emits_removed_before_switch() {
         all_events[0],
     );
     let niri_ipc::Event::ActivitySwitched { id, previous_id } = &all_events[1] else {
-        panic!("second event must be ActivitySwitched, got {:?}", all_events[1]);
+        panic!(
+            "second event must be ActivitySwitched, got {:?}",
+            all_events[1]
+        );
     };
     assert_eq!(*id, alpha.get());
     assert_eq!(*previous_id, Some(beta.get()));
@@ -9466,9 +9530,9 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
     // gamma, delta). Previous snapshot represents: beta and delta absent (route
     // to Created), gamma with stale name (route to Renamed), two fake ids not
     // present in the layout (route to Removed). Diff yields:
-    //   Removed {fake_epsilon_id=500, fake_zeta_id=999}  — ascending sort
-    //   Renamed {gamma_id, name: "Gamma2"}               ← snapshot name differs
-    //   Created {beta_id, delta_id}                      — ascending sort
+    //   Removed {fake_epsilon_id=500, fake_zeta_id=999} — ascending sort
+    //   Renamed {gamma_id, name: "Gamma2"} ← snapshot name differs
+    //   Created {beta_id, delta_id} — ascending sort
     //
     // Two entries per Removed and Created bucket exercise within-bucket
     // ascending-id sort: without sort_unstable/sort_by_key the HashMap
@@ -9550,8 +9614,7 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
         },
     );
 
-    let events =
-        crate::ipc::server::test_diff_activities_against_state(&layout, &previous);
+    let events = crate::ipc::server::test_diff_activities_against_state(&layout, &previous);
 
     // Extract events by kind in emission order.
     let removed: Vec<u64> = events
@@ -9594,15 +9657,21 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
         .collect();
 
     assert!(
-        !removed_positions.is_empty() && !renamed_positions.is_empty() && !created_positions.is_empty(),
+        !removed_positions.is_empty()
+            && !renamed_positions.is_empty()
+            && !created_positions.is_empty(),
         "must have at least one event per kind, got {events:?}",
     );
     assert!(
-        removed_positions.iter().all(|r| renamed_positions.iter().all(|n| r < n)),
+        removed_positions
+            .iter()
+            .all(|r| renamed_positions.iter().all(|n| r < n)),
         "all Removed must precede all Renamed, got {events:?}",
     );
     assert!(
-        renamed_positions.iter().all(|n| created_positions.iter().all(|c| n < c)),
+        renamed_positions
+            .iter()
+            .all(|n| created_positions.iter().all(|c| n < c)),
         "all Renamed must precede all Created, got {events:?}",
     );
 
@@ -9612,7 +9681,11 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
         vec![fake_epsilon_id, fake_zeta_id],
         "Removed bucket must be sorted ascending: {removed:?}",
     );
-    assert_eq!(renamed, vec![(gamma.get(), "Gamma2")], "Renamed bucket: {renamed:?}");
+    assert_eq!(
+        renamed,
+        vec![(gamma.get(), "Gamma2")],
+        "Renamed bucket: {renamed:?}"
+    );
     // beta was created before delta, so beta.get() < delta.get() by construction.
     // The sort in production must produce this order; if the sort is dropped the
     // HashMap iteration order may flip them, breaking this assertion non-deterministically.
@@ -9667,8 +9740,7 @@ fn diff_activity_lifecycle_newcomer_routes_to_created_not_renamed() {
         },
     );
 
-    let events =
-        crate::ipc::server::test_diff_activities_against_state(&layout, &previous);
+    let events = crate::ipc::server::test_diff_activities_against_state(&layout, &previous);
 
     // Must contain ActivityRemoved for the old id and ActivityCreated for
     // the new id — NOT ActivityRenamed.
@@ -9687,7 +9759,9 @@ fn diff_activity_lifecycle_newcomer_routes_to_created_not_renamed() {
         new_work_id.get(),
     );
     assert!(
-        !events.iter().any(|e| matches!(e, niri_ipc::Event::ActivityRenamed { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, niri_ipc::Event::ActivityRenamed { .. })),
         "must NOT emit ActivityRenamed when id-presence drives routing, got {events:?}",
     );
 }
@@ -9741,15 +9815,10 @@ fn switch_activity_dormant_view_survives_output_disconnect_and_reconnect() {
     layout.verify_invariants();
 
     // Snapshot beta's active view for output1 before switching away.
-    let beta_view_ids: Vec<WorkspaceId> = layout
-        .active_view(&out1)
-        .ids()
-        .to_vec();
+    let beta_view_ids: Vec<WorkspaceId> = layout.active_view(&out1).ids().to_vec();
     let beta_view_active = layout.active_view(&out1).active();
     // Verify active is in middle position (not a bookend), giving the test real teeth.
-    let beta_active_pos = layout
-        .active_view(&out1)
-        .active_position();
+    let beta_active_pos = layout.active_view(&out1).active_position();
     assert!(
         beta_active_pos > 0,
         "test setup: beta's active workspace must not be at position 0 (bookend)",
@@ -9793,8 +9862,7 @@ fn switch_activity_dormant_view_survives_output_disconnect_and_reconnect() {
     layout.switch_activity(beta_id);
     layout.verify_invariants();
 
-    let beta_restored = layout
-        .active_view(&out1);
+    let beta_restored = layout.active_view(&out1);
     assert_eq!(
         beta_restored.active(),
         beta_view_active,
@@ -9824,10 +9892,7 @@ fn switch_activity_active_view_eviction_is_active_only() {
     // Switch to beta so it gets views for both outputs, then switch back to seed.
     layout.switch_activity(beta_id);
     layout.verify_invariants();
-    let beta_out1_ids: Vec<WorkspaceId> = layout
-        .active_view(&out1)
-        .ids()
-        .to_vec();
+    let beta_out1_ids: Vec<WorkspaceId> = layout.active_view(&out1).ids().to_vec();
     let beta_out1_active = layout.active_view(&out1).active();
 
     layout.switch_activity(seed_id);
@@ -9838,11 +9903,7 @@ fn switch_activity_active_view_eviction_is_active_only() {
     check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
 
     assert!(
-        !layout
-            .activities
-            .active()
-            .views()
-            .contains_key(&out1),
+        !layout.activities.active().views().contains_key(&out1),
         "active activity (seed) must no longer have a view entry for the disconnected output1",
     );
     let beta_dormant = layout
@@ -9900,8 +9961,7 @@ fn reconnect_restores_saved_view_active_via_last_active_workspace_id() {
 
     let post_reconnect_active = layout.active_view(&out1).active();
     assert_eq!(
-        post_reconnect_active,
-        pre_disconnect_active,
+        post_reconnect_active, pre_disconnect_active,
         "after reconnect, view.active must equal the workspace that was active before disconnect",
     );
     layout.verify_invariants();
@@ -9917,8 +9977,14 @@ fn reconnect_restores_saved_view_active_via_last_active_workspace_id() {
 /// is the reference that must not be touched.
 ///
 /// Returns `(layout, seed_id, beta_id, out1, seed_dormant_ids, seed_dormant_active)`.
-fn setup_two_activities_with_move_workspaces_test(
-) -> (Layout<TestWindow>, ActivityId, ActivityId, OutputId, Vec<WorkspaceId>, WorkspaceId) {
+fn setup_two_activities_with_move_workspaces_test() -> (
+    Layout<TestWindow>,
+    ActivityId,
+    ActivityId,
+    OutputId,
+    Vec<WorkspaceId>,
+    WorkspaceId,
+) {
     let ops = [Op::AddOutput(1), Op::AddOutput(2)];
     let mut layout = check_ops(ops);
     let seed_id = layout.active_activity_id();
@@ -9980,7 +10046,14 @@ fn setup_two_activities_with_move_workspaces_test(
          len={beta_view_len})",
     );
 
-    (layout, seed_id, beta_id, out1, seed_dormant_ids, seed_dormant_active)
+    (
+        layout,
+        seed_id,
+        beta_id,
+        out1,
+        seed_dormant_ids,
+        seed_dormant_active,
+    )
 }
 
 #[test]
@@ -10005,8 +10078,7 @@ fn move_workspace_down_operates_only_on_active_activity_view() {
     // even if clean_up_workspaces_on restores the active workspace to its original position.
     let beta_ids_order_after: Vec<WorkspaceId> = layout.active_view(&out1).ids().to_vec();
     assert_ne!(
-        beta_ids_order_after,
-        beta_ids_order_before,
+        beta_ids_order_after, beta_ids_order_before,
         "move_workspace_down must mutate beta's active view ids vec \
          (trailing empty is recycled, so the vec must differ from the pre-call snapshot); \
          if equal the operation was a no-op and the test is vacuous",
@@ -10060,8 +10132,7 @@ fn move_workspace_up_operates_only_on_active_activity_view() {
     );
     let beta_ids_order_after: Vec<WorkspaceId> = beta_view_after.ids().to_vec();
     assert_ne!(
-        beta_ids_order_after,
-        beta_ids_order_before,
+        beta_ids_order_after, beta_ids_order_before,
         "move_workspace_up must reorder beta's active view ids vec",
     );
 
@@ -10113,8 +10184,7 @@ fn move_workspace_to_idx_operates_only_on_active_activity_view() {
         "move_workspace_to_idx must keep the same workspace focused (view.active id unchanged)",
     );
     assert_ne!(
-        beta_active_after_pos,
-        beta_active_pos_before,
+        beta_active_after_pos, beta_active_pos_before,
         "move_workspace_to_idx must change the active workspace's position in ids() \
          (was {beta_active_pos_before}, still {beta_active_after_pos} — operation was a no-op)",
     );
@@ -10139,7 +10209,7 @@ fn move_workspace_to_idx_operates_only_on_active_activity_view() {
     );
 }
 
-// --- Config-reload activity reconciliation (Phase 1b Part 1 / DD §5.15) ---
+// --- Config-reload activity reconciliation ---
 //
 // These tests exercise `Layout::reconcile_activities_on_reload_add` — the
 // additive / same-name-preserving half of the reload reconciliation.
@@ -10151,8 +10221,8 @@ fn reload_adds_new_config_activity_appends_and_promotes_runtime_name_match() {
     // Seed pool: runtime "Default". Reload config declares `[Work, Default]`.
     // Expected post-reconcile:
     // - "Work" is a fresh config-declared id, position 0.
-    // - "Default" keeps its id but flips to `is_config_declared == true`,
-    //   position 1 (config-declaration order).
+    // - "Default" keeps its id but flips to `is_config_declared == true`, position 1
+    //   (config-declaration order).
     let mut layout = Layout::<TestWindow>::default();
     let default_id = layout.active_activity_id();
     assert!(
@@ -10304,11 +10374,7 @@ fn reload_adds_new_config_activity_preserves_views_and_assignments_on_promotion(
 
     // Workspace set preserved on the dynamic (unnamed) workspace.
     assert_eq!(
-        layout
-            .workspaces
-            .get(&dyn_ws_id)
-            .unwrap()
-            .activities(),
+        layout.workspaces.get(&dyn_ws_id).unwrap().activities(),
         &dyn_set_before,
         "dynamic workspace activities set must be preserved on promotion",
     );
@@ -10517,11 +10583,7 @@ fn reload_config_workspace_activities_reset_to_declared_values() {
         .name()
         .cloned()
         .expect("named workspace has a name");
-    layout
-        .workspaces
-        .get_mut(&home_id)
-        .unwrap()
-        .activities = HashSet::from([default_id, work_id]);
+    layout.workspaces.get_mut(&home_id).unwrap().activities = HashSet::from([default_id, work_id]);
 
     let cfg_activities = [
         niri_config::Activity {
@@ -10572,11 +10634,8 @@ fn reload_dynamic_workspace_keeps_runtime_activity_assignments() {
         .find(|(_, ws)| ws.name().is_none())
         .expect("at least one dynamic workspace present")
         .0;
-    layout
-        .workspaces
-        .get_mut(&dyn_ws_id)
-        .unwrap()
-        .activities = HashSet::from([default_id, work_id]);
+    layout.workspaces.get_mut(&dyn_ws_id).unwrap().activities =
+        HashSet::from([default_id, work_id]);
     let before = layout
         .workspaces
         .get(&dyn_ws_id)
@@ -10598,11 +10657,7 @@ fn reload_dynamic_workspace_keeps_runtime_activity_assignments() {
     layout.reconcile_activities_on_reload_add(&cfg_activities, &[]);
 
     assert_eq!(
-        layout
-            .workspaces
-            .get(&dyn_ws_id)
-            .unwrap()
-            .activities(),
+        layout.workspaces.get(&dyn_ws_id).unwrap().activities(),
         &before,
         "dynamic workspace activities must be untouched on reload",
     );
@@ -10693,7 +10748,7 @@ fn reload_promotion_preserves_runtime_name_casing() {
     // Seed pool with a runtime activity whose name uses all-lowercase "work".
     // Reload config declares "WORK" (all-caps). Expected: stored name stays
     // "work" (runtime casing, NOT overwritten by config spelling), id
-    // unchanged, is_config_declared flips to true. Pins DD §5.15 bullet 1.
+    // unchanged, is_config_declared flips to true. Pins bullet 1.
     let mut layout = Layout::<TestWindow>::default();
     let work_id = layout
         .create_activity("work".to_owned())
@@ -10731,11 +10786,7 @@ fn reload_promotion_preserves_runtime_name_casing() {
         "work",
         "runtime casing must NOT be overwritten by config spelling",
     );
-    assert_eq!(
-        promoted.id(),
-        work_id,
-        "id must be preserved on promotion",
-    );
+    assert_eq!(promoted.id(), work_id, "id must be preserved on promotion",);
     assert!(
         promoted.is_config_declared(),
         "is_config_declared must flip to true on promotion",
@@ -10744,8 +10795,7 @@ fn reload_promotion_preserves_runtime_name_casing() {
     layout.verify_invariants();
 }
 
-// --- Config-reload activity reconciliation — removal half (Phase 1b Part 2 /
-// DD §5.15 bullet 2) ---
+// --- Config-reload activity reconciliation — removal half ---
 //
 // These tests exercise `Layout::reconcile_activities_on_reload_remove` — the
 // atomic validate-then-mutate entry that drops config-declared activities
@@ -10908,7 +10958,7 @@ fn reconcile_remove_destroys_empty_unnamed_exclusive_workspace() {
 fn reconcile_remove_destroys_empty_named_exclusive_workspace() {
     // Named exclusive workspaces are destroyed on reload (unlike IPC
     // RemoveActivity which rejects them via ExclusiveNamedWorkspace). This pins
-    // the §5.15 asymmetry: reload is user-initiated config churn; the caller
+    // the asymmetry: reload is user-initiated config churn; the caller
     // chose to drop the activity by editing the config.
     let ops = [
         Op::AddOutput(1),
@@ -11113,7 +11163,7 @@ fn reconcile_remove_rejects_on_exclusive_workspace_has_windows() {
 #[test]
 fn reconcile_remove_rejects_would_empty_pool() {
     // Pool must be purely config-declared (runtime activities survive reload
-    // per §5.15 "Runtime activities on reload" and are not candidates for the
+    // per "Runtime activities on reload" and are not candidates for the
     // remove-set, so a runtime-seed pool never can hit WouldEmptyPool). Seed
     // via the startup `with_options_and_workspaces` path which uses
     // `Activities::from_config_or_default` — an explicit `activity "Solo"`
@@ -11361,7 +11411,7 @@ fn reconcile_remove_rejects_on_hard_block_when_cascade_required() {
     layout.dnd_end();
     layout.verify_invariants();
 }
-// -- pick_activity_for_hidden_window tests (DD §5.18) -------------------------
+// -- pick_activity_for_hidden_window tests -------------------------
 
 /// Build a no-monitor `Layout` with three activities (seed/alpha, beta, gamma),
 /// pick one workspace, and overwrite its `activities` tag set. Returns
@@ -11471,7 +11521,8 @@ fn pick_activity_for_hidden_window_falls_to_previous_when_hint_stale() {
     // Hint = an id that is not in `ws.activities` at all (synthesize a
     // never-inserted id via `specific(u64::MAX)`). Tier 1 filter rejects it
     // via `activities.contains`; tier 2 still fires.
-    let target = layout.pick_activity_for_hidden_window(ws_id, Some(ActivityId::specific(u64::MAX)));
+    let target =
+        layout.pick_activity_for_hidden_window(ws_id, Some(ActivityId::specific(u64::MAX)));
     assert_eq!(
         target, gamma_id,
         "tier 2: out-of-set hint is filtered by `activities.contains`, previous wins",
@@ -11491,8 +11542,7 @@ fn pick_activity_for_hidden_window_falls_to_display_order_when_previous_unavaila
     // Declaration order on the helper is seed → beta → gamma (IndexMap
     // preserves insertion order). With ws tagged {beta, gamma} and active =
     // alpha, the first non-active candidate is beta.
-    let (layout, alpha_id, beta_id, _gamma, ws_id) =
-        prepare_picker_layout(&["beta", "gamma"]);
+    let (layout, alpha_id, beta_id, _gamma, ws_id) = prepare_picker_layout(&["beta", "gamma"]);
     // Fresh layout → previous_id is None.
     assert_eq!(layout.activities.previous_id(), None);
     assert_eq!(layout.active_activity_id(), alpha_id);
@@ -11545,11 +11595,11 @@ fn pick_activity_for_hidden_window_degenerate_single_activity_on_hidden_ws() {
     );
 }
 
-// -- FocusWindow hard-block gate (DD §5.18 + §5.11) --------------------------
+// -- FocusWindow hard-block gate --------------------------
 
 #[test]
 fn focus_window_hard_block_gate_fires_before_switch() {
-    // Pins the DD §5.18 + §5.11 hard-block discipline at the Layout level:
+    // Pins the hard-block discipline at the Layout level:
     // when `is_activity_switch_hard_blocked()` is `Some(_)`, the caller is
     // expected to return `Err(block)` without mutating the active activity.
     // This test performs the structural inspection the spec allows
@@ -11565,8 +11615,8 @@ fn focus_window_hard_block_gate_fires_before_switch() {
     //   3. Arm DnD to trigger the hard block.
     //   4. Verify `is_activity_switch_hard_blocked()` is `Some(Dnd)`.
     //   5. Verify `window_ws_and_activity_hint` resolves the window's workspace.
-    //   6. Verify `pick_activity_for_hidden_window` picks a non-active target (the
-    //      production gate would fire before reaching `switch_activity`).
+    //   6. Verify `pick_activity_for_hidden_window` picks a non-active target (the production gate
+    //      would fire before reaching `switch_activity`).
     //   7. Verify `active_activity_id()` is unchanged (simulates Err path — no mutation).
     let ops = [
         Op::AddOutput(1),
@@ -11582,7 +11632,11 @@ fn focus_window_hard_block_gate_fires_before_switch() {
     let beta_id = beta.id();
     layout.activities.insert(beta);
     layout.switch_activity(beta_id);
-    assert_eq!(layout.active_activity_id(), beta_id, "precondition: active = beta");
+    assert_eq!(
+        layout.active_activity_id(),
+        beta_id,
+        "precondition: active = beta"
+    );
 
     // Arm DnD — no window required (same recipe as
     // `is_activity_switch_hard_blocked_returns_some_during_dnd` at line 5747).
@@ -11608,8 +11662,7 @@ fn focus_window_hard_block_gate_fires_before_switch() {
     // in production fires AFTER picking the target, before `switch_activity`.
     let target = layout.pick_activity_for_hidden_window(ws_id, None);
     assert_ne!(
-        target,
-        beta_id,
+        target, beta_id,
         "picker must return a non-active activity for the hidden window",
     );
     assert_eq!(
@@ -11806,7 +11859,7 @@ fn add_workspace_to_activity_no_op_when_already_member() {
 fn add_workspace_to_activity_no_view_on_output() {
     // Dormant activity without any view on the workspace's output. Add must
     // still union the id into `ws.activities` and leave beta's views map
-    // empty (lazy rebuild on next switch, DD §3.3).
+    // empty (lazy rebuild on next switch).
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();
@@ -11816,15 +11869,13 @@ fn add_workspace_to_activity_no_view_on_output() {
         .create_activity("Beta".to_owned())
         .expect("create beta");
     // Confirm beta has no view on mon_out.
-    assert!(
-        layout
-            .activities
-            .get(beta)
-            .expect("live")
-            .views()
-            .get(&mon_out)
-            .is_none(),
-    );
+    assert!(layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&mon_out)
+        .is_none(),);
     let target_ws_id = layout
         .active_view(&mon_out)
         .ids()
@@ -12164,11 +12215,7 @@ fn remove_workspace_from_activity_active_activity_recreates_view() {
 
     // ws.activities lost alpha but kept beta.
     assert_eq!(
-        layout
-            .workspaces
-            .get(&ws_id)
-            .expect("live")
-            .activities(),
+        layout.workspaces.get(&ws_id).expect("live").activities(),
         &HashSet::from([beta]),
     );
 
@@ -12309,10 +12356,7 @@ fn remove_workspace_from_activity_snaps_animation() {
         .get_mut(beta)
         .expect("live")
         .views_mut()
-        .insert(
-            mon_out.clone(),
-            WorkspaceView::new(vec![target_ws_id], 0),
-        );
+        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
     layout.verify_invariants();
 
     // Arm a workspace-switch animation by switching to a different position.
@@ -12599,11 +12643,7 @@ fn set_workspace_activities_drops_single_entry_view_for_removed_active_activity(
     assert!(!reinstated.ids().is_empty(), "reinstated view non-empty");
 
     assert_eq!(
-        layout
-            .workspaces
-            .get(&ws_id)
-            .expect("live")
-            .activities(),
+        layout.workspaces.get(&ws_id).expect("live").activities(),
         &HashSet::from([beta]),
     );
 
@@ -12637,10 +12677,7 @@ fn set_workspace_activities_empty_list_errors_without_mutation() {
     let view_ids_before = layout.active_view(&mon_out).ids().to_vec();
 
     let err = layout
-        .set_workspace_activities(
-            Some(WorkspaceReference::Id(target_ws_id.get())),
-            &[],
-        )
+        .set_workspace_activities(Some(WorkspaceReference::Id(target_ws_id.get())), &[])
         .expect_err("empty list must err");
     assert_eq!(err, SetWorkspaceActivitiesError::EmptyActivityList);
 
@@ -12787,7 +12824,7 @@ fn set_workspace_activities_snaps_animation_only_when_active_affected() {
     // Arm an in-flight workspace-switch Animation. A Set where active is
     // NOT in the symmetric diff must leave the animation intact; a Set that
     // DOES touch the active activity must snap the animation on every
-    // monitor (DD §5.11 snap+proceed).
+    // monitor ( snap+proceed).
     let ops = [
         Op::AddOutput(1),
         Op::AddNamedWorkspace {
@@ -12826,10 +12863,7 @@ fn set_workspace_activities_snaps_animation_only_when_active_affected() {
         .get_mut(beta)
         .expect("live")
         .views_mut()
-        .insert(
-            mon_out.clone(),
-            WorkspaceView::new(vec![target_ws_id], 0),
-        );
+        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
     layout.verify_invariants();
 
     // Arm an animation.
@@ -13108,18 +13142,14 @@ fn move_workspace_to_activity_atomic_add_then_remove() {
 fn move_workspace_to_activity_preserves_other_memberships() {
     // Workspace in {active(alpha), X, Y}; move to target. Final state:
     // {X, Y, target} — workspace leaves active but stays in X, Y.
-    // DD §4.3 "multi-activity semantics" pin.
+    // "multi-activity semantics" pin.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();
     let mon_out = layout.monitors[0].output_id();
 
-    let x = layout
-        .create_activity("X".to_owned())
-        .expect("create x");
-    let y = layout
-        .create_activity("Y".to_owned())
-        .expect("create y");
+    let x = layout.create_activity("X".to_owned()).expect("create x");
+    let y = layout.create_activity("Y".to_owned()).expect("create y");
     let target = layout
         .create_activity("Target".to_owned())
         .expect("create target");
@@ -13145,19 +13175,13 @@ fn move_workspace_to_activity_preserves_other_memberships() {
         .get_mut(x)
         .expect("x live")
         .views_mut()
-        .insert(
-            mon_out.clone(),
-            WorkspaceView::new(vec![target_ws_id], 0),
-        );
+        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
     layout
         .activities
         .get_mut(y)
         .expect("y live")
         .views_mut()
-        .insert(
-            mon_out.clone(),
-            WorkspaceView::new(vec![target_ws_id], 0),
-        );
+        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
 
     let (_, target_id, source_id) = layout
         .move_workspace_to_activity(
@@ -13212,10 +13236,7 @@ fn move_workspace_to_activity_workspace_already_in_target() {
         .get_mut(target)
         .expect("target live")
         .views_mut()
-        .insert(
-            mon_out.clone(),
-            WorkspaceView::new(vec![target_ws_id], 0),
-        );
+        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
 
     layout
         .move_workspace_to_activity(
@@ -13239,7 +13260,7 @@ fn move_workspace_to_activity_workspace_already_in_target() {
 #[test]
 fn move_workspace_to_activity_target_equals_source_no_op() {
     // Call with target == active. Must return Ok without mutating any
-    // state — the no-op branch subsumes the DD §5.14 "No-op if workspace
+    // state — the no-op branch subsumes the "No-op if workspace
     // already exclusively in target" row (source == target implies the
     // workspace stays put).
     let ops = [Op::AddOutput(1)];
@@ -13294,12 +13315,8 @@ fn move_workspace_to_activity_not_in_active_errors() {
     let mon_out = layout.monitors[0].output_id();
     let output = layout.monitors[0].output.clone();
 
-    let x = layout
-        .create_activity("X".to_owned())
-        .expect("create x");
-    let y = layout
-        .create_activity("Y".to_owned())
-        .expect("create y");
+    let x = layout.create_activity("X".to_owned()).expect("create x");
+    let y = layout.create_activity("Y".to_owned()).expect("create y");
     let target = layout
         .create_activity("Target".to_owned())
         .expect("create target");
@@ -13348,14 +13365,13 @@ fn move_workspace_to_activity_not_in_active_errors() {
             &ActivityReferenceArg::Id(target.get()),
         )
         .expect_err("must err: workspace not in active");
-    assert_eq!(err, MoveWorkspaceToActivityError::WorkspaceNotInActiveActivity);
+    assert_eq!(
+        err,
+        MoveWorkspaceToActivityError::WorkspaceNotInActiveActivity
+    );
 
     assert_eq!(
-        layout
-            .workspaces
-            .get(&ws_id)
-            .expect("live")
-            .activities(),
+        layout.workspaces.get(&ws_id).expect("live").activities(),
         &acts_before,
     );
 }
@@ -13412,8 +13428,7 @@ fn move_workspace_to_activity_focus_false_uses_weaker_gate() {
     //
     // This test pins the predicate contrast at the Layout level — the
     // dispatch arm itself is exercised via the production `do_action`
-    // flow in the fixture-level integration suite (out of scope for
-    // Phase 2 box 2009).
+    // flow in the fixture-level integration suite.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
 
@@ -13475,7 +13490,6 @@ fn move_workspace_to_activity_focus_true_uses_stronger_gate() {
 }
 
 // --- SetWorkspaceSticky / UnsetWorkspaceSticky / ToggleWorkspaceSticky -----
-// (Phase 2 box 2015)
 
 #[test]
 fn set_workspace_sticky_expands_activities_to_all_ids() {
@@ -13567,10 +13581,7 @@ fn set_workspace_sticky_no_op_when_already_sticky_with_full_set() {
         .set_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
         .expect("no-op set must succeed");
     assert_eq!(ws_id, target_ws_id);
-    assert!(
-        !active_affected,
-        "no-op set must not flag active_affected",
-    );
+    assert!(!active_affected, "no-op set must not flag active_affected",);
 
     let ws = layout
         .workspaces
@@ -13604,7 +13615,7 @@ fn set_workspace_sticky_re_expands_when_activities_was_narrowed_to_subset() {
     // must re-expand the activities set to the full live id set (rather
     // than no-op out on the `is_sticky` flag alone).
     //
-    // The DD §3.2 / is_sticky() contract explicitly permits the inconsistent
+    // The / is_sticky() contract explicitly permits the inconsistent
     // state `is_sticky == true ∧ activities ⊊ all_ids` to arise via runtime
     // narrowing (e.g. `SetWorkspaceActivities` / `RemoveWorkspaceFromActivity`
     // on a sticky workspace). This test hand-mutates the workspace into that
@@ -13614,9 +13625,9 @@ fn set_workspace_sticky_re_expands_when_activities_was_narrowed_to_subset() {
     // (mod.rs view.insert(pos = view.len(), ws_id) appends after the
     // monitor's unnamed-bookend, breaking monitor.rs "last must be unnamed"
     // when re-adding a named workspace to the *active* activity's
-    // view; lazy view rebuild §3.3 covers dormant activities only). That
+    // view; lazy view rebuild covers dormant activities only). That
     // limitation is orthogonal to the sticky-action triplet and is not
-    // addressed in Phase 2 box 2015 — see the implementer's notes in the
+    // addressed box 2015 — see the implementer's notes in the
     // landing commit body for a follow-up Part 2 candidate.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
@@ -13648,10 +13659,7 @@ fn set_workspace_sticky_re_expands_when_activities_was_narrowed_to_subset() {
 
     // Sanity: pre-call invariants hold despite the inconsistent state.
     {
-        let ws = layout
-            .workspaces
-            .get(&target_ws_id)
-            .expect("live");
+        let ws = layout.workspaces.get(&target_ws_id).expect("live");
         assert!(ws.is_sticky());
         assert_eq!(ws.activities(), &HashSet::from([alpha]));
     }
@@ -13671,10 +13679,7 @@ fn set_workspace_sticky_re_expands_when_activities_was_narrowed_to_subset() {
         "to_add = {{beta}}; active activity (alpha) is not in the diff",
     );
 
-    let ws = layout
-        .workspaces
-        .get(&target_ws_id)
-        .expect("live");
+    let ws = layout.workspaces.get(&target_ws_id).expect("live");
     assert!(ws.is_sticky(), "is_sticky must remain true");
     assert_eq!(
         ws.activities(),
@@ -13717,10 +13722,7 @@ fn set_workspace_sticky_reports_active_affected_when_active_enters_set() {
 
     // Seed: activities = {beta} only, so active (alpha) is NOT in the set.
     {
-        let ws = layout
-            .workspaces
-            .get_mut(&target_ws_id)
-            .expect("live");
+        let ws = layout.workspaces.get_mut(&target_ws_id).expect("live");
         ws.activities = HashSet::from([beta]);
     }
 
@@ -13733,17 +13735,14 @@ fn set_workspace_sticky_reports_active_affected_when_active_enters_set() {
         "to_add includes alpha (active activity); active_affected must be true",
     );
 
-    let ws = layout
-        .workspaces
-        .get(&target_ws_id)
-        .expect("live");
+    let ws = layout.workspaces.get(&target_ws_id).expect("live");
     assert!(ws.is_sticky());
     assert_eq!(ws.activities(), &HashSet::from([alpha, beta]));
 }
 
 #[test]
 fn unset_workspace_sticky_clears_flag_keeps_activities_set() {
-    // DD §3.2: "Toggling off … keeps the current `activities` set." Pin the
+    // "Toggling off … keeps the current `activities` set." Pin the
     // contract: is_sticky flips to false; activities is untouched (even if
     // it equals all_live_ids at call time).
     let ops = [Op::AddOutput(1)];
@@ -13762,10 +13761,7 @@ fn unset_workspace_sticky_clears_flag_keeps_activities_set() {
         .expect("alpha view has ws");
 
     {
-        let ws = layout
-            .workspaces
-            .get_mut(&target_ws_id)
-            .expect("live");
+        let ws = layout.workspaces.get_mut(&target_ws_id).expect("live");
         ws.is_sticky = true;
         ws.activities = HashSet::from([alpha, beta]);
     }
@@ -13776,15 +13772,12 @@ fn unset_workspace_sticky_clears_flag_keeps_activities_set() {
         .expect("unset must succeed");
     assert_eq!(ws_id, target_ws_id);
 
-    let ws = layout
-        .workspaces
-        .get(&target_ws_id)
-        .expect("live");
+    let ws = layout.workspaces.get(&target_ws_id).expect("live");
     assert!(!ws.is_sticky(), "is_sticky must flip to false");
     assert_eq!(
         ws.activities(),
         &HashSet::from([alpha, beta]),
-        "activities set must be preserved verbatim (DD §3.2)",
+        "activities set must be preserved verbatim",
     );
 
     layout.verify_invariants();
@@ -13823,10 +13816,7 @@ fn unset_workspace_sticky_no_op_when_not_sticky() {
         .unset_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
         .expect("unset on non-sticky must succeed (no-op)");
 
-    let ws = layout
-        .workspaces
-        .get(&target_ws_id)
-        .expect("live");
+    let ws = layout.workspaces.get(&target_ws_id).expect("live");
     assert!(!ws.is_sticky());
     assert_eq!(ws.activities(), &activities_before);
     assert_eq!(ws.activities(), &HashSet::from([alpha]));
@@ -13838,7 +13828,7 @@ fn unset_workspace_sticky_no_op_when_not_sticky() {
 fn unset_workspace_sticky_preserves_strict_subset_activities() {
     // Pin the sub-contract that unset leaves `activities` intact even when
     // it is a strict subset of all_live_ids. A plausible mis-fix for a
-    // misread of DD §3.2 would expand activities to all_ids on unset when
+    // misread of would expand activities to all_ids on unset when
     // already non-sticky; this test would catch that regression.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
@@ -13856,12 +13846,9 @@ fn unset_workspace_sticky_preserves_strict_subset_activities() {
         .expect("alpha view has ws");
 
     // Seed the workspace with activities = {alpha} — a strict subset of
-    // all_live_ids = {alpha, beta}.  is_sticky stays false (no-op path).
+    // all_live_ids = {alpha, beta}. is_sticky stays false (no-op path).
     {
-        let ws = layout
-            .workspaces
-            .get_mut(&target_ws_id)
-            .expect("live");
+        let ws = layout.workspaces.get_mut(&target_ws_id).expect("live");
         ws.activities = HashSet::from([alpha]);
         assert!(!ws.is_sticky());
     }
@@ -13870,10 +13857,7 @@ fn unset_workspace_sticky_preserves_strict_subset_activities() {
         .unset_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
         .expect("unset on non-sticky must succeed (no-op)");
 
-    let ws = layout
-        .workspaces
-        .get(&target_ws_id)
-        .expect("live");
+    let ws = layout.workspaces.get(&target_ws_id).expect("live");
     assert!(!ws.is_sticky());
     // Strict subset {alpha} must be preserved — not expanded to {alpha, beta}.
     assert_eq!(ws.activities(), &HashSet::from([alpha]));
@@ -13914,7 +13898,10 @@ fn toggle_workspace_sticky_dispatches_to_set_when_off() {
         .toggle_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
         .expect("toggle must succeed");
     let (out_ws_id, out_active_affected) = match outcome {
-        ToggleWorkspaceStickyOutcome::StickyOn { ws_id, active_affected } => (ws_id, active_affected),
+        ToggleWorkspaceStickyOutcome::StickyOn {
+            ws_id,
+            active_affected,
+        } => (ws_id, active_affected),
         ToggleWorkspaceStickyOutcome::StickyOff { .. } => {
             panic!("expected StickyOn outcome for toggle-off → on")
         }
@@ -13923,10 +13910,7 @@ fn toggle_workspace_sticky_dispatches_to_set_when_off() {
     // alpha already in set; to_add = {beta}; active_affected = false.
     assert!(!out_active_affected);
 
-    let ws = layout
-        .workspaces
-        .get(&target_ws_id)
-        .expect("live");
+    let ws = layout.workspaces.get(&target_ws_id).expect("live");
     assert!(ws.is_sticky());
     assert_eq!(ws.activities(), &HashSet::from([alpha, beta]));
 
@@ -13953,10 +13937,7 @@ fn toggle_workspace_sticky_dispatches_to_unset_when_on() {
         .expect("alpha view has ws");
 
     {
-        let ws = layout
-            .workspaces
-            .get_mut(&target_ws_id)
-            .expect("live");
+        let ws = layout.workspaces.get_mut(&target_ws_id).expect("live");
         ws.is_sticky = true;
         ws.activities = HashSet::from([alpha, beta]);
     }
@@ -13974,12 +13955,9 @@ fn toggle_workspace_sticky_dispatches_to_unset_when_on() {
     };
     assert_eq!(out_ws_id, target_ws_id);
 
-    let ws = layout
-        .workspaces
-        .get(&target_ws_id)
-        .expect("live");
+    let ws = layout.workspaces.get(&target_ws_id).expect("live");
     assert!(!ws.is_sticky());
-    // DD §3.2: Toggle-off keeps activities set.
+    // Toggle-off keeps activities set.
     assert_eq!(ws.activities(), &HashSet::from([alpha, beta]));
 
     layout.verify_invariants();
@@ -13996,7 +13974,7 @@ fn toggle_workspace_sticky_no_op_when_workspace_not_found() {
     assert_eq!(err, ToggleWorkspaceStickyError::WorkspaceNotFound);
 }
 
-// ---- DD §6.4 `open-on-activity` cross-activity helpers (Phase 2 boxes 2022 + 2023) ----
+// ---- `open-on-activity` cross-activity helpers ----
 
 /// Build a [`Config`] with two declared activities (`alpha` first → seed,
 /// `beta` second → inactive) and the supplied per-activity workspace lists.
@@ -14081,16 +14059,16 @@ fn find_workspace_in_activity_by_name_finds_hidden_workspace() {
     assert_eq!(found.name(), Some(&"beta-ws".to_owned()));
     assert!(found.activities().contains(&beta_id));
 
-    // Same name + wrong activity → None (DD §6.4 point 3 fallback).
+    // Same name + wrong activity → None (point 3 fallback: activity-scoped lookup).
     assert!(layout
         .find_workspace_in_activity_by_name("beta-ws", alpha_id)
         .is_none());
 }
 
 #[test]
-fn find_workspace_in_activity_by_name_returns_none_for_active_activity_when_workspace_in_other_activity()
- {
-    // §6.4 point 3 fallback: `open-on-workspace ws` + `open-on-activity X`
+fn find_workspace_in_activity_by_name_returns_none_for_active_activity_when_workspace_in_other_activity(
+) {
+    // point 3 fallback: `open-on-workspace ws` + `open-on-activity X`
     // where `ws` is not tagged with `X` must miss, so the precedence chain
     // can fall through to the next branch.
     let mut layout = Layout::<TestWindow>::new(
@@ -14107,7 +14085,7 @@ fn find_workspace_in_activity_by_name_returns_none_for_active_activity_when_work
 
 #[test]
 fn monitor_for_workspace_in_activity_returns_none_for_workspace_not_in_activity() {
-    // The §6.4 point-3 lookup variant of the above: `monitor_for_workspace`
+    // The point-3 lookup variant of the above: `monitor_for_workspace`
     // must filter by activity membership, not just name.
     let mut layout = Layout::<TestWindow>::new(
         Clock::with_time(Duration::ZERO),
@@ -14140,7 +14118,7 @@ fn view_in_activity_or_materialize_creates_fresh_view_for_inactive_activity() {
     // alpha is the seed (active); beta has no workspaces in config and no
     // active view. After `view_in_activity_or_materialize(beta, output1)`,
     // beta must own a fresh view rooted on output1 with exactly one
-    // trailing-empty workspace (DD §5.3 fresh branch under no-EWAF).
+    // trailing-empty workspace ( fresh branch under no-EWAF).
     let mut layout = Layout::<TestWindow>::new(
         Clock::with_time(Duration::ZERO),
         &cross_activity_config(&[], &[]),
@@ -14170,7 +14148,11 @@ fn view_in_activity_or_materialize_creates_fresh_view_for_inactive_activity() {
         .views()
         .get(&output_id)
         .expect("post: beta must own a fresh view for output1");
-    assert_eq!(view.len(), 1, "fresh branch must allocate exactly one empty");
+    assert_eq!(
+        view.len(),
+        1,
+        "fresh branch must allocate exactly one empty"
+    );
     let id = view.ids()[0];
     let ws = layout.workspace_pool().get(&id).unwrap();
     assert!(ws.activities().contains(&beta_id));
@@ -14203,7 +14185,11 @@ fn view_in_activity_or_materialize_lifts_pre_tagged_workspaces() {
         .views()
         .get(&output_id)
         .expect("post: beta must own a view for output1");
-    assert_eq!(view.len(), 2, "lift branch (no EWAF) must produce body + trailing empty");
+    assert_eq!(
+        view.len(),
+        2,
+        "lift branch (no EWAF) must produce body + trailing empty"
+    );
     let body_id = view.ids()[0];
     let trailing_id = view.ids()[1];
     let body = layout.workspace_pool().get(&body_id).unwrap();
@@ -14211,7 +14197,11 @@ fn view_in_activity_or_materialize_lifts_pre_tagged_workspaces() {
     assert_eq!(body.name(), Some(&"beta-ws".to_owned()));
     assert!(trailing.name().is_none());
     assert!(!trailing.has_windows_or_name());
-    assert_eq!(view.active_position(), 0, "active stays on the lifted workspace");
+    assert_eq!(
+        view.active_position(),
+        0,
+        "active stays on the lifted workspace"
+    );
 
     layout.verify_invariants();
 }
@@ -14239,7 +14229,11 @@ fn view_in_activity_or_materialize_respects_ewaf_bookend() {
         .views()
         .get(&output_id)
         .expect("post: beta must own a view for output1");
-    assert_eq!(view.len(), 3, "EWAF lift branch must produce leading + body + trailing");
+    assert_eq!(
+        view.len(),
+        3,
+        "EWAF lift branch must produce leading + body + trailing"
+    );
     assert_eq!(view.active_position(), 1, "EWAF active shifts to body");
     let leading = layout.workspace_pool().get(&view.ids()[0]).unwrap();
     let body = layout.workspace_pool().get(&view.ids()[1]).unwrap();
@@ -14328,7 +14322,10 @@ fn add_window_to_hidden_activity_workspace_via_add_window_target_workspace() {
 
     // The window landed in the hidden workspace.
     let beta_ws = layout.workspace_pool().get(&beta_ws_id).unwrap();
-    assert!(beta_ws.has_window(&0), "window must land in the hidden-activity workspace");
+    assert!(
+        beta_ws.has_window(&0),
+        "window must land in the hidden-activity workspace"
+    );
 
     // The active activity's view for output1 is unchanged (no auto-switch,
     // no view mutation).
@@ -14406,7 +14403,10 @@ fn find_workspace_in_activity_by_name_resolves_case_insensitively() {
 
     assert!(lower.is_some(), "lowercase must resolve");
     assert!(upper.is_some(), "uppercase must resolve (case-insensitive)");
-    assert!(mixed.is_some(), "mixed-case must resolve (case-insensitive)");
+    assert!(
+        mixed.is_some(),
+        "mixed-case must resolve (case-insensitive)"
+    );
     assert_eq!(
         lower.unwrap().id(),
         upper.unwrap().id(),

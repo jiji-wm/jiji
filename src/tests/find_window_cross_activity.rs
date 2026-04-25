@@ -4,7 +4,7 @@
 //!
 //! A hidden-activity window's surface commits, ack_configures, and popup
 //! unconstraining all flow through `find_window_and_output` in
-//! `handlers/*`. Before Phase 1b Part 1, the lookup only visited the
+//! `handlers/*`. the lookup only visited the
 //! active activity's views — a window mapped on one activity and left
 //! behind when the user switched activities would silently drop every
 //! surface event until the activity was re-entered. This test maps a

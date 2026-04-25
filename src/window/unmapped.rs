@@ -72,7 +72,7 @@ pub enum InitialConfigureState {
 
         /// Activity that scoped the configure-time monitor / workspace
         /// resolution, when an `open-on-activity` window rule was in
-        /// effect (DD §6.4). `Some(activity_id)` means the
+        /// effect. `Some(activity_id)` means the
         /// `workspace_name` lookup at map-time must go through
         /// [`Layout::find_workspace_in_activity_by_name`] rather than
         /// `find_workspace_by_name`, so a hidden-activity workspace is
@@ -84,8 +84,8 @@ pub enum InitialConfigureState {
         /// when `target_activity.is_some()` AND the configure-time `ws`
         /// resolution settled on a workspace in the target activity.
         ///
-        /// Necessary for the `open-on-activity` "alone" case (DD §6.4
-        /// point 1): the resolved workspace is often a freshly-materialized
+        /// Necessary for the `open-on-activity` "alone" case: the resolved
+        /// workspace is often a freshly-materialized
         /// unnamed empty in the hidden activity, so `workspace_name` is
         /// `None` and re-resolving by name at map-time would fall through
         /// to the active activity. Carrying the id directly preserves the

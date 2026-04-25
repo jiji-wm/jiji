@@ -35,11 +35,9 @@ use crate::backend::IpcOutputMap;
 use crate::input::pick_window_grab::PickWindowGrab;
 use crate::layout::activity::ActivityId;
 use crate::layout::workspace::WorkspaceId;
-use crate::utils::id::IdCounter;
-use crate::layout::{
-    format_do_action_error, DoActionError, Layout, LayoutElement,
-};
+use crate::layout::{format_do_action_error, DoActionError, Layout, LayoutElement};
 use crate::niri::State;
+use crate::utils::id::IdCounter;
 use crate::utils::{version, with_toplevel_role};
 use crate::window::Mapped;
 
@@ -76,13 +74,11 @@ impl IpcConnId {
 /// without cloning from caller state, plus the send half of the response
 /// channel the async `process` task is awaiting on. On drain:
 ///
-/// - Send `Ok(())` once the action lands → `process` returns
-///   `Response::Handled`.
-/// - On re-block mid-drain: re-insert the entry and leave `tx` untouched;
-///   the sender is not dropped, so the `process` task stays parked.
-/// - Drop without sending on a closed receiver (client gone between enqueue
-///   and drain). `process`'s `rx.recv().await` has already been dropped in
-///   that case.
+/// - Send `Ok(())` once the action lands → `process` returns `Response::Handled`.
+/// - On re-block mid-drain: re-insert the entry and leave `tx` untouched; the sender is not
+///   dropped, so the `process` task stays parked.
+/// - Drop without sending on a closed receiver (client gone between enqueue and drain). `process`'s
+///   `rx.recv().await` has already been dropped in that case.
 struct BlockedWaiter {
     action: niri_config::Action,
     tx: async_channel::Sender<Result<(), DoActionError>>,
@@ -216,28 +212,23 @@ impl Drop for IpcServer {
 ///
 /// # Invariants
 ///
-/// - **`Handled` ≡ performed**: a waiter is only signalled `Ok(())` after its
-///   `do_action_inner` call returned `Ok(())`. The send half is dropped
-///   without signalling on silent-prune paths (closed receiver).
-/// - **FIFO preserved across re-block** (scoped to
-///   `Err(DoActionError::ActivitySwitchBlocked)`): if `do_action_inner`
-///   re-raises a hard block mid-drain (no current action reaches this;
-///   forward-compat for future gating widening), the waiter is re-inserted
-///   at its index at removal via `shift_insert(original_idx, …)` and the
-///   walk **breaks** — continuing past a re-blocked waiter would promote
-///   later waiters ahead of it. The `// FIFO pin` breadcrumb on the `break`
+/// - **`Handled` ≡ performed**: a waiter is only signalled `Ok(())` after its `do_action_inner`
+///   call returned `Ok(())`. The send half is dropped without signalling on silent-prune paths
+///   (closed receiver).
+/// - **FIFO preserved across re-block** (scoped to `Err(DoActionError::ActivitySwitchBlocked)`): if
+///   `do_action_inner` re-raises a hard block mid-drain (no current action reaches this;
+///   forward-compat for future gating widening), the waiter is re-inserted at its index at removal
+///   via `shift_insert(original_idx, …)` and the walk **breaks** — continuing past a re-blocked
+///   waiter would promote later waiters ahead of it. The `// FIFO pin` breadcrumb on the `break`
 ///   pins this semantic against accidental refactor.
-/// - **Terminal errors advance the drain** (scoped to
-///   `Err(DoActionError::WindowNotFound)`): a terminal error for one waiter
-///   does not block later waiters. The waiter is signalled
-///   `Err(DoActionError::WindowNotFound { id })` and the walk `continue`s
-///   to the next connection.
-/// - **Closed-receiver prune**: if the client disconnected between enqueue
-///   and drain (`tx.is_closed()`), the entry is dropped without dispatch.
-///   No side effects, no replay.
-/// - **No registry borrow across `do_action_inner`**: the walk grabs and
-///   drops the registry `RefCell` borrow per iteration so a nested
-///   `IpcServer` access inside action dispatch can't deadlock.
+/// - **Terminal errors advance the drain** (scoped to `Err(DoActionError::WindowNotFound)`): a
+///   terminal error for one waiter does not block later waiters. The waiter is signalled
+///   `Err(DoActionError::WindowNotFound { id })` and the walk `continue`s to the next connection.
+/// - **Closed-receiver prune**: if the client disconnected between enqueue and drain
+///   (`tx.is_closed()`), the entry is dropped without dispatch. No side effects, no replay.
+/// - **No registry borrow across `do_action_inner`**: the walk grabs and drops the registry
+///   `RefCell` borrow per iteration so a nested `IpcServer` access inside action dispatch can't
+///   deadlock.
 pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
     let _span = tracy_client::span!("drain_blocked_action_waiters");
 
@@ -258,7 +249,12 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
     // Fast-path: still hard-blocked → don't walk waiters; they'll drain on a
     // later tick. Checked after the empty-registry short-circuit so the hot
     // path (no queue) pays nothing.
-    if state.niri.layout.is_activity_switch_hard_blocked().is_some() {
+    if state
+        .niri
+        .layout
+        .is_activity_switch_hard_blocked()
+        .is_some()
+    {
         return;
     }
 
@@ -319,7 +315,7 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
                     "shift_insert on re-block must not overwrite: conn_id={conn_id:?} original_idx={original_idx}",
                 );
                 let _ = block;
-                // FIFO pin — see DD §5.11 Part 2.
+                // FIFO pin — drain order must not promote later waiters ahead of re-blocked ones.
                 //
                 // Do NOT convert this `break` to `continue`: walking past a
                 // re-blocked waiter promotes later waiters ahead of it and
@@ -332,7 +328,7 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
                 // A stale id for waiter X does not affect waiters Y, Z: the
                 // registry entry was already removed via `shift_remove`
                 // above, and the walk continues to the next connection
-                // (DD §5.18). Do NOT convert this `continue` to `break` —
+                //. Do NOT convert this `continue` to `break` —
                 // that would halt drain for all later waiters after one
                 // unknown-id action.
                 let _ = waiter
@@ -349,7 +345,7 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
             | Err(err @ DoActionError::SetWorkspaceActivitiesEmptyActivityList)
             | Err(err @ DoActionError::MoveWorkspaceToActivityActivityNotFound)
             | Err(err @ DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity) => {
-                // Terminal errors (DD §5.14). Same shape as `WindowNotFound`:
+                // Terminal errors. Same shape as `WindowNotFound`:
                 // forward and advance the walk — do not re-block.
                 let _ = waiter.tx.send_blocking(Err(err));
                 continue;
@@ -616,7 +612,8 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             Response::PickedColor(color)
         }
         Request::Action(action) => {
-            // Forward-compat against a future pipelined `handle_client`; unreachable under today's sequential dispatch.
+            // Forward-compat against a future pipelined `handle_client`; unreachable under today's
+            // sequential dispatch.
             if ctx
                 .blocked_action_waiters
                 .borrow()
@@ -657,14 +654,14 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                         );
                     }
                     Err(DoActionError::WindowNotFound { id }) => {
-                        // Terminal error (DD §5.18): forward immediately.
+                        // Terminal error: forward immediately.
                         // Do NOT insert into `blocked_action_waiters` — a
                         // registry entry would deadlock the connection,
                         // since no hard-block condition exists to clear
                         // and the drain site would never re-dispatch.
                         let _ = tx.send_blocking(Err(DoActionError::WindowNotFound { id }));
                     }
-                    // Terminal errors from DD §5.14 workspace-activity
+                    // Terminal errors from workspace-activity
                     // assignment actions. Same rationale as `WindowNotFound`:
                     // no hard-block condition, do not park — forward to the
                     // waiter so the IPC envelope is produced on the main
@@ -774,7 +771,9 @@ pub(crate) fn build_activities_ipc<W: LayoutElement>(
         .collect()
 }
 
-pub(crate) fn build_focused_activity_ipc<W: LayoutElement>(layout: &Layout<W>) -> niri_ipc::Activity {
+pub(crate) fn build_focused_activity_ipc<W: LayoutElement>(
+    layout: &Layout<W>,
+) -> niri_ipc::Activity {
     let active_id = layout.active_activity_id();
     to_ipc_activity(layout.activities().active(), active_id, layout)
 }
@@ -948,7 +947,7 @@ impl State {
         // for the activity that owned it. This mirrors the
         // `ActivitiesChanged`-before-`WorkspacesChanged` principle
         // documented on `Event::ActivitiesChanged`. See
-        // docs/activities/design.md §4.6 for the normative statement of the
+        //  for the normative statement of the
         // structure-before-state rule. Do not move
         // `ipc_refresh_activity_lifecycle` after `ipc_refresh_active_activity`
         // or `ipc_refresh_workspaces`.
@@ -1514,13 +1513,11 @@ pub(crate) fn test_diff_activities_against_state<W: LayoutElement>(
 /// Two-pass construction, together covering every pool workspace exactly once:
 ///
 /// 1. Workspaces in the active activity, in monitor-and-view order (plus the
-///    `disconnected_workspace_ids` tail when no monitors are connected).
-///    Their `idx` is view-position + 1 (1-based user-visible index), and
-///    `is_in_active_activity` is `true`.
-/// 2. Workspaces that are members of some other activity only. Per DD §3.5
-///    their `idx` sentinel is `0`, `is_in_active_activity` is `false`, and
-///    neither `is_active` nor `is_focused` can be true (the active/focused
-///    workspace is always in the active activity, by construction).
+///    `disconnected_workspace_ids` tail when no monitors are connected). Their `idx` is
+///    view-position + 1 (1-based user-visible index), and `is_in_active_activity` is `true`.
+/// 2. Workspaces that are members of some other activity only. Their `idx` sentinel is `0`,
+///    `is_in_active_activity` is `false`, and neither `is_active` nor `is_focused` can be true (the
+///    active/focused workspace is always in the active activity, by construction).
 ///
 /// The `active_window_id_of` closure extracts the IPC window id from a
 /// layout element; production uses `Mapped::id().get()`, and `layout/tests.rs`
@@ -1733,7 +1730,9 @@ mod tests {
         waiters.insert(conn, waiter);
 
         assert_eq!(waiters.len(), 1);
-        let drained = waiters.shift_remove(&conn).expect("waiter inserted just now");
+        let drained = waiters
+            .shift_remove(&conn)
+            .expect("waiter inserted just now");
         assert!(waiters.is_empty());
         drained.tx.send_blocking(Ok(())).expect("receiver is alive");
 
@@ -1876,27 +1875,24 @@ mod tests {
     #[test]
     fn window_not_found_drain_continues_past_blocked_waiter() {
         // Pins two load-bearing invariants for the `WindowNotFound` branch of
-        // `drain_blocked_action_waiters` (DD §5.18):
+        // `drain_blocked_action_waiters`:
         //
-        // 1. **`continue` not `break`:** A `WindowNotFound` result at position
-        //    A must NOT prevent position B from being drained.  If the real
-        //    drain loop used `break` instead of `continue`, B would be left in
-        //    the registry after A errors.  The intermediate assertion below
-        //    would still pass (B is present just before its own drain step),
-        //    but the post-drain assertion (registry empty) would fail because
-        //    the loop would have stopped after A without processing B.
+        // 1. **`continue` not `break`:** A `WindowNotFound` result at position A must NOT prevent
+        //    position B from being drained. If the real drain loop used `break` instead of
+        //    `continue`, B would be left in the registry after A errors. The intermediate assertion
+        //    below would still pass (B is present just before its own drain step), but the
+        //    post-drain assertion (registry empty) would fail because the loop would have stopped
+        //    after A without processing B.
         //
-        // 2. **Non-insertion into `blocked_action_waiters`:** A
-        //    `WindowNotFound` result must never be re-inserted into the
-        //    registry (unlike the re-block path, which re-inserts at the
-        //    original index).  A copy-paste error adding `shift_insert` after
-        //    the `WindowNotFound` arm would cause deadlock; the registry-empty
-        //    post-condition below catches it.
+        // 2. **Non-insertion into `blocked_action_waiters`:** A `WindowNotFound` result must never
+        //    be re-inserted into the registry (unlike the re-block path, which re-inserts at the
+        //    original index). A copy-paste error adding `shift_insert` after the `WindowNotFound`
+        //    arm would cause deadlock; the registry-empty post-condition below catches it.
         //
         // Because `drain_blocked_action_waiters` takes `&mut State` and cannot
         // be called from a unit test, we simulate the two drain steps by hand
         // using sequential `shift_remove` + `send_blocking` calls, mirroring
-        // the real loop body exactly.  The intermediate assertion between step
+        // the real loop body exactly. The intermediate assertion between step
         // A and step B is the discriminating check: it proves B survived A's
         // error without being removed or blocked.
         let mut waiters: IndexMap<IpcConnId, BlockedWaiter> = IndexMap::new();
@@ -1924,7 +1920,9 @@ mod tests {
 
         // Step B: drain B — also gets WindowNotFound (simulating a second
         // stale-id action in the same queue).
-        let drained_b = waiters.shift_remove(&b).expect("b still present after A error");
+        let drained_b = waiters
+            .shift_remove(&b)
+            .expect("b still present after A error");
         let _ = drained_b
             .tx
             .send_blocking(Err(DoActionError::WindowNotFound { id: 100 }));
@@ -1937,11 +1935,13 @@ mod tests {
 
         // Both waiters received the error signal.
         assert!(matches!(
-            rx_a.recv_blocking().expect("a sender alive until send_blocking"),
+            rx_a.recv_blocking()
+                .expect("a sender alive until send_blocking"),
             Err(DoActionError::WindowNotFound { id: 99 })
         ));
         assert!(matches!(
-            rx_b.recv_blocking().expect("b sender alive until send_blocking"),
+            rx_b.recv_blocking()
+                .expect("b sender alive until send_blocking"),
             Err(DoActionError::WindowNotFound { id: 100 })
         ));
     }
@@ -2149,5 +2149,4 @@ mod tests {
         assert!(matches!(&events[0], Event::WorkspaceOpenedOrChanged { .. }));
         assert!(matches!(&events[1], Event::WorkspacesChanged { .. }));
     }
-
 }

@@ -496,7 +496,7 @@ impl ExtWorkspaceManagerState {
     }
 
     /// Snapshot of the [`WorkspaceId`] keys currently tracked by this protocol
-    /// state. Test-only helper that pins the §5.21 projection contract: the
+    /// state. Test-only helper that pins the projection contract: the
     /// set returned here must equal the set of ids produced by
     /// [`Layout::workspaces`](crate::layout::Layout::workspaces) at the same
     /// observation point (i.e. immediately after [`refresh`] has run).

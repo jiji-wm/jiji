@@ -114,13 +114,13 @@ pub struct Workspace<W: LayoutElement> {
     /// Whether this workspace is "sticky": present on every activity rather than only those in
     /// `activities`.
     ///
-    /// Sticky flag per DD §3.2. Mutators land in Phase 2; auto-expansion (into
-    /// `Workspace.activities`) in Phase 1b. This field is the storage that drives that behaviour.
+    /// Sticky flag per Mutators land; auto-expansion (into
+    /// `Workspace.activities`). This field is the storage that drives that behaviour.
     pub(super) is_sticky: bool,
 
     /// Activities this workspace is a member of.
     ///
-    /// Per DD §3.2, this set is always non-empty for every workspace; every ctor takes an
+    /// This set is always non-empty for every workspace; every ctor takes an
     /// `activities: HashSet<ActivityId>` seed parameter and panics if it is empty. Every id
     /// stored here is also a key in the enclosing `Layout.activities` map (cross-field
     /// invariant asserted in `Layout::verify_invariants`).
@@ -222,7 +222,7 @@ impl FloatingActive {
 impl<W: LayoutElement> Workspace<W> {
     /// Construct a freshly-id'd workspace bound to `output`.
     ///
-    /// `activities` seeds the workspace's activity membership; must be non-empty per DD §3.2.
+    /// `activities` seeds the workspace's activity membership; must be non-empty per.
     pub fn new(
         output: &Output,
         activities: HashSet<ActivityId>,
@@ -231,14 +231,14 @@ impl<W: LayoutElement> Workspace<W> {
     ) -> Self {
         assert!(
             !activities.is_empty(),
-            "Workspace::new*: activities must be non-empty (DD §3.2)",
+            "Workspace::new*: activities must be non-empty",
         );
         Self::new_with_config(output, None, activities, clock, options)
     }
 
     /// Construct a freshly-id'd workspace bound to `output`, optionally merging `config`.
     ///
-    /// `activities` seeds the workspace's activity membership; must be non-empty per DD §3.2.
+    /// `activities` seeds the workspace's activity membership; must be non-empty per.
     pub fn new_with_config(
         output: &Output,
         mut config: Option<WorkspaceConfig>,
@@ -248,7 +248,7 @@ impl<W: LayoutElement> Workspace<W> {
     ) -> Self {
         assert!(
             !activities.is_empty(),
-            "Workspace::new*: activities must be non-empty (DD §3.2)",
+            "Workspace::new*: activities must be non-empty",
         );
         let output_id = Some(
             config
@@ -316,7 +316,7 @@ impl<W: LayoutElement> Workspace<W> {
     /// Construct a freshly-id'd workspace that does not yet hold an output, optionally merging
     /// `config`.
     ///
-    /// `activities` seeds the workspace's activity membership; must be non-empty per DD §3.2.
+    /// `activities` seeds the workspace's activity membership; must be non-empty per.
     pub fn new_with_config_no_outputs(
         mut config: Option<WorkspaceConfig>,
         activities: HashSet<ActivityId>,
@@ -325,7 +325,7 @@ impl<W: LayoutElement> Workspace<W> {
     ) -> Self {
         assert!(
             !activities.is_empty(),
-            "Workspace::new*: activities must be non-empty (DD §3.2)",
+            "Workspace::new*: activities must be non-empty",
         );
         let output_id = Some(OutputId(
             config
@@ -391,7 +391,7 @@ impl<W: LayoutElement> Workspace<W> {
 
     /// Construct a freshly-id'd workspace that does not yet hold an output.
     ///
-    /// `activities` seeds the workspace's activity membership; must be non-empty per DD §3.2.
+    /// `activities` seeds the workspace's activity membership; must be non-empty per.
     pub fn new_no_outputs(
         activities: HashSet<ActivityId>,
         clock: Clock,
@@ -399,7 +399,7 @@ impl<W: LayoutElement> Workspace<W> {
     ) -> Self {
         assert!(
             !activities.is_empty(),
-            "Workspace::new*: activities must be non-empty (DD §3.2)",
+            "Workspace::new*: activities must be non-empty",
         );
         Self::new_with_config_no_outputs(None, activities, clock, options)
     }
@@ -413,7 +413,7 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     /// Whether this workspace is "sticky" — present on every activity. Default is `false`.
-    /// Mutators land in Phase 2; auto-expansion in Phase 1b (DD §3.2).
+    /// Mutators land; auto-expansion.
     ///
     /// Contract: `is_sticky` is the *auto-expansion trigger* — `Layout::create_activity`
     /// and `Layout::reconcile_activities_on_reload_add` expand `activities` to all
@@ -422,12 +422,12 @@ impl<W: LayoutElement> Workspace<W> {
     /// may leave `activities ⊊ all_ids` while `is_sticky == true`; the next
     /// `create_activity` / `reconcile_activities_on_reload_add` re-expands. Adding
     /// a strict `is_sticky → activities == all_ids` invariant is intentionally
-    /// rejected (see DD Phase 2 box 2015).
+    /// rejected (this strict invariant is intentionally deferred).
     pub fn is_sticky(&self) -> bool {
         self.is_sticky
     }
 
-    /// Activities this workspace is a member of. Non-empty by construction (DD §3.2).
+    /// Activities this workspace is a member of. Non-empty by construction.
     pub fn activities(&self) -> &HashSet<ActivityId> {
         &self.activities
     }
@@ -2102,7 +2102,7 @@ impl<W: LayoutElement> Workspace<W> {
 
         assert!(
             !self.activities.is_empty(),
-            "workspace {:?} activities must be non-empty (DD §3.2)",
+            "workspace {:?} activities must be non-empty",
             self.id(),
         );
 

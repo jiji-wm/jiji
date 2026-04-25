@@ -158,7 +158,7 @@ impl State {
 /// activity. `"alpha"` is first-declared, so it is the default / seed activity
 /// the `Layout` starts on.
 ///
-/// Used by the `ext_workspace` integration tests to exercise §5.21's
+/// Used by the `ext_workspace` integration tests to exercise
 /// activity-filtered projection through `ext_workspace::refresh`. The helper
 /// goes through `Config::parse_mem` (rather than field-by-field construction)
 /// to match every other `Config`-building test site and to stay robust against

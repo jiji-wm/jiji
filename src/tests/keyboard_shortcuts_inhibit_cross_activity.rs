@@ -1,4 +1,4 @@
-//! Pins the DD §5.19 keyboard-shortcuts-inhibit / activity-switch contract:
+//! Pins the keyboard-shortcuts-inhibit / activity-switch contract:
 //! when an activity switch hides a window with an active keyboard-shortcuts
 //! inhibitor, the inhibitor is deactivated; when the window becomes visible
 //! again, the inhibitor is reactivated — unless the user inactivated it
@@ -12,14 +12,12 @@
 //! (`Action::RemoveActivity` flowing through
 //! `Layout::switch_activity` must still trigger the sweep).
 //!
-//! Two of the five DD §5.19 hook sites are not covered here:
-//! - `Action::FocusWindow` auto-switch (input/mod.rs:990–992): testing this
-//!   hook requires synthesising a focus event that also triggers an activity
-//!   switch, which needs cross-activity window placement not yet available in
-//!   this sub-phase's fixture vocabulary. Deferred.
-//! - `State::reload_config` (niri.rs:1492–1500): the fixture setup required
-//!   (a config change that triggers an activity cascade) is non-trivial.
-//!   Deferred.
+//! Two of the five hook sites are not covered here:
+//! - `Action::FocusWindow` auto-switch (input/mod.rs:990–992): testing this hook requires
+//!   synthesising a focus event that also triggers an activity switch, which needs cross-activity
+//!   window placement not yet available in this sub-phase's fixture vocabulary. Deferred.
+//! - `State::reload_config` (niri.rs:1492–1500): the fixture setup required (a config change that
+//!   triggers an activity cascade) is non-trivial. Deferred.
 
 use niri_config::{Action, ActivityReference};
 use smithay::reexports::wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1;
@@ -105,7 +103,7 @@ fn alpha_id(f: &mut Fixture) -> niri_config::ActivityReference {
 
 #[test]
 fn inhibitor_deactivated_on_switch_away() {
-    // Pin the primary DD §5.19 contract: switching away from the activity
+    // Pin the primary contract: switching away from the activity
     // that hosts the inhibited window must inactivate the inhibitor and
     // record the surface in `deactivated_inhibitors_by_activity_switch`.
     let mut f = Fixture::with_config(config_with_two_activities(&[], &[]));
@@ -137,13 +135,13 @@ fn inhibitor_deactivated_on_switch_away() {
             .get(&server_surface)
             .expect("inhibitor must still be present after activity switch")
             .is_active(),
-        "DD §5.19: inhibitor on a hidden-activity window must be inactivated",
+        "inhibitor on a hidden-activity window must be inactivated",
     );
     assert!(
         f.niri()
             .deactivated_inhibitors_by_activity_switch
             .contains(&server_surface),
-        "DD §5.19: surface must be recorded in the tracking set so switch-back \
+        "surface must be recorded in the tracking set so switch-back \
          can restore it",
     );
 }
@@ -177,14 +175,14 @@ fn inhibitor_reactivated_on_switch_back() {
             .get(&server_surface)
             .expect("inhibitor must still be present after round-trip")
             .is_active(),
-        "DD §5.19: inhibitor must be reactivated when its owning workspace \
+        "inhibitor must be reactivated when its owning workspace \
          becomes visible again",
     );
     assert!(
         f.niri()
             .deactivated_inhibitors_by_activity_switch
             .is_empty(),
-        "DD §5.19: tracking set must be drained once the inhibitor is \
+        "tracking set must be drained once the inhibitor is \
          restored (invariant: tracking ⊆ inhibitor-map)",
     );
 }
@@ -246,14 +244,14 @@ fn inhibitor_user_inactivated_not_reactivated_on_switch_back() {
             .get(&server_surface)
             .expect("inhibitor must still be present")
             .is_active(),
-        "DD §5.19: user-inactivated inhibitor must NOT be re-activated on \
+        "user-inactivated inhibitor must NOT be re-activated on \
          switch-back (tracking set was never populated for this surface)",
     );
     assert!(
         f.niri()
             .deactivated_inhibitors_by_activity_switch
             .is_empty(),
-        "DD §5.19: tracking set must remain empty — the sweep must neither \
+        "tracking set must remain empty — the sweep must neither \
          insert nor remove user-toggled inhibitors",
     );
 }
@@ -300,7 +298,7 @@ fn inhibitor_destroyed_while_hidden_clears_tracking_set() {
         !f.niri()
             .deactivated_inhibitors_by_activity_switch
             .contains(&server_surface),
-        "DD §5.19: inhibitor_destroyed must also scrub the tracking set \
+        "inhibitor_destroyed must also scrub the tracking set \
          (subset invariant)",
     );
 
@@ -320,7 +318,7 @@ fn inhibitor_destroyed_while_hidden_clears_tracking_set() {
 
 #[test]
 fn inhibitor_reactivated_on_switch_activity_previous() {
-    // Pin the `Action::SwitchActivityPrevious` hook site (DD §5.19 third of
+    // Pin the `Action::SwitchActivityPrevious` hook site ( third of
     // five sites at input/mod.rs). This is a different dispatch arm from
     // `SwitchActivity(reference)` tested in (1) / (2) — a regression that
     // forgot to add the sweep call to `SwitchActivityPrevious` would pass
@@ -330,8 +328,8 @@ fn inhibitor_reactivated_on_switch_activity_previous() {
     // written in this sub-phase because `Layout::remove_activity` rejects
     // removal of an activity that exclusively owns a workspace with
     // windows (`ExclusiveWorkspaceHasWindows`). Pinning the cascade
-    // requires a `MoveWorkspaceToActivity`-class mutator that lands in
-    // Phase 2. The State-level hook at the `Action::RemoveActivity` arm
+    // requires a `MoveWorkspaceToActivity`-class mutator (not yet landed).
+    // The State-level hook at the `Action::RemoveActivity` arm
     // still exists and uses the same refresh call tested here, so the
     // mechanism is covered.
     let mut f = Fixture::with_config(config_with_two_activities(&[], &[]));
@@ -362,14 +360,14 @@ fn inhibitor_reactivated_on_switch_activity_previous() {
             .get(&server_surface)
             .expect("inhibitor must still be present after SwitchActivityPrevious")
             .is_active(),
-        "DD §5.19: SwitchActivityPrevious hook must reactivate inhibitor on \
+        "SwitchActivityPrevious hook must reactivate inhibitor on \
          switch-back (third of five State-level sweep sites)",
     );
     assert!(
         f.niri()
             .deactivated_inhibitors_by_activity_switch
             .is_empty(),
-        "DD §5.19: tracking set must drain on switch-back via \
+        "tracking set must drain on switch-back via \
          SwitchActivityPrevious",
     );
 }

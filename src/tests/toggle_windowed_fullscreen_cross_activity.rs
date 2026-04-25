@@ -2,7 +2,7 @@
 //! [`Layout::toggle_windowed_fullscreen`](crate::layout::Layout::toggle_windowed_fullscreen)
 //! against a regression back to the active-activity-only pool walk.
 //!
-//! Phase 1b Part 2a widened `toggle_windowed_fullscreen` to use
+//! The fix widened `toggle_windowed_fullscreen` to use
 //! `with_windows_all_mut` (layout/mod.rs:6049) so the windowed-fullscreen
 //! flip reaches windows on dormant activities. A regression that reverts
 //! that line to `with_windows_mut` would pass all existing fullscreen tests

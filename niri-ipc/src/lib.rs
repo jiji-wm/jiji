@@ -987,8 +987,7 @@ pub enum Action {
     /// active the compositor cascades to `previous` (or the first other
     /// activity in declaration order) before removing. The validation rules
     /// above map to a runtime error enum; handler-side mapping is currently
-    /// a single `warn!` log — a per-connection reply wiring lands with the
-    /// IPC surface in Phase 1b.
+    /// a single `warn!` log; per-connection reply wiring is not yet implemented.
     RemoveActivity {
         /// Activity to remove.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
@@ -1032,15 +1031,13 @@ pub enum Action {
     /// The workspace is appended to the activity's ordered workspace list on
     /// the workspace's bound output (if the activity already has a view for
     /// that output). For dormant activities without a view on the output, the
-    /// view is rebuilt lazily on the next switch to that activity — see
-    /// activities design doc §3.3.
+    /// view is rebuilt lazily on the next switch to that activity.
     ///
     /// No-op if the workspace is already a member of the activity. Errors if
     /// either reference does not resolve.
     ///
     /// Append is position-invariant within the view, so this action is safe
-    /// during workspace-switch animations AND gestures (activities design doc
-    /// §5.11).
+    /// during workspace-switch animations AND gestures.
     AddWorkspaceToActivity {
         /// Workspace to modify. Defaults to focused.
         workspace: Option<WorkspaceReferenceArg>,
@@ -1052,13 +1049,11 @@ pub enum Action {
     ///
     /// No-op if the workspace is already not a member of the activity. `Err`
     /// if removing would leave the workspace's `activities` set empty — every
-    /// workspace must belong to at least one activity (activities design doc
-    /// §3.2).
+    /// workspace must belong to at least one activity.
     ///
     /// Gesture blocks this action: while a workspace-switch gesture is in
     /// flight on any monitor, the IPC caller is queued until the gesture
-    /// ends. Workspace-switch animations are snapped and the action proceeds
-    /// (activities design doc §5.11).
+    /// ends. Workspace-switch animations are snapped and the action proceeds.
     RemoveWorkspaceFromActivity {
         /// Workspace to modify. Defaults to focused.
         workspace: Option<WorkspaceReferenceArg>,
@@ -1077,13 +1072,12 @@ pub enum Action {
     /// `RemoveWorkspaceFromActivity`).
     ///
     /// An empty `activities` list returns
-    /// `Err("activities list is empty (DD §3.2)")` — every workspace must
+    /// `Err("activities list is empty")` — every workspace must
     /// belong to at least one activity.
     ///
     /// Asymmetry with `Add` / `Remove`: a workspace reference that does not
-    /// resolve silently no-ops (logs `warn!` and returns `Handled`) per
-    /// activities design doc §5.14. `Add` / `Remove` surface `Err` on the
-    /// same miss; this is deliberate and pinned by
+    /// resolve silently no-ops (logs `warn!` and returns `Handled`). `Add` / `Remove` surface
+    /// `Err` on the same miss; this is deliberate and pinned by
     /// `do_action_error_envelope_matches_wire_contract`.
     ///
     /// Gesture blocks this action: see `RemoveWorkspaceFromActivity` for the
@@ -1105,13 +1099,13 @@ pub enum Action {
     /// transiently belongs to both the active activity and `activity`, so
     /// the "every workspace belongs to ≥1 activity" invariant is never
     /// violated — even when the workspace was previously exclusive to the
-    /// active activity (activities design doc §4.3).
+    /// active activity.
     ///
     /// Multi-activity semantics: if the workspace belonged to
     /// `{active, X, Y}`, after the move it belongs to `{X, Y, activity}`
     /// — it leaves the active activity but stays in the others.
     ///
-    /// Returns `Err("workspace not in active activity (DD §5.14)")` when
+    /// Returns `Err("workspace not in active activity")` when
     /// the workspace is not a member of the currently-active activity.
     /// The move verb requires a well-defined source; falling back to
     /// "just add to target" would silently change semantics. Callers that
@@ -1121,12 +1115,11 @@ pub enum Action {
     /// No-op when `activity` equals the currently-active activity.
     ///
     /// Gesture-block gate is `focus`-dependent:
-    /// - `focus: false` consults the weaker gesture-only gate (matches
-    ///   the `Remove` leg it composes).
-    /// - `focus: true` consults the full
-    ///   `is_activity_switch_hard_blocked` predicate (interactive_move,
-    ///   DnD, or workspace-switch gesture on any monitor) — same gate
-    ///   as `SwitchActivity`, because this path chains into it.
+    /// - `focus: false` consults the weaker gesture-only gate (matches the `Remove` leg it
+    ///   composes).
+    /// - `focus: true` consults the full `is_activity_switch_hard_blocked` predicate
+    ///   (interactive_move, DnD, or workspace-switch gesture on any monitor) — same gate as
+    ///   `SwitchActivity`, because this path chains into it.
     MoveWorkspaceToActivity {
         /// Workspace to modify. Defaults to focused.
         workspace: Option<WorkspaceReferenceArg>,
@@ -1134,7 +1127,7 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
         activity: ActivityReferenceArg,
         /// If true, switch the active activity to `activity` after the
-        /// move. Triggers the §5.19 keyboard-shortcut-inhibitor refresh.
+        /// move. Triggers the keyboard-shortcut-inhibitor refresh.
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = false))]
         focus: bool,
     },
@@ -1145,8 +1138,7 @@ pub enum Action {
     /// Toggling off sets `is_sticky = false` but keeps the current `activities`
     /// set (the user can then narrow it with `RemoveWorkspaceFromActivity`).
     ///
-    /// Silent no-op if the workspace reference does not resolve (activities
-    /// design doc §5.14).
+    /// Silent no-op if the workspace reference does not resolve.
     ToggleWorkspaceSticky {
         /// Workspace to modify. Defaults to focused.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
@@ -1158,8 +1150,7 @@ pub enum Action {
     /// activity ids. No-op if the workspace is already sticky and its
     /// `activities` set already equals the full live id set.
     ///
-    /// Silent no-op if the workspace reference does not resolve (activities
-    /// design doc §5.14).
+    /// Silent no-op if the workspace reference does not resolve.
     SetWorkspaceSticky {
         /// Workspace to modify. Defaults to focused.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
@@ -1172,12 +1163,10 @@ pub enum Action {
     ///
     /// **Session-only for config-sticky workspaces.** If the workspace has
     /// `sticky true` in its config block, config reload re-applies stickiness
-    /// and re-expands `activities` to all current activities (activities
-    /// design doc §5.15). To permanently unset, remove `sticky true` from the
-    /// workspace's config block.
+    /// and re-expands `activities` to all current activities. To permanently unset, remove `sticky
+    /// true` from the workspace's config block.
     ///
-    /// Silent no-op if the workspace reference does not resolve (activities
-    /// design doc §5.14).
+    /// Silent no-op if the workspace reference does not resolve.
     UnsetWorkspaceSticky {
         /// Workspace to modify. Defaults to focused.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
@@ -1228,7 +1217,7 @@ pub enum WorkspaceReferenceArg {
 /// Reference to an activity by id or name.
 ///
 /// Activities have no stable positional index — unlike workspaces they are
-/// referenced by name or id only (see the activities design doc §4.4).
+/// referenced by name or id only.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub enum ActivityReferenceArg {
@@ -1674,10 +1663,9 @@ pub struct Activity {
     pub name: String,
     /// Whether this activity is declared in config (`true`) or runtime (`false`).
     ///
-    /// Config-declared activities persist across config reloads; runtime-created activities do not.
-    ///
-    /// **Phase 1a note**: config-reload promotion is not yet wired. This field reflects how the
-    /// activity was originally created.
+    /// Config-declared activities persist across config reloads; runtime-created activities do
+    /// not. Config-reload promotion is not wired; this field reflects how the activity was
+    /// originally created.
     pub is_config_declared: bool,
     /// Whether this is the currently active activity.
     pub is_active: bool,
@@ -1728,9 +1716,9 @@ pub struct Workspace {
     pub is_focused: bool,
     /// Id of the active window on this workspace, if any.
     pub active_window_id: Option<u64>,
-    /// Activity IDs this workspace belongs to, sorted ascending by ID. Non-empty for all workspaces
-    /// emitted by niri (every workspace belongs to at least one activity); an empty slice is only
-    /// possible with hand-constructed or test values.
+    /// Activity IDs this workspace belongs to, sorted ascending by ID. Non-empty for all
+    /// workspaces emitted by niri (every workspace belongs to at least one activity); an empty
+    /// slice is only possible with hand-constructed or test values.
     pub activities: Vec<u64>,
     /// Whether this workspace is sticky (auto-tagged with all activities). The distinction between
     /// sticky and non-sticky workspaces is only observable when multiple activities exist.
@@ -2577,8 +2565,8 @@ mod tests {
     fn workspace_ipc_roundtrips_serde() {
         // Pin the exact JSON wire representation (field names, order, and the
         // new activity-related fields) against accidental drift. Tests both an
-        // empty `activities` vec and a populated one, because the DD documents
-        // the invariant that real workspaces always carry at least one activity
+        // empty `activities` vec and a populated one, because the wire contract
+        // requires real workspaces to always carry at least one activity
         // id while future test/default construction may still use an empty vec.
         let ws = Workspace {
             id: 7,
@@ -2680,7 +2668,8 @@ mod tests {
             json,
             r#"{"ActivitiesChanged":{"activities":[{"id":1,"name":"work","is_config_declared":true,"is_active":true,"is_urgent":false},{"id":2,"name":"personal","is_config_declared":false,"is_active":false,"is_urgent":true}]}}"#
         );
-        let parsed: Event = serde_json::from_str(&json).expect("deserialize Event::ActivitiesChanged");
+        let parsed: Event =
+            serde_json::from_str(&json).expect("deserialize Event::ActivitiesChanged");
         let Event::ActivitiesChanged { activities } = parsed else {
             panic!("expected ActivitiesChanged variant");
         };
@@ -2815,8 +2804,8 @@ mod tests {
             json,
             r#"{"ActivityCreated":{"activity":{"id":7,"name":"Work","is_config_declared":false,"is_active":false,"is_urgent":false}}}"#
         );
-        let parsed: Event = serde_json::from_str(&json)
-            .expect("deserialize Event::ActivityCreated");
+        let parsed: Event =
+            serde_json::from_str(&json).expect("deserialize Event::ActivityCreated");
         let Event::ActivityCreated { activity } = parsed else {
             panic!("expected ActivityCreated variant");
         };
@@ -2835,8 +2824,8 @@ mod tests {
         let event = Event::ActivityRemoved { id: 7 };
         let json = serde_json::to_string(&event).expect("serialize Event::ActivityRemoved");
         assert_eq!(json, r#"{"ActivityRemoved":{"id":7}}"#);
-        let parsed: Event = serde_json::from_str(&json)
-            .expect("deserialize Event::ActivityRemoved");
+        let parsed: Event =
+            serde_json::from_str(&json).expect("deserialize Event::ActivityRemoved");
         let Event::ActivityRemoved { id } = parsed else {
             panic!("expected ActivityRemoved variant");
         };
@@ -2854,8 +2843,8 @@ mod tests {
         };
         let json = serde_json::to_string(&event).expect("serialize Event::ActivityRenamed");
         assert_eq!(json, r#"{"ActivityRenamed":{"id":7,"name":"Office"}}"#);
-        let parsed: Event = serde_json::from_str(&json)
-            .expect("deserialize Event::ActivityRenamed");
+        let parsed: Event =
+            serde_json::from_str(&json).expect("deserialize Event::ActivityRenamed");
         let Event::ActivityRenamed { id, name } = parsed else {
             panic!("expected ActivityRenamed variant");
         };
@@ -2878,23 +2867,22 @@ mod tests {
         // regression to the format string will fail the envelope test.
         for (msg, expected_json) in [
             (
-                "activity switch blocked: interactive window move (DD §5.11)",
-                r#"{"Err":"activity switch blocked: interactive window move (DD §5.11)"}"#,
+                "activity switch blocked: interactive window move",
+                r#"{"Err":"activity switch blocked: interactive window move"}"#,
             ),
             (
-                "activity switch blocked: drag and drop (DD §5.11)",
-                r#"{"Err":"activity switch blocked: drag and drop (DD §5.11)"}"#,
+                "activity switch blocked: drag and drop",
+                r#"{"Err":"activity switch blocked: drag and drop"}"#,
             ),
             (
-                "activity switch blocked: workspace switch gesture (DD §5.11)",
-                r#"{"Err":"activity switch blocked: workspace switch gesture (DD §5.11)"}"#,
+                "activity switch blocked: workspace switch gesture",
+                r#"{"Err":"activity switch blocked: workspace switch gesture"}"#,
             ),
         ] {
             let reply: Reply = Err(msg.to_owned());
             let json = serde_json::to_string(&reply).expect("serialize Reply::Err");
             assert_eq!(json, expected_json);
-            let parsed: Reply =
-                serde_json::from_str(&json).expect("deserialize Reply::Err");
+            let parsed: Reply = serde_json::from_str(&json).expect("deserialize Reply::Err");
             match parsed {
                 Err(parsed_msg) => assert_eq!(parsed_msg, msg),
                 Ok(_) => panic!("expected Reply::Err variant"),
@@ -2911,7 +2899,10 @@ mod tests {
         // round-trip yields identical JSON.
         let defaulted = Action::SetWorkspaceActivities {
             workspace: None,
-            activities: vec![ActivityReferenceArg::Id(1), ActivityReferenceArg::Name("beta".into())],
+            activities: vec![
+                ActivityReferenceArg::Id(1),
+                ActivityReferenceArg::Name("beta".into()),
+            ],
         };
         let json = serde_json::to_string(&defaulted).expect("serialize defaulted");
         let parsed: Action = serde_json::from_str(&json).expect("deserialize defaulted");
@@ -2985,10 +2976,7 @@ mod tests {
         ] {
             let json = serde_json::to_string(&action).expect("serialize");
             let parsed: Action = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(
-                serde_json::to_string(&parsed).expect("re-serialize"),
-                json,
-            );
+            assert_eq!(serde_json::to_string(&parsed).expect("re-serialize"), json,);
         }
     }
 
@@ -3010,10 +2998,7 @@ mod tests {
         ] {
             let json = serde_json::to_string(&action).expect("serialize");
             let parsed: Action = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(
-                serde_json::to_string(&parsed).expect("re-serialize"),
-                json,
-            );
+            assert_eq!(serde_json::to_string(&parsed).expect("re-serialize"), json,);
         }
     }
 
@@ -3035,51 +3020,41 @@ mod tests {
         ] {
             let json = serde_json::to_string(&action).expect("serialize");
             let parsed: Action = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(
-                serde_json::to_string(&parsed).expect("re-serialize"),
-                json,
-            );
+            assert_eq!(serde_json::to_string(&parsed).expect("re-serialize"), json,);
         }
     }
 
     #[test]
     fn reply_err_format_for_workspace_activity_assignment() {
-        // Roundtrips the DD §5.14 / §3.2 wire envelopes for
+        // Roundtrips the wire envelopes for
         // `AddWorkspaceToActivity` / `RemoveWorkspaceFromActivity` through
-        // serde to pin their JSON representation. The envelope tokens and DD
-        // section references are the observable IPC contract.
+        // serde to pin their JSON representation. The envelope tokens are
+        // the observable IPC contract.
         //
         // Envelopes are assembled by `format_do_action_error` in
         // `niri/src/layout/mod.rs` and pinned by
         // `do_action_error_envelope_matches_wire_contract` there; `Display`
         // tokens are pinned by `do_action_error_display_matches_wire_contract`.
         for (msg, expected_json) in [
+            ("activity not found", r#"{"Err":"activity not found"}"#),
+            ("workspace not found", r#"{"Err":"workspace not found"}"#),
             (
-                "activity not found (DD §5.14)",
-                r#"{"Err":"activity not found (DD §5.14)"}"#,
+                "workspace would be left with no activities",
+                r#"{"Err":"workspace would be left with no activities"}"#,
             ),
             (
-                "workspace not found (DD §5.14)",
-                r#"{"Err":"workspace not found (DD §5.14)"}"#,
+                "activities list is empty",
+                r#"{"Err":"activities list is empty"}"#,
             ),
             (
-                "workspace would be left with no activities (DD §3.2)",
-                r#"{"Err":"workspace would be left with no activities (DD §3.2)"}"#,
-            ),
-            (
-                "activities list is empty (DD §3.2)",
-                r#"{"Err":"activities list is empty (DD §3.2)"}"#,
-            ),
-            (
-                "workspace not in active activity (DD §5.14)",
-                r#"{"Err":"workspace not in active activity (DD §5.14)"}"#,
+                "workspace not in active activity",
+                r#"{"Err":"workspace not in active activity"}"#,
             ),
         ] {
             let reply: Reply = Err(msg.to_owned());
             let json = serde_json::to_string(&reply).expect("serialize Reply::Err");
             assert_eq!(json, expected_json);
-            let parsed: Reply =
-                serde_json::from_str(&json).expect("deserialize Reply::Err");
+            let parsed: Reply = serde_json::from_str(&json).expect("deserialize Reply::Err");
             match parsed {
                 Err(parsed_msg) => assert_eq!(parsed_msg, msg),
                 Ok(_) => panic!("expected Reply::Err variant"),
@@ -3089,10 +3064,9 @@ mod tests {
 
     #[test]
     fn reply_err_format_for_window_not_found() {
-        // Roundtrips the DD §5.18 `FocusWindow` "window no longer exists"
+        // Roundtrips the `FocusWindow` "window no longer exists"
         // wire envelope through serde to pin its JSON representation. The
-        // exact prefix "window not found: id=" and the DD section suffix
-        // "(DD §5.18)" are the observable IPC contract.
+        // exact prefix "window not found: id=" is the observable IPC contract.
         //
         // The envelope is assembled by `format_do_action_error` in
         // `niri/src/layout/mod.rs` and pinned by
@@ -3103,19 +3077,18 @@ mod tests {
         // compositor-side siblings.
         for (msg, expected_json) in [
             (
-                "window not found: id=0 (DD §5.18)",
-                r#"{"Err":"window not found: id=0 (DD §5.18)"}"#,
+                "window not found: id=0",
+                r#"{"Err":"window not found: id=0"}"#,
             ),
             (
-                "window not found: id=42 (DD §5.18)",
-                r#"{"Err":"window not found: id=42 (DD §5.18)"}"#,
+                "window not found: id=42",
+                r#"{"Err":"window not found: id=42"}"#,
             ),
         ] {
             let reply: Reply = Err(msg.to_owned());
             let json = serde_json::to_string(&reply).expect("serialize Reply::Err");
             assert_eq!(json, expected_json);
-            let parsed: Reply =
-                serde_json::from_str(&json).expect("deserialize Reply::Err");
+            let parsed: Reply = serde_json::from_str(&json).expect("deserialize Reply::Err");
             match parsed {
                 Err(parsed_msg) => assert_eq!(parsed_msg, msg),
                 Ok(_) => panic!("expected Reply::Err variant"),

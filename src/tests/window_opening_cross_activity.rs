@@ -1,12 +1,11 @@
-//! Pins DD §6.4 — `open-on-activity` window-rule semantics for window
-//! opening (Phase 2 boxes 2022 + 2023).
+//! Pins `open-on-activity` window-rule semantics for window opening.
 //!
 //! Each test sets up a config with two activities (alpha → seed/active,
 //! beta → inactive) plus a window-rule that exercises one branch of the
-//! 4-bullet precedence matrix from §6.4. The new window opens through the
+//! 4-bullet precedence matrix. The new window opens through the
 //! standard initial-configure → map flow; the test then asserts which
 //! workspace it landed on (or did not land on) and that the active activity
-//! did NOT silently switch (§6.4 point 1).
+//! did NOT silently switch.
 //!
 //! These tests substitute for the spec-suggested powerset extension in
 //! `window_opening.rs` (which would have multiplied the snapshot count).
@@ -70,7 +69,7 @@ fn beta_id(f: &mut Fixture) -> crate::layout::activity::ActivityId {
 fn open_on_activity_alone_places_window_in_active_workspace_of_target_activity_on_active_monitor() {
     // Bare `open-on-activity "beta"` with no `open-on-workspace`. The
     // window must land in beta's active workspace on the active monitor;
-    // alpha must remain the active activity (DD §6.4 point 1).
+    // alpha must remain the active activity.
     let mut f = Fixture::with_config(config_with(
         r##"
         window-rule {
@@ -84,7 +83,10 @@ fn open_on_activity_alone_places_window_in_active_workspace_of_target_activity_o
     let beta = beta_id(&mut f);
     let alpha = alpha_id(&mut f);
     let pre_active = f.niri().layout.active_activity_id();
-    assert_eq!(pre_active, alpha, "precondition: alpha is the active activity");
+    assert_eq!(
+        pre_active, alpha,
+        "precondition: alpha is the active activity"
+    );
 
     map_window(&mut f, client_id, 100, 100);
 
@@ -92,7 +94,7 @@ fn open_on_activity_alone_places_window_in_active_workspace_of_target_activity_o
     assert_eq!(
         f.niri().layout.active_activity_id(),
         alpha,
-        "open-on-activity must NOT auto-switch (DD §6.4 point 1)",
+        "open-on-activity must NOT auto-switch",
     );
 
     // Window must be on a workspace tagged with beta and not tagged with alpha.
@@ -114,7 +116,7 @@ fn open_on_activity_alone_places_window_in_active_workspace_of_target_activity_o
 
 #[test]
 fn open_on_activity_for_inactive_activity_does_not_auto_switch() {
-    // Same as above but a stronger pin on §6.4 point 1: even after
+    // Same as above but a stronger pin on point 1: even after
     // refresh + flush, the active activity is unchanged and the
     // active activity's view is unchanged in length / content (we never
     // synthetically materialize an alpha workspace just because the rule
@@ -150,7 +152,7 @@ fn open_on_activity_for_inactive_activity_does_not_auto_switch() {
 
 #[test]
 fn open_on_activity_plus_open_on_workspace_in_target_activity_uses_named_workspace() {
-    // DD §6.4 point 3a: `open-on-activity "beta"` + `open-on-workspace "beta-ws"`
+    // Point 3a: `open-on-activity "beta"` + `open-on-workspace "beta-ws"`
     // where `beta-ws` is tagged with beta — the window must land on `beta-ws`.
     let mut f = Fixture::with_config(config_with(
         r##"
@@ -185,9 +187,9 @@ fn open_on_activity_plus_open_on_workspace_in_target_activity_uses_named_workspa
 }
 
 #[test]
-fn open_on_activity_plus_open_on_workspace_not_in_target_activity_falls_back_to_active_workspace_of_target_activity()
- {
-    // DD §6.4 point 3b: `open-on-activity "beta"` + `open-on-workspace "alpha-ws"`
+fn open_on_activity_plus_open_on_workspace_not_in_target_activity_falls_back_to_active_workspace_of_target_activity(
+) {
+    // Point 3b: `open-on-activity "beta"` + `open-on-workspace "alpha-ws"`
     // where `alpha-ws` is tagged with alpha (NOT beta). The named-workspace
     // lookup falls through, then the chain settles on the active monitor →
     // beta's active workspace there. The window must NOT land on the
@@ -263,7 +265,7 @@ fn open_on_activity_unknown_name_falls_back_to_active_activity() {
 
 #[test]
 fn open_on_activity_combined_with_open_on_output_routes_to_named_output_within_activity() {
-    // DD §6.4 + §10.1 line 2152 cross-cut: `open-on-activity "beta"` +
+    // `open-on-activity "beta"` +
     // `open-on-output "headless-2"`. With two outputs, the window must
     // land on output2 (the open-on-output target) on a beta-tagged
     // workspace.

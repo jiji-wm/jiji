@@ -64,7 +64,7 @@ pub struct ResolvedWindowRules {
     /// `send_initial_configure` time; an unknown name silently falls back to
     /// the active activity (liberal-accept, mirroring `open-on-output`'s
     /// precedent for unknown output names — implementation choice). Opening
-    /// into an inactive activity does **not** auto-switch (DD §6.4 point 1).
+    /// into an inactive activity does **not** auto-switch.
     pub open_on_activity: Option<String>,
 
     /// Whether the window should open full-width.

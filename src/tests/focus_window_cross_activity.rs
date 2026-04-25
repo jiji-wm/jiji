@@ -1,16 +1,16 @@
-//! Pins the DD §5.18 `Action::FocusWindow { id }` auto-switch contract:
+//! Pins the `Action::FocusWindow { id }` auto-switch contract:
 //! dispatching the action with an id that resolves to a window on a
 //! dormant workspace must auto-switch the active activity to one that
 //! includes the workspace, then focus the window.
 //!
 //! Pre-1b the dispatcher scoped the id lookup to `windows()` (the active
 //! view), so a hidden-activity window silently dropped every
-//! `FocusWindow { id }` call. Phase 1b widens the lookup to
+//! `FocusWindow { id }` call. The fix widened the lookup to
 //! `windows_all()` and, when the resolved window is not visible under
 //! the current activity cursor, calls `Layout::switch_activity` to a
 //! target chosen by `Layout::pick_activity_for_hidden_window`.
 //!
-//! The second test pins the DD §5.18 "NOT updated on activity switch"
+//! The second test pins the "NOT updated on activity switch"
 //! contract: `Mapped::last_focused_activity` is set on focus commit, not
 //! when the user flips activities. A naive implementation that bumped
 //! the hint on every `switch_activity` would make every cross-activity
@@ -19,10 +19,9 @@
 
 use niri_config::Action;
 
-use crate::layout::DoActionError;
-
 use super::client::ClientId;
 use super::fixture::{config_with_two_activities, Fixture};
+use crate::layout::DoActionError;
 
 fn map_window(f: &mut Fixture, id: ClientId, w: u16, h: u16) {
     let window = f.client(id).create_window();
@@ -96,19 +95,19 @@ fn focus_window_on_hidden_activity_switches_then_focuses() {
         f.niri().layout.active_activity_id(),
         alpha_id,
         "FocusWindow on a hidden-activity window must auto-switch to the \
-         activity that hosts the window (DD §5.18)",
+         activity that hosts the window",
     );
 
     assert_eq!(
         f.niri().layout.focus().map(|m| m.id().get()),
         Some(window_id),
-        "FocusWindow must focus the target window after the activity switch (DD §5.18)",
+        "FocusWindow must focus the target window after the activity switch",
     );
 }
 
 #[test]
 fn focus_window_does_not_bump_last_focused_activity_on_activity_switch() {
-    // Pin DD §5.18's "NOT updated on activity switch" contract: the hint
+    // Pin the "NOT updated on activity switch" contract: the hint
     // on a `Mapped` is refreshed on focus commit, never on
     // `switch_activity`. A naive bump on switch would break tier-1
     // hint semantics.
@@ -159,22 +158,21 @@ fn focus_window_does_not_bump_last_focused_activity_on_activity_switch() {
     assert_eq!(
         hint_after_switch,
         Some(alpha_id),
-        "DD §5.18: last_focused_activity must NOT be updated on activity switch",
+        "last_focused_activity must NOT be updated on activity switch",
     );
 }
 
 #[test]
 fn focus_window_unknown_id_returns_err_on_wire() {
-    // Pin DD §5.18 line 1316: `Action::FocusWindow { id }` with an id that
-    // does not resolve to any pool-owned window must return
+    // Pin `Action::FocusWindow { id }` with an id that does not resolve
+    // to any pool-owned window: must return
     // `Err(DoActionError::WindowNotFound { id })` from `do_action_inner`.
     // The IPC dispatch path flattens this to the wire envelope
-    // `"window not found: id={id} (DD §5.18)"`.
+    // `"window not found: id={id}"`.
     //
     // Dispatch via `do_action_inner` directly rather than `do_action`
-    // (which silently drops both error arms per the §5.11/§5.18 keybind
-    // precedent). This pins the wire-visible surface, not the keybind
-    // silent-drop path.
+    // (which silently drops both error arms per the keybind contract).
+    // This pins the wire-visible surface, not the keybind silent-drop path.
     let mut f = Fixture::with_config(config_with_two_activities(&[], &[]));
     f.add_output(1, (1920, 1080));
 
@@ -188,6 +186,6 @@ fn focus_window_unknown_id_returns_err_on_wire() {
         result,
         Err(DoActionError::WindowNotFound { id: BOGUS_ID }),
         "FocusWindow with an unknown id must return \
-         Err(DoActionError::WindowNotFound) on the wire (DD §5.18)",
+         Err(DoActionError::WindowNotFound) on the wire",
     );
 }

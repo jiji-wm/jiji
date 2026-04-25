@@ -1,6 +1,6 @@
 //! Pins the mechanical pool-wide widen of
 //! [`Action::CloseWindowById`](niri_config::Action::CloseWindowById)'s
-//! id lookup (Phase 1b Part 2b) against a regression back to the
+//! id lookup against a regression back to the
 //! active-activity-only `Layout::windows` iterator.
 //!
 //! The 21 id-based Action arms in `src/input/mod.rs` share identical

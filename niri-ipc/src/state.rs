@@ -113,7 +113,7 @@ pub struct CastsState {
 
 impl EventStreamStatePart for EventStreamState {
     fn replicate(&self) -> Vec<Event> {
-        // Field ordering is load-bearing for §4.6 initial burst and the
+        // Field ordering is load-bearing for initial burst and the
         // structure-before-state emission contract; see rustdoc on Self::activities.
         let mut events = Vec::new();
         events.extend(self.activities.replicate());
@@ -127,7 +127,7 @@ impl EventStreamStatePart for EventStreamState {
     }
 
     fn apply(&mut self, event: Event) -> Option<Event> {
-        // Field ordering is load-bearing for §4.6 initial burst and the
+        // Field ordering is load-bearing for initial burst and the
         // structure-before-state emission contract; see rustdoc on Self::activities.
         let event = self.activities.apply(event)?;
         let event = self.workspaces.apply(event)?;
@@ -145,8 +145,8 @@ impl EventStreamStatePart for WorkspacesState {
         let workspaces: Vec<_> = self.workspaces.values().cloned().collect();
 
         // Emit per-workspace deltas first, then the full-list event for
-        // backwards-compatible consumers. Consumers that handle the delta events should
-        // ignore `WorkspacesChanged`.
+        // backwards-compatible consumers.
+        // Consumers that handle the delta events should ignore `WorkspacesChanged`.
         let mut events: Vec<Event> = workspaces
             .iter()
             .cloned()
@@ -549,9 +549,9 @@ mod tests {
 
     #[test]
     fn delta_events_alone_reconstruct_full_state() {
-        // Consumers that ignore WorkspacesChanged and only process
-        // WorkspaceOpenedOrChanged / WorkspaceClosed still get the correct view
-        // of the world.
+        // consumers that ignore WorkspacesChanged and only
+        // process WorkspaceOpenedOrChanged / WorkspaceClosed still get the
+        // correct view of the world.
         let mut source = WorkspacesState::default();
         source.apply(Event::WorkspaceOpenedOrChanged {
             workspace: ws(1, 1, "HDMI-1"),
@@ -594,7 +594,7 @@ mod tests {
 
     #[test]
     fn applying_both_paths_is_idempotent() {
-        // Dual-event-path consumers (§4.6): ones that process both the deltas
+        // Dual-event-path consumers: ones that process both the deltas
         // and the full-list event end up with the correct state regardless.
         let mut source = WorkspacesState::default();
         source.apply(Event::WorkspaceOpenedOrChanged {
@@ -611,7 +611,13 @@ mod tests {
         assert_eq!(replica.workspaces, source.workspaces);
     }
 
-    fn activity(id: u64, name: &str, is_active: bool, is_urgent: bool, is_config_declared: bool) -> Activity {
+    fn activity(
+        id: u64,
+        name: &str,
+        is_active: bool,
+        is_urgent: bool,
+        is_config_declared: bool,
+    ) -> Activity {
         Activity {
             id,
             name: name.to_owned(),
@@ -904,14 +910,12 @@ mod tests {
         state.apply(Event::ActivityCreated {
             activity: activity(2, "B", false, false, false),
         });
-        assert!(
-            state
-                .apply(Event::ActivitySwitched {
-                    id: 2,
-                    previous_id: Some(999), // unknown previous
-                })
-                .is_none()
-        );
+        assert!(state
+            .apply(Event::ActivitySwitched {
+                id: 2,
+                previous_id: Some(999), // unknown previous
+            })
+            .is_none());
         assert!(!state.activities[&1].is_active);
         assert!(state.activities[&2].is_active);
     }
@@ -923,14 +927,12 @@ mod tests {
         // the corresponding `ActivityCreated`) is silently ignored. Mirrors
         // `activities_state_activity_removed_for_missing_id_is_noop`.
         let mut state = ActivitiesState::default();
-        assert!(
-            state
-                .apply(Event::ActivityUrgencyChanged {
-                    id: 99,
-                    urgent: true,
-                })
-                .is_none()
-        );
+        assert!(state
+            .apply(Event::ActivityUrgencyChanged {
+                id: 99,
+                urgent: true,
+            })
+            .is_none());
         assert!(state.activities.is_empty());
     }
 
@@ -948,14 +950,12 @@ mod tests {
             activity: activity(2, "B", false, false, false),
         });
         // Switch to unknown id 999 — prior actives must survive intact.
-        assert!(
-            state
-                .apply(Event::ActivitySwitched {
-                    id: 999,
-                    previous_id: Some(1),
-                })
-                .is_none()
-        );
+        assert!(state
+            .apply(Event::ActivitySwitched {
+                id: 999,
+                previous_id: Some(1),
+            })
+            .is_none());
         assert!(
             state.activities[&1].is_active,
             "prior is_active must be preserved when switch target is unknown",

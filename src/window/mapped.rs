@@ -198,15 +198,15 @@ pub struct Mapped {
     /// Id of the activity that was active the last time this window was
     /// focused, used by `Action::FocusWindow { id }` to decide which activity
     /// to auto-switch into when the resolved window lives on a dormant
-    /// workspace (DD §5.18 tier 1 hint).
+    /// workspace (tier 1 hint).
     ///
     /// Left as `None` at construction — a freshly-mapped window is focused
     /// immediately after map via the same `set_focus_timestamp` path in
     /// [`crate::niri::State::refresh`], so the co-located `set_last_focused_activity`
     /// call establishes the correct value before any `FocusWindow { id }` can
-    /// target this window. Not updated on activity switch (DD §5.18 is
+    /// target this window. Not updated on activity switch — this is
     /// explicit: the hint reflects "activity where the user last focused
-    /// *this window*", not the currently-active activity).
+    /// *this window*", not the currently-active activity.
     ///
     /// A stale id (activity since removed) is intentional: the tier-1
     /// filter in `Layout::pick_activity_for_hidden_window` is

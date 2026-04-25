@@ -431,7 +431,7 @@ impl XdgShellHandler for State {
                 InitialConfigureState::Configured {
                     rules,
                     output,
-                    // FIXME (DD §6.4): the maximize mid-flight re-configure
+                    // FIXME: the maximize mid-flight re-configure
                     // recomputes its size hints against the active activity's
                     // view rather than the original target activity. The
                     // map-time routing is unaffected — `target_activity` and
@@ -542,7 +542,7 @@ impl XdgShellHandler for State {
                     is_full_width,
                     output,
                     workspace_name,
-                    // FIXME (DD §6.4): the unmaximize mid-flight re-configure
+                    // FIXME: the unmaximize mid-flight re-configure
                     // recomputes its size hints against the active activity's
                     // view rather than the original target activity. The
                     // map-time routing is unaffected — `target_activity` and
@@ -705,7 +705,7 @@ impl XdgShellHandler for State {
                 InitialConfigureState::Configured {
                     rules,
                     output,
-                    // FIXME (DD §6.4): the fullscreen mid-flight re-configure
+                    // FIXME: the fullscreen mid-flight re-configure
                     // recomputes its size hints against the active activity's
                     // view rather than the original target activity. The
                     // map-time routing is unaffected — `target_activity` and
@@ -813,7 +813,7 @@ impl XdgShellHandler for State {
                     is_full_width,
                     output,
                     workspace_name,
-                    // FIXME (DD §6.4): the unfullscreen mid-flight re-configure
+                    // FIXME: the unfullscreen mid-flight re-configure
                     // recomputes its size hints against the active activity's
                     // view rather than the original target activity. The
                     // map-time routing is unaffected — `target_activity` and
@@ -1176,7 +1176,12 @@ impl State {
         // active activity's view.
         let target_activity: Option<crate::layout::activity::ActivityId> =
             if let Some(name) = rules.open_on_activity.as_deref() {
-                let resolved = self.niri.layout.activities().find_by_name(name).map(|a| a.id());
+                let resolved = self
+                    .niri
+                    .layout
+                    .activities()
+                    .find_by_name(name)
+                    .map(|a| a.id());
                 if resolved.is_none() {
                     warn!(
                         "open-on-activity {name:?} did not match any activity; \
@@ -1190,7 +1195,7 @@ impl State {
 
         // Pick the target monitor. First, check if we had a workspace set in the window rules.
         // When `open-on-activity` is in effect, scope the named-workspace lookup to that
-        // activity so DD §6.4 point 3 fallback fires when the workspace isn't tagged with the
+        // activity so point 3 fallback fires when the workspace isn't tagged with the
         // target activity.
         let mon = rules.open_on_workspace.as_deref().and_then(|name| {
             if let Some(activity_id) = target_activity {
@@ -1291,24 +1296,27 @@ impl State {
         // exactly as before.
         let layout = &self.niri.layout;
         let mon_output_id = mon.map(|m| m.output_id());
-        let view_for_mon = mon_output_id.as_ref().map(|output_id| match target_activity {
-            Some(activity_id) => layout
-                .view_for(activity_id, output_id)
-                .expect("view must be materialized before send_initial_configure read chain"),
-            None => layout.active_view(output_id),
-        });
+        let view_for_mon = mon_output_id
+            .as_ref()
+            .map(|output_id| match target_activity {
+                Some(activity_id) => layout
+                    .view_for(activity_id, output_id)
+                    .expect("view must be materialized before send_initial_configure read chain"),
+                None => layout.active_view(output_id),
+            });
         let ws = if let Some(activity_id) = target_activity {
-            // `open-on-activity` path (DD §6.4): look up the named workspace by
+            // `open-on-activity` path: look up the named workspace by
             // pool walk scoped to the target activity. This works whether or
             // not the workspace is in any active view AND whether or not it
             // is bound to a real output (config-declared workspaces with no
             // `open-on-output` start with the empty-OutputId sentinel and may
             // never get rebound — see Appendix C entry 1). On a name miss, or
             // when no name is set, fall back to the active workspace in the
-            // target activity's view (per §6.4 point 1 / point 3 fallthrough).
-            let by_name = rules.open_on_workspace.as_deref().and_then(|name| {
-                layout.find_workspace_in_activity_by_name(name, activity_id)
-            });
+            // target activity's view (per point 1 / point 3 fallthrough).
+            let by_name = rules
+                .open_on_workspace
+                .as_deref()
+                .and_then(|name| layout.find_workspace_in_activity_by_name(name, activity_id));
             if rules.open_on_workspace.is_some() && by_name.is_none() {
                 warn!(
                     "open-on-workspace {:?} did not match any workspace in activity {:?}; \

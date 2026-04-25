@@ -1,13 +1,12 @@
 //! Pins the hidden-activity panic gate on
 //! [`Layout::move_to_output`](crate::layout::Layout::move_to_output)
-//! (Phase 1b Part 2b tail).
 //!
 //! Parallels `move_window_to_workspace_by_id_cross_activity`: the
 //! `monitors × active-view` walk inside `move_to_output` cannot reach a
 //! window on a dormant activity. Before this gate, the resolver's
 //! `.unwrap()` panicked on such a dispatch. Cross-activity move-by-id
-//! semantics are deferred to Phase 2 (DD §5.18); under Phase 1b the
-//! gate logs a `warn!` and returns cleanly.
+//! semantics are not yet implemented; the gate logs a `warn!` and returns
+//! cleanly.
 //!
 //! Two monitors are required so the policy-(a) invariant assertion has
 //! teeth: under a silent cross-activity move implementation, the window
@@ -116,6 +115,6 @@ fn move_window_to_monitor_by_id_reaches_hidden_activity_window_without_panic() {
         ws.id(),
         original_ws_id,
         "hidden-activity gate must not silently reassign the window's workspace \
-         (cross-activity move-by-id semantics are deferred, DD §5.18)",
+         (cross-activity move-by-id semantics are deferred)",
     );
 }

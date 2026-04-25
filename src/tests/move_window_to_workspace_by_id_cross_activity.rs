@@ -1,21 +1,19 @@
 //! Pins the hidden-activity panic gate on
 //! [`Layout::move_to_workspace`](crate::layout::Layout::move_to_workspace)
-//! (Phase 1b Part 2b tail).
 //!
 //! The id-based action lookup in `input/mod.rs` uses the pool-spanning
-//! `windows_all()` iterator (Phase 1b Part 2b), so a window mapped on a
+//! `windows_all()` iterator, so a window mapped on a
 //! workspace bound to a dormant activity is successfully resolved by id.
 //! Before this gate, the `monitors × active-view` walk inside
 //! `move_to_workspace` panicked on `.unwrap()` when the resolved window
 //! wasn't present in any active-activity view. Real cross-activity
-//! move-by-id semantics are deferred to Phase 2 (DD §5.18); under
-//! Phase 1b the gate logs a `warn!` and returns cleanly, leaving the
-//! window where it was.
+//! move-by-id semantics are not yet implemented; the gate logs a `warn!`
+//! and returns cleanly, leaving the window where it was.
 //!
 //! A regression that collapses the gate back to `.unwrap()` or to
 //! `.expect(...)` panics the compositor on dispatch; a regression that
-//! silently implements cross-activity move semantics here (policy (a)
-//! from the DD) is caught by the "same workspace before/after" invariant
+//! silently implements cross-activity move semantics here (policy (a) —
+//! deferred) is caught by the "same workspace before/after" invariant
 //! below.
 
 use niri_config::{Action, WorkspaceReference};
@@ -117,6 +115,6 @@ fn move_window_to_workspace_by_id_reaches_hidden_activity_window_without_panic()
         ws.id(),
         original_ws_id,
         "hidden-activity gate must not silently reassign the window's workspace \
-         (cross-activity move-by-id semantics are deferred, DD §5.18)",
+         (cross-activity move-by-id semantics are deferred)",
     );
 }

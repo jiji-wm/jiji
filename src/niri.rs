@@ -141,8 +141,7 @@ use crate::layer::MappedLayer;
 use crate::layout::tile::TileRenderElement;
 use crate::layout::workspace::{Workspace, WorkspaceId};
 use crate::layout::{
-    HitType, Layout, LayoutElement as _, LayoutElementRenderElement,
-    MonitorRenderElement,
+    HitType, Layout, LayoutElement as _, LayoutElementRenderElement, MonitorRenderElement,
 };
 use crate::niri_render_elements;
 use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
@@ -335,8 +334,8 @@ pub struct Niri {
     pub is_fdo_idle_inhibited: Arc<AtomicBool>,
     pub keyboard_shortcuts_inhibiting_surfaces: HashMap<WlSurface, KeyboardShortcutsInhibitor>,
     /// `WlSurface`s whose keyboard-shortcuts inhibitors were *deactivated by
-    /// this compositor* because an activity switch hid their window (DD
-    /// §5.19). Populated by
+    /// this compositor* because an activity switch hid their window.
+    /// Populated by
     /// [`Self::refresh_keyboard_shortcut_inhibitors_after_activity_switch`]
     /// at each activity-cursor flip site, drained on switch-back when the
     /// window becomes visible again — so user-driven
@@ -1291,9 +1290,9 @@ impl State {
                 surface: Some(surface),
             } = &focus
             {
-                // Hoisted before the mutable `mapped` borrow per fork CLAUDE.md §5
+                // Hoisted before the mutable `mapped` borrow per fork CLAUDE.md
                 // split-borrow discipline. Co-located with `set_focus_timestamp`
-                // below to carry the DD §5.18 `last_focused_activity` contract: the
+                // below to carry the `last_focused_activity` contract: the
                 // hint is updated on every focus commit, not on activity switch.
                 let active_activity = self.niri.layout.active_activity_id();
 
@@ -1468,7 +1467,7 @@ impl State {
 
         self.niri.config_error_notification.hide();
 
-        // Reconcile activity REMOVALS first (DD §5.15): the atomic validate-
+        // Reconcile activity REMOVALS first: the atomic validate-
         // then-mutate path rejects the entire reload on violation (exclusive
         // workspace with windows, would-empty-pool, hard-blocked cascade). We
         // run this before the unname prewalk so that a rejected reload leaves
@@ -1504,12 +1503,12 @@ impl State {
         // the latter reads `self.activities` via `resolve_workspace_activities`
         // for new named workspaces, so the pool must already reflect the new
         // config. See `Layout::reconcile_activities_on_reload_add` docs for the
-        // reconciliation rules (DD §5.15).
+        // reconciliation rules.
         self.niri
             .layout
             .reconcile_activities_on_reload_add(&config.activities, &config.workspaces);
 
-        // DD §5.19: the `reconcile_activities_on_reload_{remove,add}` pair
+        // The `reconcile_activities_on_reload_{remove,add}` pair
         // above can cascade through `switch_activity` (Part 2 remove path)
         // and flip the active activity cursor. Reconcile inhibitor state
         // once afterwards. On pure-add reloads this is a cheap no-op (the
@@ -1842,14 +1841,8 @@ impl State {
 
             let seed_activity = self.niri.layout.active_activity_id();
             let output_id = crate::layout::workspace::OutputId::new(output);
-            if self
-                .niri
-                .layout
-                .monitor_for_output(output)
-                .is_some()
-            {
-                let (monitors, pool, view) =
-                    self.niri.layout.monitors_pool_view_mut(&output_id);
+            if self.niri.layout.monitor_for_output(output).is_some() {
+                let (monitors, pool, view) = self.niri.layout.monitors_pool_view_mut(&output_id);
                 for mon in monitors {
                     if mon.output() != output {
                         continue;
@@ -3689,7 +3682,7 @@ impl Niri {
     /// Looks up a mapped window by id across the whole workspace pool,
     /// including windows on dormant activities. Caller must not assume
     /// the returned window belongs to the active activity's view.
-    /// See DD §5.13 for the future `MruScope::AllActivities` extension.
+    /// See for the future `MruScope::AllActivities` extension.
     pub fn find_window_by_id(&self, id: MappedId) -> Option<Window> {
         self.layout
             .windows_all()
@@ -6214,32 +6207,28 @@ impl Niri {
         }
     }
 
-    /// Per DD §5.19, after any activity-cursor change, walk the inhibitor map
+    /// After any activity-cursor change, walk the inhibitor map
     /// and reconcile each entry's active/inactive state with its owning
     /// workspace's visibility:
     ///
-    /// - Inhibitor active & owning workspace now hidden → `inactivate()`;
-    ///   insert surface into
-    ///   [`Self::deactivated_inhibitors_by_activity_switch`] so the switch-
-    ///   back path can restore it.
+    /// - Inhibitor active & owning workspace now hidden → `inactivate()`; insert surface into
+    ///   [`Self::deactivated_inhibitors_by_activity_switch`] so the switch- back path can restore
+    ///   it.
     /// - Inhibitor inactive & owning workspace now visible & surface is in
-    ///   `deactivated_inhibitors_by_activity_switch` → `activate()`; remove
-    ///   from tracking set.
-    /// - Anything else (user-inactivated while visible, or the inhibitor is
-    ///   already in the correct state) → leave untouched, preserving
-    ///   `ToggleKeyboardShortcutsInhibit` semantics across switches.
-    /// - Surface not found in any pool workspace → log at `debug!` and skip
-    ///   (likely a subsurface or a destroyed surface; mirrors
-    ///   `find_window_and_output`'s diagnostic posture).
+    ///   `deactivated_inhibitors_by_activity_switch` → `activate()`; remove from tracking set.
+    /// - Anything else (user-inactivated while visible, or the inhibitor is already in the correct
+    ///   state) → leave untouched, preserving `ToggleKeyboardShortcutsInhibit` semantics across
+    ///   switches.
+    /// - Surface not found in any pool workspace → log at `debug!` and skip (likely a subsurface or
+    ///   a destroyed surface; mirrors `find_window_and_output`'s diagnostic posture).
     ///
     /// Must be called from each site that flips the active activity
     /// (`Action::SwitchActivity`, `Action::SwitchActivityPrevious`,
     /// `Action::FocusWindow` auto-switch branch, `Action::RemoveActivity`
-    /// cascade, `State::reload_config` Part 2). A future Phase 2 action that
+    /// cascade, `State::reload_config` reload pass). Any future action that
     /// flips the cursor (e.g. `MoveWorkspaceToActivity`) must add its own
     /// invocation — there is no `Layout`-side enforcement because the
-    /// tracking state lives on `Niri`. Grep for `DD §5.19` to find the
-    /// pattern.
+    /// tracking state lives on `Niri`.
     pub fn refresh_keyboard_shortcut_inhibitors_after_activity_switch(&mut self) {
         let _span =
             tracy_client::span!("Niri::refresh_keyboard_shortcut_inhibitors_after_activity_switch");
@@ -6269,10 +6258,11 @@ impl Niri {
                     "key was in the map during pass 1 and no &mut self call occurs between passes",
                 );
             match self.layout.is_wl_surface_on_active_activity(&root) {
-                Some(true) if !is_active
-                    && self
-                        .deactivated_inhibitors_by_activity_switch
-                        .contains(&surface) =>
+                Some(true)
+                    if !is_active
+                        && self
+                            .deactivated_inhibitors_by_activity_switch
+                            .contains(&surface) =>
                 {
                     inhibitor.activate();
                     self.deactivated_inhibitors_by_activity_switch
@@ -6292,12 +6282,12 @@ impl Niri {
                 None => {
                     // Subsurface / destroyed / never-mapped. Matches the
                     // pre-existing subsurface limitation in
-                    // `Niri::is_inhibiting_shortcuts` (DD §5.19 out-of-scope
+                    // `Niri::is_inhibiting_shortcuts` ( out-of-scope
                     // note).
                     debug!(
                         "refresh_keyboard_shortcut_inhibitors_after_activity_switch: \
                          surface {:?} (protocol id {}) not found in any pool workspace, skipping \
-                         (likely subsurface or destroyed; DD §5.19)",
+                         (likely subsurface or destroyed)",
                         surface,
                         surface.id().protocol_id(),
                     );
@@ -6311,7 +6301,7 @@ impl Niri {
                 .iter()
                 .all(|s| self.keyboard_shortcuts_inhibiting_surfaces.contains_key(s)),
             "deactivated_inhibitors_by_activity_switch must be a subset of \
-             keyboard_shortcuts_inhibiting_surfaces keys (DD §5.19 invariant)",
+             keyboard_shortcuts_inhibiting_surfaces keys",
         );
     }
 
@@ -6639,8 +6629,8 @@ impl Niri {
         };
         self.event_loop.remove(pending.token);
 
-        // Hoisted before the mutable pool walk per fork CLAUDE.md §5 split-borrow
-        // discipline. Co-located with `set_focus_timestamp` below per DD §5.18:
+        // Hoisted before the mutable pool walk per fork CLAUDE.md split-borrow
+        // discipline. Co-located with `set_focus_timestamp` below:
         // `last_focused_activity` is refreshed on every focus commit (debounced or
         // immediate), never on activity switch.
         let active_activity = self.layout.active_activity_id();

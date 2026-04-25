@@ -303,25 +303,25 @@ impl std::error::Error for CreateActivityError {}
 /// Validation failure for runtime activity removal via [`Activities::remove`] /
 /// `Layout::remove_activity`. Each variant corresponds to one of the rejection
 /// rules the outer `Layout::remove_activity` evaluates before any mutation
-/// (DD §5.14). Callers surface them as log messages.
+///. Callers surface them as log messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoveActivityError {
     /// No activity in the pool matches the supplied reference.
     NotFound,
     /// Target is flagged `is_config_declared` — config-declared activities are
     /// removed by editing the config file and reloading, not via the runtime
-    /// action (DD §5.14 bullet 1).
+    /// action ( bullet 1).
     ConfigDeclared,
     /// Target is the only activity in the pool; at least one activity must
-    /// always exist (DD §5.14 bullet 3).
+    /// always exist ( bullet 3).
     LastRemaining,
     /// At least one workspace exclusively belonging to this activity still has
-    /// windows. The caller must close / move those windows first (DD §5.14
+    /// windows. The caller must close / move those windows first (
     /// bullet 2).
     ExclusiveWorkspaceHasWindows,
     /// At least one workspace exclusively belonging to this activity is named
     /// (even if empty). Named-empty exclusive workspaces are preserved: the
-    /// caller must unname them first (DD §5.14 "Exclusive workspace
+    /// caller must unname them first ( "Exclusive workspace
     /// destruction semantics").
     ExclusiveNamedWorkspace,
 }
@@ -333,9 +333,7 @@ impl fmt::Display for RemoveActivityError {
             Self::ConfigDeclared => {
                 f.write_str("activity is config-declared; edit config and reload to remove")
             }
-            Self::LastRemaining => {
-                f.write_str("cannot remove the last remaining activity")
-            }
+            Self::LastRemaining => f.write_str("cannot remove the last remaining activity"),
             Self::ExclusiveWorkspaceHasWindows => f.write_str(
                 "activity owns an exclusive workspace with windows; close or move them first",
             ),
@@ -351,7 +349,7 @@ impl std::error::Error for RemoveActivityError {}
 /// Validation failure for runtime activity rename via [`Activities::rename_runtime`]
 /// / `Layout::rename_activity`. Each variant corresponds to one of the rejection
 /// rules the outer `Layout::rename_activity` and `rename_runtime` evaluate before
-/// any mutation (DD §5.14). Callers surface them as log messages.
+/// any mutation. Callers surface them as log messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameActivityError {
     /// No activity in the pool matches the supplied reference.
@@ -385,8 +383,7 @@ impl std::error::Error for RenameActivityError {}
 
 /// Validation failure for adding a workspace to an activity via
 /// `Layout::add_workspace_to_activity`. Each variant corresponds to one of the
-/// rejection rules the outer entry point evaluates before any mutation (DD
-/// §5.14).
+/// rejection rules the outer entry point evaluates before any mutation.
 ///
 /// Precedence on unresolvable references: `ActivityNotFound` is returned before
 /// `WorkspaceNotFound` (activity is resolved first). The no-op "already a
@@ -402,10 +399,9 @@ pub enum AddWorkspaceToActivityError {
 }
 
 impl fmt::Display for AddWorkspaceToActivityError {
-    /// Plain lowercase tokens without DD-section punctuation. Matches the DD
-    /// §5.14 wire table wording verbatim. The envelope and `(DD §5.14)` suffix
-    /// are assembled by `format_do_action_error`; token drift here will fail
-    /// the `do_action_error_display_matches_wire_contract` pin test.
+    /// Plain lowercase tokens. The token is the entire envelope;
+    /// `format_do_action_error` does no further wrapping. Token drift will
+    /// fail the `do_action_error_display_matches_wire_contract` pin test.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ActivityNotFound => f.write_str("activity not found"),
@@ -417,8 +413,8 @@ impl fmt::Display for AddWorkspaceToActivityError {
 impl std::error::Error for AddWorkspaceToActivityError {}
 
 /// Validation failure for removing a workspace from an activity via
-/// `Layout::remove_workspace_from_activity`. Variants mirror the DD §5.14
-/// wire-contract table plus the DD §3.2 non-empty-activities invariant guard.
+/// `Layout::remove_workspace_from_activity`. Variants mirror the
+/// wire-contract table plus the non-empty-activities invariant guard.
 ///
 /// Precedence: `ActivityNotFound` > `WorkspaceNotFound` > `LastActivity`.
 /// Resolution runs before membership inspection so an unresolvable reference
@@ -431,21 +427,18 @@ pub enum RemoveWorkspaceFromActivityError {
     /// was supplied and there is no active workspace).
     WorkspaceNotFound,
     /// Removing the activity id would leave the workspace's `activities` set
-    /// empty (DD §3.2: every workspace must belong to at least one activity).
+    /// empty — every workspace must belong to at least one activity.
     LastActivity,
 }
 
 impl fmt::Display for RemoveWorkspaceFromActivityError {
-    /// Plain lowercase tokens without DD-section punctuation. The envelope and
-    /// DD-section suffix (`(DD §5.14)` / `(DD §3.2)`) are assembled by
-    /// `format_do_action_error`.
+    /// Plain lowercase tokens. The token is the entire envelope;
+    /// `format_do_action_error` does no further wrapping.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ActivityNotFound => f.write_str("activity not found"),
             Self::WorkspaceNotFound => f.write_str("workspace not found"),
-            Self::LastActivity => {
-                f.write_str("workspace would be left with no activities")
-            }
+            Self::LastActivity => f.write_str("workspace would be left with no activities"),
         }
     }
 }
@@ -453,8 +446,8 @@ impl fmt::Display for RemoveWorkspaceFromActivityError {
 impl std::error::Error for RemoveWorkspaceFromActivityError {}
 
 /// Validation failure for replacing a workspace's activity set via
-/// `Layout::set_workspace_activities`. Variants mirror the DD §5.14 wire
-/// contract plus the DD §3.2 non-empty-activities invariant guard.
+/// `Layout::set_workspace_activities`. Variants mirror the wire
+/// contract plus the non-empty-activities invariant guard.
 ///
 /// Precedence: `ActivityNotFound` > `EmptyActivityList` > `WorkspaceNotFound`.
 /// Activity refs are resolved first — an unresolvable ref in the list
@@ -465,7 +458,7 @@ impl std::error::Error for RemoveWorkspaceFromActivityError {}
 /// resolves to zero distinct live activities.
 ///
 /// `WorkspaceNotFound` is total on the `Display` side for symmetry with the
-/// other action errors, but per DD §5.14 the dispatch layer intercepts it and
+/// other action errors, but per the dispatch layer intercepts it and
 /// returns `Ok(())` (silent no-op) so it never reaches the wire. Keeping the
 /// variant here lets the dispatch arm's `match e` stay exhaustive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -473,8 +466,8 @@ pub enum SetWorkspaceActivitiesError {
     /// At least one supplied activity reference does not resolve to a live
     /// activity in the pool.
     ActivityNotFound,
-    /// The supplied `activities` list was empty (DD §3.2: every workspace
-    /// must belong to at least one activity).
+    /// The supplied `activities` list was empty — every workspace
+    /// must belong to at least one activity.
     EmptyActivityList,
     /// No workspace in the pool matches the supplied reference (or `None`
     /// was supplied and there is no active workspace).
@@ -482,9 +475,8 @@ pub enum SetWorkspaceActivitiesError {
 }
 
 impl fmt::Display for SetWorkspaceActivitiesError {
-    /// Plain lowercase tokens without DD-section punctuation. Matches the DD
-    /// §5.14 wire table wording verbatim. The envelope and DD-section suffix
-    /// are assembled by `format_do_action_error`.
+    /// Plain lowercase tokens. The token is the entire envelope;
+    /// `format_do_action_error` does no further wrapping.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ActivityNotFound => f.write_str("activity not found"),
@@ -496,7 +488,7 @@ impl fmt::Display for SetWorkspaceActivitiesError {
 
 impl std::error::Error for SetWorkspaceActivitiesError {}
 
-/// Validation failure for `Layout::move_workspace_to_activity`. DD §4.3
+/// Validation failure for `Layout::move_workspace_to_activity`.
 /// defines Move as "Add to target + Remove from active" with an explicit
 /// requirement that the workspace be a member of the active activity
 /// (the move verb requires a well-defined source).
@@ -511,29 +503,27 @@ pub enum MoveWorkspaceToActivityError {
     /// Workspace reference does not resolve to a live workspace (or
     /// `None` was supplied and there is no active workspace).
     WorkspaceNotFound,
-    /// Workspace is not a member of the currently-active activity. DD
-    /// §4.3 / §5.14: Move requires a well-defined source.
+    /// Workspace is not a member of the currently-active activity.
+    /// Move requires a well-defined source.
     WorkspaceNotInActiveActivity,
 }
 
 impl fmt::Display for MoveWorkspaceToActivityError {
-    /// Plain lowercase tokens per DD §5.14. Envelope and DD-section
-    /// suffix are assembled by `format_do_action_error`.
+    /// Plain lowercase tokens. The token is the entire envelope;
+    /// `format_do_action_error` does no further wrapping.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ActivityNotFound => f.write_str("activity not found"),
             Self::WorkspaceNotFound => f.write_str("workspace not found"),
-            Self::WorkspaceNotInActiveActivity => {
-                f.write_str("workspace not in active activity")
-            }
+            Self::WorkspaceNotInActiveActivity => f.write_str("workspace not in active activity"),
         }
     }
 }
 
 impl std::error::Error for MoveWorkspaceToActivityError {}
 
-/// Validation failure for `Layout::set_workspace_sticky`. Single-variant per DD
-/// §5.14 ("No-op if workspace not found"): the only failure mode is a workspace
+/// Validation failure for `Layout::set_workspace_sticky`. Single-variant
+/// (no-op if workspace not found): the only failure mode is a workspace
 /// reference that does not resolve, and the dispatch layer treats that as a
 /// silent no-op so it never reaches the wire. The enum exists so the dispatch
 /// arm can keep its `match e` exhaustive.
@@ -546,9 +536,8 @@ pub enum SetWorkspaceStickyError {
 }
 
 impl fmt::Display for SetWorkspaceStickyError {
-    /// Plain lowercase token; sticky actions never produce a wire envelope so
-    /// the DD-section suffix is not assembled by `format_do_action_error` for
-    /// this enum. Kept for symmetry with the other action errors and for
+    /// Plain lowercase token. Sticky actions never produce a wire envelope;
+    /// this impl is kept for symmetry with the other action errors and for
     /// `warn!` logging.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -600,7 +589,7 @@ impl std::error::Error for ToggleWorkspaceStickyError {}
 /// Validation failure for config-reload activity removal via
 /// `Layout::reconcile_activities_on_reload_remove`. Each variant corresponds
 /// to one of the rejection rules the outer entry point evaluates before any
-/// mutation (DD §5.15 bullet 2). Callers surface them via `warn!` + the
+/// mutation ( bullet 2). Callers surface them via `warn!` + the
 /// config-error notification, then early-return the entire reload — the
 /// atomicity contract mirrors `RemoveActivityError` on the IPC path.
 ///
@@ -611,7 +600,7 @@ impl std::error::Error for ToggleWorkspaceStickyError {}
 pub(crate) enum ReloadActivityRemovalError {
     /// At least one workspace exclusively belonging to an about-to-be-removed
     /// activity has windows. The user must close / move those windows first;
-    /// the entire reload is rejected (DD §5.15 bullet 2).
+    /// the entire reload is rejected ( bullet 2).
     ExclusiveWorkspaceHasWindows {
         activity_name: String,
         workspace_id: super::workspace::WorkspaceId,
@@ -625,7 +614,7 @@ pub(crate) enum ReloadActivityRemovalError {
     /// is required) but [`Layout::is_activity_switch_hard_blocked`] returns
     /// `Some(_)` — an interactive move, DnD, or workspace-switch gesture is in
     /// flight. Parallel to the caller-side gate the IPC `switch_activity`
-    /// dispatcher enforces (DD §5.11).
+    /// dispatcher enforces.
     HardBlockedCascade {
         activity_name: String,
         block: super::ActivitySwitchBlock,
@@ -654,7 +643,7 @@ impl fmt::Display for ReloadActivityRemovalError {
             } => write!(
                 f,
                 "cannot cascade off active activity {activity_name:?}: activity switch blocked \
-                 by {block} (DD §5.11)",
+                 by {block}",
             ),
         }
     }
@@ -669,14 +658,13 @@ impl std::error::Error for ReloadActivityRemovalError {}
 ///   no push-to-empty API.
 /// - `active` is always a key in `map`.
 /// - `previous`, if `Some`, is always a key in `map`.
-/// - `previous`, if `Some`, is never equal to `active` (distinctness). The
-///   no-op fast-path in [`Activities::set_active`] preserves this: when
-///   `target == active` the call returns early without touching `previous`;
-///   otherwise `previous` is set to the old active (guaranteed `!= target`),
-///   so after the write `previous != active` still holds.
-/// - Each stored `Activity`'s `id` equals its key in `map` (enforced by
-///   private `Activity.id` + construction-only id minting; inserts go through
-///   `map.insert(activity.id, activity)` exclusively).
+/// - `previous`, if `Some`, is never equal to `active` (distinctness). The no-op fast-path in
+///   [`Activities::set_active`] preserves this: when `target == active` the call returns early
+///   without touching `previous`; otherwise `previous` is set to the old active (guaranteed `!=
+///   target`), so after the write `previous != active` still holds.
+/// - Each stored `Activity`'s `id` equals its key in `map` (enforced by private `Activity.id` +
+///   construction-only id minting; inserts go through `map.insert(activity.id, activity)`
+///   exclusively).
 #[derive(Debug)]
 // No `is_empty` — `Activities` is never empty by construction.
 #[allow(clippy::len_without_is_empty)]
@@ -703,7 +691,7 @@ impl Activities {
 
     /// Build an `Activities` pool from the parsed `config.activities` list.
     ///
-    /// Empty input yields a single runtime "Default" activity (DD §6.5
+    /// Empty input yields a single runtime "Default" activity (
     /// backwards-compat: a config with no `activity` blocks must behave
     /// identically to today's single-activity world).
     ///
@@ -750,12 +738,12 @@ impl Activities {
     /// Rejection rules (both are pure inspections; on either error the pool is
     /// left untouched):
     ///
-    /// - `name.trim().is_empty()` → [`CreateActivityError::EmptyName`]. Trimming
-    ///   before the check matches user intent — a whitespace-only name is not a
-    ///   legitimate distinct activity identifier.
+    /// - `name.trim().is_empty()` → [`CreateActivityError::EmptyName`]. Trimming before the check
+    ///   matches user intent — a whitespace-only name is not a legitimate distinct activity
+    ///   identifier.
     /// - Any existing activity's name equals `name` case-insensitively (via
-    ///   `str::eq_ignore_ascii_case`) → [`CreateActivityError::DuplicateName`].
-    ///   Mirrors the collision policy in [`Self::resolve_config_names`] and
+    ///   `str::eq_ignore_ascii_case`) → [`CreateActivityError::DuplicateName`]. Mirrors the
+    ///   collision policy in [`Self::resolve_config_names`] and
     ///   `niri_config::ActivityName::raw_decode`.
     ///
     /// On success, delegates insertion to [`Self::insert`]; the new activity is
@@ -787,13 +775,12 @@ impl Activities {
     /// Rejection rules (both are pure inspections; on either error the pool is
     /// left untouched):
     ///
-    /// - `name.trim().is_empty()` → [`RenameActivityError::EmptyName`]. Mirrors
-    ///   the trim-then-check rule in [`Self::create_runtime`].
-    /// - Any *other* existing activity's name equals `name` case-insensitively
-    ///   (via `str::eq_ignore_ascii_case`) → [`RenameActivityError::DuplicateName`].
-    ///   The target activity itself is excluded from the scan, so renaming to a
-    ///   case variant of its current name (e.g. "Beta" → "beta") or to its
-    ///   exact current name (no-op) succeeds.
+    /// - `name.trim().is_empty()` → [`RenameActivityError::EmptyName`]. Mirrors the trim-then-check
+    ///   rule in [`Self::create_runtime`].
+    /// - Any *other* existing activity's name equals `name` case-insensitively (via
+    ///   `str::eq_ignore_ascii_case`) → [`RenameActivityError::DuplicateName`]. The target activity
+    ///   itself is excluded from the scan, so renaming to a case variant of its current name (e.g.
+    ///   "Beta" → "beta") or to its exact current name (no-op) succeeds.
     ///
     /// Config-declared and not-found checks are enforced by the outer
     /// [`Layout::rename_activity`] wrapper; this method mutates whatever
@@ -899,7 +886,10 @@ impl Activities {
     /// matched, and the untouched unknown names (preserving their input
     /// spelling) for the caller to `warn!` about. This method is pure and
     /// logs nothing itself — callers own the diagnostic surface.
-    pub(super) fn resolve_config_names(&self, names: &[String]) -> (HashSet<ActivityId>, Vec<String>) {
+    pub(super) fn resolve_config_names(
+        &self,
+        names: &[String],
+    ) -> (HashSet<ActivityId>, Vec<String>) {
         let mut resolved = HashSet::new();
         let mut unknown = Vec::new();
         for name in names {
@@ -961,7 +951,7 @@ impl Activities {
     /// The new activity carries `is_config_declared == true`, an empty
     /// `views` map, and has no effect on the pool's `active` / `previous`
     /// cursors — the reload cursor cascade is performed by the removal-side
-    /// reload entry point (DD §5.15).
+    /// reload entry point.
     ///
     /// Panics (debug only) if any existing activity's name matches `name`
     /// case-insensitively.
@@ -986,7 +976,7 @@ impl Activities {
     /// name matches a newly-declared config activity: its id, stored name
     /// (with its runtime casing — NOT overwritten with the config entry's
     /// spelling), per-output `views`, and every workspace's `activities` set
-    /// referencing it are preserved unchanged (DD §5.15 bullet 1). Only the
+    /// referencing it are preserved unchanged ( bullet 1). Only the
     /// config-declared flag flips.
     ///
     /// Panics (debug only) if `id` is not a live key in the pool — caller
@@ -1051,7 +1041,8 @@ impl Activities {
             }
             // config_order must list every config-declared activity exactly once
             // so that no config-declared activity is left in the trailer.
-            let config_declared_count = self.map.values().filter(|a| a.is_config_declared()).count();
+            let config_declared_count =
+                self.map.values().filter(|a| a.is_config_declared()).count();
             assert_eq!(
                 config_order.len(),
                 config_declared_count,

@@ -276,7 +276,7 @@ impl KeyboardShortcutsInhibitHandler for State {
         self.niri
             .keyboard_shortcuts_inhibiting_surfaces
             .remove(surface);
-        // DD §5.19: keep the tracking set a subset of the inhibitor map. A
+        // Keep the tracking set a subset of the inhibitor map. A
         // client may destroy an inhibitor while its window is hidden on
         // another activity — without this removal the surface would leak
         // into the tracking set and violate the

@@ -1,4 +1,4 @@
-//! Integration tests pinning the §5.21 projection contract of the
+//! Integration tests pinning the projection contract of the
 //! `ext-workspace-unstable-v1` protocol: the snapshot surfaced via
 //! [`ExtWorkspaceManagerState`] must equal the set produced by
 //! [`Layout::workspaces`](crate::layout::Layout::workspaces), which iterates
@@ -16,7 +16,7 @@
 //! (`refresh_layout` → `ext_workspace::refresh`) intact. The assertions read
 //! the post-refresh snapshot via the `#[cfg(test)]` projection accessors on
 //! `ExtWorkspaceManagerState` — we deliberately do not touch the Wayland wire
-//! layer, which is not what §5.21 is about.
+//! layer, which is not what is about.
 
 use std::collections::HashSet;
 
@@ -55,7 +55,7 @@ fn output_id(f: &Fixture, n: u8) -> OutputId {
 
 #[test]
 fn refresh_snapshot_matches_layout_workspaces_iterator() {
-    // Core §5.21 projection contract: whatever set `layout.workspaces()`
+    // Core projection contract: whatever set `layout.workspaces()`
     // yields after a refresh, the protocol snapshot must equal that set
     // exactly — no extras, no omissions.
     let mut f = Fixture::with_config(config_with_two_activities(&["ws_a"], &["ws_b"]));
@@ -78,7 +78,7 @@ fn refresh_snapshot_matches_layout_workspaces_iterator() {
 #[test]
 fn refresh_narrows_on_activity_switch() {
     // After switching activities, the snapshot must reflect beta's view only:
-    // ws_b present, ws_a absent. This is the narrowing half of §5.21 — a
+    // ws_b present, ws_a absent. This is the narrowing half of — a
     // future regression that iterated `workspaces_all()` instead of
     // `workspaces()` would pass the projection-fidelity test but fail here.
     let mut f = Fixture::with_config(config_with_two_activities(&["ws_a"], &["ws_b"]));
@@ -117,12 +117,12 @@ fn refresh_narrows_on_activity_switch() {
         s0.contains(&ws_a_id),
         "baseline snapshot under alpha must contain ws_a (single-output startup binds \
          every disconnected workspace to the new monitor and alpha's view adopts them \
-         as-is — DD §5.3)",
+         as-is)",
     );
     assert!(
         s0.contains(&ws_b_id),
         "baseline snapshot under alpha must contain ws_b (startup single-output binding \
-         adopts every disconnected workspace — DD §5.3 wide initial load)",
+         adopts every disconnected workspace)",
     );
 
     let beta_id = activity_id_by_name(&mut f, "beta");
@@ -143,14 +143,17 @@ fn refresh_narrows_on_activity_switch() {
     // by output_id equality and does not rediscover ws_b; beta's view is built
     // with a fresh trailing-empty instead. This asymmetry between Monitor::new
     // (unfiltered parked-id load at Layout::add_output, mod.rs:858-890) and
-    // ensure_active_views (output_id-filtered) is orthogonal to §5.21's
-    // projection contract — this asymmetry will be captured in Appendix C
-    // "§5.3 OutputId(\"\") reclaim gap".
+    // ensure_active_views (output_id-filtered) is orthogonal to the projection
+    // contract — this asymmetry will be captured in Appendix C
+    // "OutputId(\"\") reclaim gap".
     assert!(
         !s1.contains(&ws_a_id),
         "post-switch snapshot must not contain ws_a (alpha's view is dormant)",
     );
-    assert_ne!(s1, s0, "snapshot must actually change when activity narrows");
+    assert_ne!(
+        s1, s0,
+        "snapshot must actually change when activity narrows"
+    );
 
     // Regression canary: if a future refactor swaps `refresh` to iterate the
     // full pool via `workspaces_all()` instead of the active-activity view via
@@ -173,10 +176,10 @@ fn alpha_view_preserved_across_dormancy() {
     // Forward-compat pin: alpha's `WorkspaceView` is preserved verbatim while
     // beta is active, not rebuilt from a pool tag-filter when alpha re-enters.
     // A future "rebuild view lazily on re-entry" optimization would narrow A2
-    // to alpha-tagged workspaces only and fail this assertion, forcing a DD
-    // update first. DD §5.21 paragraph 1331: "once per activity switch and
-    // bounded by the number of workspaces" — the bound relies on the view
-    // being persistent, not regenerated.
+    // to alpha-tagged workspaces only and fail this assertion, forcing a design
+    // update first. The complexity guarantee "once per activity switch and
+    // bounded by the number of workspaces" relies on the view being persistent,
+    // not regenerated.
     let mut f = Fixture::with_config(config_with_two_activities(&["ws_a"], &["ws_b"]));
     f.add_output(1, (1920, 1080));
     f.niri_state().refresh_and_flush_clients();

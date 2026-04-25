@@ -1,4 +1,4 @@
-//! Pins the DD §5.18 `Action::ScreenshotWindowById` widen: dispatching the
+//! Pins the `Action::ScreenshotWindowById` widen: dispatching the
 //! action with an id that resolves to a window on a dormant workspace must
 //! resolve via `windows_all()` (pool-span), not `windows()` (active-view
 //! scope). Pre-1b the dispatcher scoped the id lookup to `windows()`, so a
@@ -85,8 +85,8 @@ fn screenshot_window_resolves_hidden_activity_window() {
     //   1. Resolve the window via `windows_all()` (pool-span).
     //   2. Resolve the window's bound output to a live monitor.
     //   3. Invoke the screenshot path without panicking.
-    //   4. NOT switch the active activity (screenshot is read-only; unlike
-    //      `FocusWindow`, no activity-cursor side effect).
+    //   4. NOT switch the active activity (screenshot is read-only; unlike `FocusWindow`, no
+    //      activity-cursor side effect).
     f.niri_state().do_action(
         Action::ScreenshotWindowById {
             id: window_id,
@@ -102,6 +102,6 @@ fn screenshot_window_resolves_hidden_activity_window() {
         f.niri().layout.active_activity_id(),
         beta_id,
         "ScreenshotWindowById must not switch the active activity — unlike \
-         FocusWindow, a screenshot is a read-only observation (DD §5.18)",
+         FocusWindow, a screenshot is a read-only observation",
     );
 }

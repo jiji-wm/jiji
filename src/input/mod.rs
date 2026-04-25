@@ -680,7 +680,7 @@ impl State {
     /// Silent-drop wrapper over [`Self::do_action_inner`].
     ///
     /// Keybinding-triggered actions (and other internal callers like switch
-    /// events) inherit the DD §5.11 / §5.18 contract: both error arms of
+    /// events) inherit the contract: both error arms of
     /// [`DoActionError`] — `ActivitySwitchBlocked` (hard-block) and
     /// `WindowNotFound` (stale id) — are dropped here on purpose. The
     /// keypress is discarded, not queued, and no error is surfaced to the
@@ -690,8 +690,7 @@ impl State {
         let _ = self.do_action_inner(action, allow_when_locked);
     }
 
-    #[must_use = "dispatch Err must be surfaced to IPC callers or explicitly dropped \
-                  (see do_action wrapper for the §5.11/§5.18 silent-drop contract)"]
+    #[must_use = "dispatch Err must be surfaced to IPC callers or explicitly dropped"]
     pub(crate) fn do_action_inner(
         &mut self,
         action: Action,
@@ -816,7 +815,7 @@ impl State {
                 show_pointer,
                 path,
             } => {
-                // DD §5.18: widen the id lookup from `windows()` (active-view
+                // Widen the id lookup from `windows()` (active-view
                 // scope) to `windows_all()` (pool-span) so hidden-activity
                 // windows are reachable. A window with no live monitor backing
                 // its bound output is a silent no-op (design call (a) below).
@@ -830,8 +829,8 @@ impl State {
                     // workspace's `OutputId` alone: screenshotting needs the
                     // renderer's live `Output`, which only exists on a
                     // connected monitor.
-                    let monitor = oid_opt
-                        .and_then(|oid| self.niri.layout.monitor_for_output_id(oid));
+                    let monitor =
+                        oid_opt.and_then(|oid| self.niri.layout.monitor_for_output_id(oid));
                     if let Some(monitor) = monitor {
                         // Hoist `output` before the closure for readability — mirrors
                         // the style used by `focus_with_output()` callers.
@@ -858,7 +857,7 @@ impl State {
                         // back to this comment first.
                         debug!(
                             "screenshot_window: id={id} bound output {oid:?} not connected, \
-                             no-op (DD §5.18)"
+                             no-op"
                         );
                     } else {
                         // In-flight interactive-move window for which `windows_all`
@@ -894,7 +893,11 @@ impl State {
                 }
             }
             Action::CloseWindowById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 if let Some((_, mapped)) = window {
                     mapped.toplevel().send_close();
                 }
@@ -908,7 +911,11 @@ impl State {
                 }
             }
             Action::FullscreenWindowById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_fullscreen(&window);
@@ -925,7 +932,11 @@ impl State {
                 }
             }
             Action::ToggleWindowedFullscreenById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_windowed_fullscreen(&window);
@@ -934,7 +945,7 @@ impl State {
                 }
             }
             Action::FocusWindow(id) => {
-                // DD §5.18: `FocusWindow { id }` auto-switches the active
+                // `FocusWindow { id }` auto-switches the active
                 // activity when the resolved window lives on a dormant
                 // workspace. We walk `windows_all()` (pool-span) rather than
                 // `windows()` (active-view scope) so hidden-activity windows
@@ -942,8 +953,8 @@ impl State {
                 // pre-1b behavior for windows already on the active view.
                 //
                 // Missing id surfaces `Err(DoActionError::WindowNotFound)` —
-                // the §5.18 wire contract. IPC callers see the envelope
-                // `"window not found: id={id} (DD §5.18)"`; keybinding callers
+                // the wire contract. IPC callers see the envelope
+                // `"window not found: id={id}"`; keybinding callers
                 // silent-drop via the `do_action` wrapper.
                 let Some((_oid, mapped)) = self
                     .niri
@@ -951,7 +962,7 @@ impl State {
                     .windows_all()
                     .find(|(_, m)| m.id().get() == id)
                 else {
-                    debug!("focus_window: id={id} not found in pool (DD §5.18)");
+                    debug!("focus_window: id={id} not found in pool");
                     return Err(DoActionError::WindowNotFound { id });
                 };
                 let window = mapped.window.clone();
@@ -1004,13 +1015,13 @@ impl State {
                     return Ok(());
                 }
 
-                // DD §5.11 hard-block gate — mirrors the SwitchActivity /
+                // Hard-block gate — mirrors the SwitchActivity /
                 // RemoveActivity arms. Returning `Err(block)` preserves the
-                // §5.11 Part 2 IPC-queue semantics: the ipc-server parks the
+                // Part 2 IPC-queue semantics: the ipc-server parks the
                 // action and re-dispatches on drain, so the client sees
                 // `Handled` once the switch performs.
                 if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
-                    debug!("focus_window: activity switch hard-blocked by {block:?} (DD §5.11)");
+                    debug!("focus_window: activity switch hard-blocked by {block:?}");
                     return Err(block.into());
                 }
 
@@ -1018,7 +1029,7 @@ impl State {
                 self.maybe_warp_cursor_to_focus();
                 self.niri.layer_shell_on_demand_focus = None;
                 self.niri.queue_redraw_all();
-                // DD §5.19: reconcile inhibitor state with the new visibility.
+                // Reconcile inhibitor state with the new visibility.
                 self.niri
                     .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
 
@@ -1186,7 +1197,11 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::ConsumeOrExpelWindowLeftById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.consume_or_expel_window_left(Some(&window));
@@ -1202,7 +1217,11 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::ConsumeOrExpelWindowRightById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri
@@ -1500,7 +1519,11 @@ impl State {
                 reference,
                 focus,
             } => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     if let Some((output, index)) =
@@ -1609,10 +1632,8 @@ impl State {
                 if let Some(output) = self.niri.output_under_cursor() {
                     let output_id = crate::layout::workspace::OutputId::new(&output);
                     if self.niri.layout.monitor_for_output(&output).is_some() {
-                        let (monitors, _, view) = self
-                            .niri
-                            .layout
-                            .monitors_pool_view_mut(&output_id);
+                        let (monitors, _, view) =
+                            self.niri.layout.monitors_pool_view_mut(&output_id);
                         let mon = monitors
                             .iter_mut()
                             .find(|m| m.output() == &output)
@@ -1635,10 +1656,8 @@ impl State {
                 if let Some(output) = self.niri.output_under_cursor() {
                     let output_id = crate::layout::workspace::OutputId::new(&output);
                     if self.niri.layout.monitor_for_output(&output).is_some() {
-                        let (monitors, _, view) = self
-                            .niri
-                            .layout
-                            .monitors_pool_view_mut(&output_id);
+                        let (monitors, _, view) =
+                            self.niri.layout.monitors_pool_view_mut(&output_id);
                         let mon = monitors
                             .iter_mut()
                             .find(|m| m.output() == &output)
@@ -1689,13 +1708,13 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::SwitchActivity(reference) => {
-                // Per DD §5.11, keybinding-triggered switches are silently dropped while
+                // Keybinding-triggered switches are silently dropped while
                 // hard-blocked (no cursor warp, no redraw, no focus reset). IPC callers
                 // receive `Reply::Err("activity switch blocked: ...")` with the block
-                // reason; per-connection queue-and-await is DD §5.11 Part 2 scope
+                // reason; per-connection queue-and-await is deferred
                 // (see the TODO in ipc/server.rs).
                 if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
-                    debug!("switch_activity: hard-blocked by {block:?}, ignoring (DD §5.11)");
+                    debug!("switch_activity: hard-blocked by {block:?}, ignoring");
                     return Err(block.into());
                 }
                 // niri-config holds its own ActivityReference to keep config
@@ -1707,10 +1726,10 @@ impl State {
                     self.maybe_warp_cursor_to_focus();
                     self.niri.layer_shell_on_demand_focus = None;
                     self.niri.queue_redraw_all();
-                    // DD §5.19: reconcile inhibitor state with the new
+                    // Reconcile inhibitor state with the new
                     // visibility. Future activity-flipping actions
                     // (e.g. `MoveWorkspaceToActivity`) must add the same
-                    // call — grep `DD §5.19` for the pattern.
+                    // call.
                     self.niri
                         .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
                 } else {
@@ -1721,7 +1740,7 @@ impl State {
                 if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
                     debug!(
                         "switch_activity_previous: hard-blocked by {block:?}, ignoring \
-                         (DD §5.11)"
+                        "
                     );
                     return Err(block.into());
                 }
@@ -1729,7 +1748,7 @@ impl State {
                 self.maybe_warp_cursor_to_focus();
                 self.niri.layer_shell_on_demand_focus = None;
                 self.niri.queue_redraw_all();
-                // DD §5.19: reconcile inhibitor state with the new visibility.
+                // Reconcile inhibitor state with the new visibility.
                 self.niri
                     .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
             }
@@ -1773,15 +1792,13 @@ impl State {
                 }
             }
             Action::RemoveActivity(reference) => {
-                // Per DD §5.11 / §5.14 "Animation blocking", keybinding-triggered
+                // "Animation blocking", keybinding-triggered
                 // removes are silently dropped while hard-blocked — the cascade
                 // branch calls `switch_activity` which debug-asserts the same
                 // gate, so we must filter before dispatch. IPC per-connection
-                // queueing is Phase 1b scope.
+                // queueing is scope.
                 if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
-                    debug!(
-                        "remove_activity: hard-blocked by {block:?}, ignoring (DD §5.11)"
-                    );
+                    debug!("remove_activity: hard-blocked by {block:?}, ignoring");
                     return Err(block.into());
                 }
                 let arg: ActivityReferenceArg = reference.into();
@@ -1794,7 +1811,7 @@ impl State {
                         self.maybe_warp_cursor_to_focus();
                         self.niri.layer_shell_on_demand_focus = None;
                         self.niri.queue_redraw_all();
-                        // DD §5.19: the cascade branch of `remove_activity`
+                        // The cascade branch of `remove_activity`
                         // flips the active activity internally; reconcile
                         // inhibitor state here (not inside `Layout`) because
                         // the tracking map lives on `Niri`.
@@ -1805,16 +1822,12 @@ impl State {
                 }
             }
             Action::AddWorkspaceToActivity(ws_ref, activity_ref) => {
-                // Per DD §5.11 line 1082: Add is position-invariant on the
-                // view, so it is safe during both workspace-switch animations
-                // AND gestures. No hard-block gate here.
+                // Add is position-invariant on the view, so it is safe during
+                // both workspace-switch animations AND gestures.
+                // No hard-block gate here.
                 let arg_act: ActivityReferenceArg = activity_ref.into();
                 let arg_ws_log = ws_ref.clone();
-                match self
-                    .niri
-                    .layout
-                    .add_workspace_to_activity(ws_ref, &arg_act)
-                {
+                match self.niri.layout.add_workspace_to_activity(ws_ref, &arg_act) {
                     Ok((ws_id, act_id)) => {
                         debug!(
                             "AddWorkspaceToActivity: added {ws_id:?} to {act_id:?} \
@@ -1844,8 +1857,8 @@ impl State {
                 }
             }
             Action::RemoveWorkspaceFromActivity(ws_ref, activity_ref) => {
-                // Per DD §5.11 line 1082: Remove is hard-blocked by an
-                // in-flight workspace-switch gesture (removing from the
+                // Remove is hard-blocked by an in-flight workspace-switch
+                // gesture (removing from the
                 // current activity's view would invalidate the gesture's
                 // fractional targets). IPC callers are queued by the drain
                 // path; keybinding callers see the same Err and the
@@ -1857,7 +1870,7 @@ impl State {
                 {
                     debug!(
                         "RemoveWorkspaceFromActivity: hard-blocked by {block:?}, \
-                         ignoring (DD §5.11)"
+                         ignoring"
                     );
                     return Err(block.into());
                 }
@@ -1881,7 +1894,7 @@ impl State {
                             // active-activity tag — the structural diff at
                             // ipc/server.rs:1611-1613 emits
                             // `WorkspaceOpenedOrChanged` for those. Focus
-                            // and frame may need refresh. No §5.19 call
+                            // and frame may need refresh. No call
                             // here: the active activity id is unchanged —
                             // inhibitor reconciliation fires on flips only.
                             self.maybe_warp_cursor_to_focus();
@@ -1909,13 +1922,12 @@ impl State {
                 }
             }
             Action::MoveWorkspaceToActivity(ws_ref, activity_ref, focus) => {
-                // Per DD §5.11: gate depth depends on `focus`.
-                //   - focus: false → weaker gesture-only gate (matches the
-                //     Remove leg of Move = Add + Remove).
-                //   - focus: true  → full `is_activity_switch_hard_blocked`
-                //     predicate (same as `SwitchActivity`), because this
-                //     path chains into `switch_activity` and interactive
-                //     move / DnD must block it.
+                // Gate depth depends on `focus`.
+                //   - focus: false → weaker gesture-only gate (matches the Remove leg of Move = Add
+                //     + Remove).
+                //   - focus: true → full `is_activity_switch_hard_blocked` predicate (same as
+                //     `SwitchActivity`), because this path chains into `switch_activity` and
+                //     interactive move / DnD must block it.
                 // A single unified check here is a review-stop bug — the
                 // `focus: true` path must be gated against DnD /
                 // interactive_move.
@@ -1929,7 +1941,7 @@ impl State {
                 if let Some(block) = block {
                     debug!(
                         "MoveWorkspaceToActivity: hard-blocked by {block:?}, \
-                         ignoring (DD §5.11, focus={focus})"
+                         ignoring (focus={focus})"
                     );
                     return Err(block.into());
                 }
@@ -1961,7 +1973,7 @@ impl State {
                             self.maybe_warp_cursor_to_focus();
                             self.niri.layer_shell_on_demand_focus = None;
                             self.niri.queue_redraw_all();
-                            // DD §5.19: reconcile inhibitor state with the
+                            // Reconcile inhibitor state with the
                             // new active-activity visibility. Required on
                             // every path that flips `Activities.active_id` —
                             // same pattern as `Action::SwitchActivity`'s arm.
@@ -1978,7 +1990,7 @@ impl State {
                             crate::layout::MoveWorkspaceToActivityError::ActivityNotFound => {
                                 DoActionError::MoveWorkspaceToActivityActivityNotFound
                             }
-                            // DD §5.14 table row for Move does not list
+                            // Table row for Move does not list
                             // WorkspaceNotFound — match the convention of
                             // niri's other by-id actions that silently
                             // no-op on workspace-id misses.
@@ -1994,10 +2006,10 @@ impl State {
                 }
             }
             Action::SetWorkspaceActivities(ws_ref, activity_refs) => {
-                // Per DD §5.11 line 1082: Set is hard-blocked by an in-flight
-                // workspace-switch gesture (symmetric-diff removes on the
+                // Set is hard-blocked by an in-flight workspace-switch gesture
+                // (symmetric-diff removes on the
                 // active view invalidate gesture fractional targets). Same
-                // gate as Remove. No §5.19 call needed here — Set does NOT
+                // gate as Remove. No call needed here — Set does NOT
                 // flip the active activity cursor; inhibitor reconciliation
                 // fires on activity flips only. (WHY-comment for future grep
                 // sweeps.)
@@ -2008,7 +2020,7 @@ impl State {
                 {
                     debug!(
                         "SetWorkspaceActivities: hard-blocked by {block:?}, \
-                         ignoring (DD §5.11)"
+                         ignoring"
                     );
                     return Err(block.into());
                 }
@@ -2019,11 +2031,7 @@ impl State {
                     .map(ActivityReferenceArg::from)
                     .collect();
                 let arg_ws_log = ws_ref.clone();
-                match self
-                    .niri
-                    .layout
-                    .set_workspace_activities(ws_ref, &arg_acts)
-                {
+                match self.niri.layout.set_workspace_activities(ws_ref, &arg_acts) {
                     Ok((ws_id, new_set, active_affected)) => {
                         debug!(
                             "SetWorkspaceActivities: updated {ws_id:?} to \
@@ -2051,10 +2059,10 @@ impl State {
                             crate::layout::SetWorkspaceActivitiesError::EmptyActivityList => {
                                 DoActionError::SetWorkspaceActivitiesEmptyActivityList
                             }
-                            // DD §5.14: asymmetry with Add / Remove — Set
+                            // Asymmetry with Add / Remove — Set
                             // silently no-ops on workspace miss (log + Ok).
                             // Do NOT "harmonize" this arm with Add / Remove
-                            // without first checking the §5.14 wire table;
+                            // without first checking the wire table;
                             // the dispatch-layer silent-drop IS the wire
                             // contract for this action.
                             crate::layout::SetWorkspaceActivitiesError::WorkspaceNotFound => {
@@ -2173,14 +2181,22 @@ impl State {
                 self.niri.layout.toggle_window_width(None, false);
             }
             Action::SwitchPresetWindowWidthById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_width(Some(&window), true);
                 }
             }
             Action::SwitchPresetWindowWidthBackById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_width(Some(&window), false);
@@ -2193,14 +2209,22 @@ impl State {
                 self.niri.layout.toggle_window_height(None, false);
             }
             Action::SwitchPresetWindowHeightById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_height(Some(&window), true);
                 }
             }
             Action::SwitchPresetWindowHeightBackById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_height(Some(&window), false);
@@ -2217,7 +2241,11 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::CenterWindowById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.center_window(Some(&window));
@@ -2242,7 +2270,11 @@ impl State {
                 }
             }
             Action::MaximizeWindowToEdgesById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_maximized(&window);
@@ -2427,7 +2459,11 @@ impl State {
             }
             Action::MoveWindowToMonitorById { id, output } => {
                 if let Some(output) = self.niri.output_by_name_match(&output).cloned() {
-                    let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                    let window = self
+                        .niri
+                        .layout
+                        .windows_all()
+                        .find(|(_, m)| m.id().get() == id);
                     let window = window.map(|(_, m)| m.window.clone());
 
                     if let Some(window) = window {
@@ -2573,7 +2609,11 @@ impl State {
                 }
             }
             Action::SetWindowWidthById { id, change } => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_width(Some(&window), change);
@@ -2590,7 +2630,11 @@ impl State {
                 }
             }
             Action::SetWindowHeightById { id, change } => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_height(Some(&window), change);
@@ -2600,7 +2644,11 @@ impl State {
                 self.niri.layout.reset_window_height(None);
             }
             Action::ResetWindowHeightById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.reset_window_height(Some(&window));
@@ -2702,7 +2750,11 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::ToggleWindowFloatingById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_floating(Some(&window));
@@ -2716,7 +2768,11 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::MoveWindowToFloatingById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_floating(Some(&window), true);
@@ -2730,7 +2786,11 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::MoveWindowToTilingById(id) => {
-                let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_floating(Some(&window), false);
@@ -2758,7 +2818,11 @@ impl State {
             }
             Action::MoveFloatingWindowById { id, x, y } => {
                 let window = if let Some(id) = id {
-                    let window = self.niri.layout.windows_all().find(|(_, m)| m.id().get() == id);
+                    let window = self
+                        .niri
+                        .layout
+                        .windows_all()
+                        .find(|(_, m)| m.id().get() == id);
                     let window = window.map(|(_, m)| m.window.clone());
                     if window.is_none() {
                         return Ok(());
@@ -2815,7 +2879,10 @@ impl State {
             }
             Action::SetDynamicCastWindowById(id) => {
                 let layout = &self.niri.layout;
-                if layout.windows_all().any(|(_, mapped)| mapped.id().get() == id) {
+                if layout
+                    .windows_all()
+                    .any(|(_, mapped)| mapped.id().get() == id)
+                {
                     self.set_dynamic_cast_target(CastTarget::Window { id });
                 }
             }
@@ -2977,10 +3044,10 @@ impl State {
     }
 
     /// Dispatch handler for `Action::ToggleWorkspaceSticky` /
-    /// `Action::ToggleWorkspaceStickyByRef`. See activities design doc Phase 2
+    /// `Action::ToggleWorkspaceStickyByRef`.
     /// box 2015 for the contract.
     ///
-    /// Per DD §5.11 ("blocked while a workspace switch gesture is in flight"):
+    /// ("blocked while a workspace switch gesture is in flight"):
     /// Set/Toggle-on are append-only on views (delegate to
     /// set_workspace_activities which handles animation-snap internally);
     /// Unset/Toggle-off touches no views. No hard-block gate.
@@ -3003,7 +3070,7 @@ impl State {
                         // Cursor-warp / redraw asymmetry: Toggle-on may flip
                         // workspace visibility in the active activity (when the
                         // symmetric diff touched the active id) — same
-                        // precondition as SetWorkspaceActivities. No §5.19 call:
+                        // precondition as SetWorkspaceActivities. No call:
                         // sticky toggles don't flip Activities.active_id.
                         if active_affected {
                             self.maybe_warp_cursor_to_focus();
@@ -3017,10 +3084,8 @@ impl State {
                 }
             }
             Err(e) => {
-                warn!(
-                    "ToggleWorkspaceSticky: {e}: workspace={arg_ws_log:?}"
-                );
-                // DD §5.14 ("No-op if workspace not found"): silent no-op on
+                warn!("ToggleWorkspaceSticky: {e}: workspace={arg_ws_log:?}");
+                // ("No-op if workspace not found"): silent no-op on
                 // workspace-not-found. No DoActionError variant for sticky
                 // WorkspaceNotFound — that asymmetry with Add/Remove is the
                 // wire contract.
@@ -3035,10 +3100,10 @@ impl State {
     }
 
     /// Dispatch handler for `Action::SetWorkspaceSticky` /
-    /// `Action::SetWorkspaceStickyByRef`. See activities design doc Phase 2
+    /// `Action::SetWorkspaceStickyByRef`.
     /// box 2015 for the contract.
     ///
-    /// Per DD §5.11 ("blocked while a workspace switch gesture is in flight"):
+    /// ("blocked while a workspace switch gesture is in flight"):
     /// Set/Toggle-on are append-only on views (delegate to
     /// set_workspace_activities which handles animation-snap internally).
     /// No hard-block gate.
@@ -3049,12 +3114,10 @@ impl State {
         let arg_ws_log = reference.clone();
         match self.niri.layout.set_workspace_sticky(reference) {
             Ok((ws_id, active_affected)) => {
-                debug!(
-                    "SetWorkspaceSticky: {ws_id:?} (active_affected={active_affected})"
-                );
+                debug!("SetWorkspaceSticky: {ws_id:?} (active_affected={active_affected})");
                 // Mirrors SetWorkspaceActivities at input/mod.rs: cursor warp
                 // + redraw fire when the symmetric diff touched the active
-                // activity. No §5.19 call: sticky toggles don't flip
+                // activity. No call: sticky toggles don't flip
                 // Activities.active_id.
                 if active_affected {
                     self.maybe_warp_cursor_to_focus();
@@ -3063,7 +3126,7 @@ impl State {
             }
             Err(e) => {
                 warn!("SetWorkspaceSticky: {e}: workspace={arg_ws_log:?}");
-                // DD §5.14 ("No-op if workspace not found"): silent no-op.
+                // ("No-op if workspace not found"): silent no-op.
                 match e {
                     crate::layout::SetWorkspaceStickyError::WorkspaceNotFound => {
                         return Ok(());
@@ -3075,15 +3138,15 @@ impl State {
     }
 
     /// Dispatch handler for `Action::UnsetWorkspaceSticky` /
-    /// `Action::UnsetWorkspaceStickyByRef`. See activities design doc Phase 2
+    /// `Action::UnsetWorkspaceStickyByRef`.
     /// box 2015 for the contract.
     ///
-    /// Per DD §5.11 ("blocked while a workspace switch gesture is in flight"):
+    /// ("blocked while a workspace switch gesture is in flight"):
     /// Unset/Toggle-off touches no views. No hard-block gate. No cursor-warp /
     /// redraw — visibility for the active activity does not change (precedent:
     /// see the `act_id == active_before` gate in the
     /// `Action::RemoveWorkspaceFromActivity` dispatch arm which only redraws
-    /// when the active activity is the removal target). No §5.19 call: sticky
+    /// when the active activity is the removal target). No call: sticky
     /// toggles don't flip Activities.active_id.
     fn dispatch_unset_workspace_sticky(
         &mut self,
@@ -3096,7 +3159,7 @@ impl State {
             }
             Err(e) => {
                 warn!("UnsetWorkspaceSticky: {e}: workspace={arg_ws_log:?}");
-                // DD §5.14 ("No-op if workspace not found"): silent no-op.
+                // ("No-op if workspace not found"): silent no-op.
                 match e {
                     crate::layout::UnsetWorkspaceStickyError::WorkspaceNotFound => {
                         return Ok(());
