@@ -6,6 +6,7 @@ mod server;
 
 mod animations;
 mod close_window_cross_activity;
+mod event_stream_replay_cross_activity;
 mod ext_workspace;
 mod find_window_cross_activity;
 mod floating;

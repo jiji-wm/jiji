@@ -96,6 +96,21 @@ pub struct IpcServer {
     /// preserves FIFO insertion order; [`drain_blocked_action_waiters`] walks
     /// it in order. Main-thread only — `Rc` is sufficient.
     blocked_action_waiters: Rc<RefCell<IndexMap<IpcConnId, BlockedWaiter>>>,
+
+    /// Test-only event tap. When `Some`, every event passed through
+    /// [`Self::send_event`] is appended (cloned) to the inner `Vec` *before*
+    /// the live event-stream fan-out. The tap is unbounded — fixtures drive a
+    /// finite, bounded flow, and an unbounded `Vec` ensures a `swap_remove` on
+    /// `Full` in the live `try_send` loop cannot evict captured events. The
+    /// tap and the live event-stream path are independent: drains here do not
+    /// affect connected event-stream clients, and bounded-channel pressure on
+    /// those clients does not affect the tap.
+    ///
+    /// Cleared (replaced with a fresh `Vec`) by every
+    /// [`Self::install_test_event_tap`] call so consecutive tests cannot leak
+    /// events into each other's captures.
+    #[cfg(test)]
+    test_event_tap: RefCell<Option<Vec<Event>>>,
 }
 
 struct ClientCtx {
@@ -166,10 +181,59 @@ impl IpcServer {
             event_streams: Rc::new(RefCell::new(Vec::new())),
             event_stream_state: Rc::new(RefCell::new(EventStreamState::default())),
             blocked_action_waiters: Rc::new(RefCell::new(IndexMap::new())),
+            #[cfg(test)]
+            test_event_tap: RefCell::new(None),
         })
     }
 
+    /// Install (or reinstall) the test event tap, replacing any prior buffer
+    /// with a fresh empty `Vec`. Call this at the start of each test's flow,
+    /// after the initial-state seed has settled. Subsequent
+    /// [`Self::send_event`] invocations append clones of every emitted event
+    /// to the buffer in emission order.
+    #[cfg(test)]
+    pub(crate) fn install_test_event_tap(&self) {
+        *self.test_event_tap.borrow_mut() = Some(Vec::new());
+    }
+
+    /// Drain the test event tap, returning the buffered events in emission
+    /// order. Returns an empty `Vec` if the tap was never installed (or was
+    /// already drained without an install since). The tap stays installed —
+    /// the buffer is `mem::take`'d, leaving an empty `Vec` in place — so
+    /// subsequent emissions continue to accumulate; reinstall via
+    /// [`Self::install_test_event_tap`] only when you need to reset across
+    /// flow phases.
+    #[cfg(test)]
+    pub(crate) fn drain_test_events(&self) -> Vec<Event> {
+        let mut tap = self.test_event_tap.borrow_mut();
+        match tap.as_mut() {
+            Some(buf) => std::mem::take(buf),
+            None => Vec::new(),
+        }
+    }
+
+    /// Test-only accessor for the server's full event-stream snapshot,
+    /// expressed as the sequence of events a fresh client would receive on
+    /// connect. Equivalent to `self.event_stream_state.borrow().replicate()`
+    /// from within the module; exposed so the test fixture (in
+    /// `crate::tests`) can take pre- and post-flow snapshots without making
+    /// the field itself `pub(crate)`.
+    #[cfg(test)]
+    pub(crate) fn replicate_event_stream_state(&self) -> Vec<Event> {
+        self.event_stream_state.borrow().replicate()
+    }
+
     fn send_event(&self, event: Event) {
+        // Test-only: capture the event before the live fan-out. Scoped in
+        // its own block so the `RefMut` drops before `event_streams` is
+        // borrowed below.
+        #[cfg(test)]
+        {
+            if let Some(tap) = self.test_event_tap.borrow_mut().as_mut() {
+                tap.push(event.clone());
+            }
+        }
+
         let mut streams = self.event_streams.borrow_mut();
         let mut to_remove = Vec::new();
         for (idx, stream) in streams.iter_mut().enumerate() {

@@ -145,6 +145,54 @@ impl Fixture {
         self.roundtrip(id);
         self.roundtrip(id);
     }
+
+    /// Install the in-memory event-stream tap on the fixture's `IpcServer`.
+    /// Each call replaces the prior buffer with a fresh empty `Vec`, so
+    /// successive flows in a single test cannot leak captured events into
+    /// each other.
+    ///
+    /// Backed by an unbounded `Vec` (not the bounded `async_channel` used by
+    /// real event-stream clients), so the tap is immune to the `try_send`
+    /// `Full`-eviction path that would drop events on a real client. Use
+    /// after any one-time seed `refresh_and_flush_clients()` so the captured
+    /// stream is exactly the deltas produced by the test's flow.
+    pub fn install_event_tap(&mut self) {
+        self.niri()
+            .ipc_server
+            .as_ref()
+            .expect(
+                "IpcServer present in test fixture — \
+                 Server::new constructs IpcServer for headless State",
+            )
+            .install_test_event_tap();
+    }
+
+    /// Drain the events captured since the most recent `install_event_tap`
+    /// (or since the last `drain_events`). Order is emission order.
+    pub fn drain_events(&mut self) -> Vec<niri_ipc::Event> {
+        self.niri()
+            .ipc_server
+            .as_ref()
+            .expect(
+                "IpcServer present in test fixture — \
+                 Server::new constructs IpcServer for headless State",
+            )
+            .drain_test_events()
+    }
+
+    /// Snapshot the server's current event-stream state as a replay burst
+    /// (the same sequence a freshly-connected client would receive before
+    /// any flow deltas). Forwards to `IpcServer::replicate_event_stream_state`.
+    pub fn replicate_event_stream_state(&mut self) -> Vec<niri_ipc::Event> {
+        self.niri()
+            .ipc_server
+            .as_ref()
+            .expect(
+                "IpcServer present in test fixture — \
+                 Server::new constructs IpcServer for headless State",
+            )
+            .replicate_event_stream_state()
+    }
 }
 
 impl State {
