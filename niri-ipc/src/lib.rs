@@ -1782,11 +1782,6 @@ pub struct Workspace {
     pub is_sticky: bool,
     /// Whether this workspace belongs to the active activity.
     ///
-    /// When `true`, this workspace is eligible to be placed on an output (monitor). Currently,
-    /// niri supports one activity, so this field is `true` for all workspaces visible to
-    /// clients. The field is exposed explicitly so IPC clients can be written activity-aware and
-    /// remain correct as multi-activity support lands.
-    ///
     /// **`idx` contract:** the `idx` field on this workspace is only meaningful when
     /// `is_in_active_activity` is `true`; clients must ignore `idx` for workspaces where this
     /// field is `false`.
