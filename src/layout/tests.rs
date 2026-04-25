@@ -14340,3 +14340,138 @@ fn add_window_to_hidden_activity_workspace_via_add_window_target_workspace() {
 
     layout.verify_invariants();
 }
+
+#[test]
+fn view_in_activity_or_materialize_then_switch_activity_does_not_double_allocate() {
+    // Regression pin: `view_in_activity_or_materialize` followed by
+    // `switch_activity` to the same target must not allocate a second trailing
+    // empty. The `contains_key` early-exit in `ensure_active_views` is what
+    // prevents it; this test drives through the public `switch_activity` entry
+    // to confirm the guard is reachable via that path.
+    let mut layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(&[], &[]),
+    );
+    layout.add_output(make_test_output("output1"), None);
+
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+    let output_id = OutputId::new(&layout.monitors[0].output);
+
+    layout.view_in_activity_or_materialize(beta_id, &output_id);
+    let ids_after_materialize = layout
+        .activities()
+        .get(beta_id)
+        .unwrap()
+        .views()
+        .get(&output_id)
+        .unwrap()
+        .ids()
+        .to_vec();
+
+    layout.switch_activity(beta_id);
+
+    let ids_after_switch = layout
+        .activities()
+        .get(beta_id)
+        .unwrap()
+        .views()
+        .get(&output_id)
+        .unwrap()
+        .ids()
+        .to_vec();
+
+    assert_eq!(
+        ids_after_materialize, ids_after_switch,
+        "switch_activity must not allocate a second trailing empty after materialize",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn find_workspace_in_activity_by_name_resolves_case_insensitively() {
+    // `find_workspace_in_activity_by_name` uses `eq_ignore_ascii_case`
+    // internally; pin that upper-cased lookups still resolve. A future
+    // refactor to a typed `WorkspaceName` could silently break this.
+    let mut layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(&[], &[("beta-ws", None)]),
+    );
+    layout.add_output(make_test_output("output1"), None);
+
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+
+    let lower = layout.find_workspace_in_activity_by_name("beta-ws", beta_id);
+    let upper = layout.find_workspace_in_activity_by_name("BETA-WS", beta_id);
+    let mixed = layout.find_workspace_in_activity_by_name("Beta-Ws", beta_id);
+
+    assert!(lower.is_some(), "lowercase must resolve");
+    assert!(upper.is_some(), "uppercase must resolve (case-insensitive)");
+    assert!(mixed.is_some(), "mixed-case must resolve (case-insensitive)");
+    assert_eq!(
+        lower.unwrap().id(),
+        upper.unwrap().id(),
+        "all variants must resolve to the same workspace"
+    );
+    // Negative: a completely different name must not resolve.
+    assert!(
+        layout
+            .find_workspace_in_activity_by_name("nonexistent", beta_id)
+            .is_none(),
+        "nonexistent name must not resolve"
+    );
+    // Negative: a substring of the workspace name must not resolve (guards against
+    // a hypothetical future `contains(...)` regression replacing `eq_ignore_ascii_case`).
+    assert!(
+        layout
+            .find_workspace_in_activity_by_name("eta-w", beta_id)
+            .is_none(),
+        "substring of the workspace name must not resolve"
+    );
+}
+
+#[test]
+fn monitor_for_workspace_in_activity_resolves_case_insensitively() {
+    // `monitor_for_workspace_in_activity` uses `eq_ignore_ascii_case`
+    // internally; pin that upper-cased lookups still resolve.
+    let mut layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(&[("alpha-ws", Some("output1"))], &[]),
+    );
+    layout.add_output(make_test_output("output1"), None);
+
+    let alpha_id = layout.activities().find_by_name("alpha").unwrap().id();
+
+    assert!(
+        layout
+            .monitor_for_workspace_in_activity("alpha-ws", alpha_id)
+            .is_some(),
+        "lowercase must resolve"
+    );
+    assert!(
+        layout
+            .monitor_for_workspace_in_activity("ALPHA-WS", alpha_id)
+            .is_some(),
+        "uppercase must resolve (case-insensitive)"
+    );
+    assert!(
+        layout
+            .monitor_for_workspace_in_activity("Alpha-Ws", alpha_id)
+            .is_some(),
+        "mixed-case must resolve (case-insensitive)"
+    );
+    // Negative: a completely different name must not resolve.
+    assert!(
+        layout
+            .monitor_for_workspace_in_activity("nonexistent", alpha_id)
+            .is_none(),
+        "nonexistent name must not resolve"
+    );
+    // Negative: a substring of the workspace name must not resolve (guards against
+    // a hypothetical future `contains(...)` regression replacing `eq_ignore_ascii_case`).
+    assert!(
+        layout
+            .monitor_for_workspace_in_activity("lpha-w", alpha_id)
+            .is_none(),
+        "substring of the workspace name must not resolve"
+    );
+}
