@@ -1565,7 +1565,13 @@ pub enum Transform {
 }
 
 /// Toplevel window.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+// `Default` is constructor scaffolding (FRU-eligible at any call site that wants
+// it), not a real wire value. `Window::default()` produces a sentinel
+// `{ id: 0, title: None, app_id: None, pid: None, workspace_id: None,
+// is_focused: false, is_floating: false, is_urgent: false,
+// layout: WindowLayout::default(), focus_timestamp: None }` that no live
+// window ever has — never ship `Default` values to clients.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct Window {
     /// Unique id of this window.
@@ -1635,7 +1641,14 @@ pub struct Timestamp {
 /// correspond to what the user visually considers "window". The window properties on the other
 /// hand are mainly useful when you need to know the underlying Wayland window sizes, e.g. for
 /// application debugging.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+// `Default` is constructor scaffolding (FRU-eligible at any call site that wants
+// it), not a real wire value. `WindowLayout::default()` produces a sentinel
+// `{ pos_in_scrolling_layout: None, tile_size: (0.0, 0.0),
+// window_size: (0, 0), tile_pos_in_workspace_view: None,
+// window_offset_in_tile: (0.0, 0.0) }` that no live window's layout ever has
+// — required so `Window::default()` can compose. Never ship `Default` values
+// to clients.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct WindowLayout {
     /// Location of a tiled window within a workspace: (column index, tile index in column).
@@ -1679,7 +1692,12 @@ pub enum OutputConfigChanged {
 ///
 /// With global activities, exactly one activity is active at a time, so
 /// `is_active` also implies focused.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+// `Default` is constructor scaffolding (FRU-eligible at any call site that wants
+// it), not a real wire value. `Activity::default()` produces a sentinel
+// `{ id: 0, name: "", is_config_declared: false, is_active: false,
+// is_urgent: false }` that no live activity ever has — never ship `Default`
+// values to clients.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct Activity {
     /// Session-local id of this activity.
@@ -1709,7 +1727,13 @@ pub struct Activity {
 }
 
 /// A workspace.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+// `Default` is constructor scaffolding (FRU-eligible at any call site that wants
+// it), not a real wire value. `Workspace::default()` produces a sentinel
+// `{ id: 0, idx: 0, name: None, output: None, is_urgent: false,
+// is_active: false, is_focused: false, active_window_id: None,
+// activities: vec![], is_sticky: false, is_in_active_activity: false }`
+// that no live workspace ever has — never ship `Default` values to clients.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct Workspace {
     /// Unique id of this workspace.
