@@ -58,8 +58,8 @@ use self::activity::{Activities, Activity, ActivityId, WorkspaceView};
 pub use self::activity::{
     AddWorkspaceToActivityError, CreateActivityError, MoveWorkspaceToActivityError,
     RemoveActivityError, RemoveWorkspaceFromActivityError, RenameActivityError,
-    SetWorkspaceActivitiesError, SetWorkspaceStickyError, ToggleWorkspaceStickyError,
-    UnsetWorkspaceStickyError,
+    SetWorkspaceActivitiesError, SetWorkspaceStickyError, SwitchActivityError,
+    ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
 };
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{Monitor, WorkspaceSwitch};
@@ -550,6 +550,11 @@ pub(crate) fn format_activity_switch_block_err(block: ActivitySwitchBlock) -> St
 /// Any change to the token strings or the envelope wording must update all
 /// three pin sites together. Token drift on a wrapped inner enum's `Display`
 /// fails the outer pin tests in addition to the inner enum's own pin tests.
+///
+/// Do **not** add `#[non_exhaustive]` or `_` wildcards to the cohort match
+/// arms at `ipc/server.rs:339-349` and `ipc/server.rs:671-684` —
+/// exhaustiveness checks on those arms are the load-bearing parity guard
+/// ensuring the drain-walk and insert-idle arms stay in sync.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DoActionError {
     /// A hard-block (interactive move, DnD, or workspace-switch
@@ -560,6 +565,19 @@ pub(crate) enum DoActionError {
     /// does not resolve to any pool-owned window. Terminal error — the
     /// waiter is signalled immediately, never parked.
     WindowNotFound { id: u64 },
+    /// `Action::CreateActivity` validation failed. Wraps the layout-side
+    /// [`CreateActivityError`]. Terminal error.
+    CreateActivity(CreateActivityError),
+    /// `Action::RemoveActivity` validation failed. Wraps the layout-side
+    /// [`RemoveActivityError`]. Terminal error.
+    RemoveActivity(RemoveActivityError),
+    /// `Action::RenameActivity` validation failed. Wraps the layout-side
+    /// [`RenameActivityError`]. Terminal error.
+    RenameActivity(RenameActivityError),
+    /// `Action::SwitchActivity` was dispatched with a reference that does
+    /// not resolve. Wraps the dispatch-side [`SwitchActivityError`].
+    /// Terminal error.
+    SwitchActivity(SwitchActivityError),
     /// `Action::AddWorkspaceToActivity` validation failed. Wraps
     /// the layout-side [`AddWorkspaceToActivityError`]. Terminal error.
     AddWorkspaceToActivity(AddWorkspaceToActivityError),
@@ -572,6 +590,15 @@ pub(crate) enum DoActionError {
     /// `Action::MoveWorkspaceToActivity` validation failed. Wraps
     /// the layout-side [`MoveWorkspaceToActivityError`]. Terminal error.
     MoveWorkspaceToActivity(MoveWorkspaceToActivityError),
+    /// `Action::ToggleWorkspaceSticky` failed. Wraps the layout-side
+    /// [`ToggleWorkspaceStickyError`]. Terminal error.
+    ToggleWorkspaceSticky(ToggleWorkspaceStickyError),
+    /// `Action::SetWorkspaceSticky` failed. Wraps the layout-side
+    /// [`SetWorkspaceStickyError`]. Terminal error.
+    SetWorkspaceSticky(SetWorkspaceStickyError),
+    /// `Action::UnsetWorkspaceSticky` failed. Wraps the layout-side
+    /// [`UnsetWorkspaceStickyError`]. Terminal error.
+    UnsetWorkspaceSticky(UnsetWorkspaceStickyError),
 }
 
 impl From<ActivitySwitchBlock> for DoActionError {
@@ -618,10 +645,17 @@ impl fmt::Display for DoActionError {
             // inner enum's `Display`. The inner enum's tokens are the source
             // of truth for the wire string; `format_do_action_error` returns
             // the bare token without further wrapping.
+            Self::CreateActivity(e) => e.fmt(f),
+            Self::RemoveActivity(e) => e.fmt(f),
+            Self::RenameActivity(e) => e.fmt(f),
+            Self::SwitchActivity(e) => e.fmt(f),
             Self::AddWorkspaceToActivity(e) => e.fmt(f),
             Self::RemoveWorkspaceFromActivity(e) => e.fmt(f),
             Self::SetWorkspaceActivities(e) => e.fmt(f),
             Self::MoveWorkspaceToActivity(e) => e.fmt(f),
+            Self::ToggleWorkspaceSticky(e) => e.fmt(f),
+            Self::SetWorkspaceSticky(e) => e.fmt(f),
+            Self::UnsetWorkspaceSticky(e) => e.fmt(f),
         }
     }
 }
@@ -5371,10 +5405,8 @@ impl<W: LayoutElement> Layout<W> {
     /// 3. Resolve the workspace reference. On miss →
     ///    `SetWorkspaceActivitiesError::WorkspaceNotFound`.
     ///
-    /// The workspace-not-found variant exists for Display totality /
-    /// exhaustive `match` in the dispatch layer, but per the
-    /// dispatch arm intercepts it and silently returns `Ok(())` — the wire
-    /// never sees this variant.
+    /// Wire-surfaces via
+    /// `DoActionError::SetWorkspaceActivities(SetWorkspaceActivitiesError::WorkspaceNotFound)`.
     ///
     /// Semantics:
     /// - Symmetric diff: `to_remove = old ∖ new`, `to_add = new ∖ old`. Adds append to the target
@@ -5431,8 +5463,7 @@ impl<W: LayoutElement> Layout<W> {
             return Err(SetWorkspaceActivitiesError::EmptyActivityList);
         }
 
-        // Step 3: resolve the workspace. On miss the dispatch layer silently
-        // no-ops per; the layout surfaces the miss for symmetry.
+        // Step 3: resolve the workspace. On miss → WorkspaceNotFound (wire-surfaced).
         let ws_id = match workspace {
             Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
             None => self.active_workspace_mut().map(|ws| ws.id()),
@@ -5671,9 +5702,8 @@ impl<W: LayoutElement> Layout<W> {
     /// live activity ids.
     ///
     /// Resolution order:
-    /// 1. `workspace` → `WorkspaceNotFound`. Dispatch layer treats this as a silent no-op per the
-    ///    wire contract ("No-op if workspace not found"); the Layout surface returns `Err` for
-    ///    symmetry with `set_workspace_activities`.
+    /// 1. `workspace` → `WorkspaceNotFound`. Wire-surfaced via
+    ///    `DoActionError::SetWorkspaceSticky(SetWorkspaceStickyError::WorkspaceNotFound)`.
     ///
     /// No-op cases (return `Ok((ws_id, false))` without mutating):
     /// - `ws.is_sticky() == true` AND `ws.activities() == all_live_ids` — the typical state for an
@@ -5758,7 +5788,8 @@ impl<W: LayoutElement> Layout<W> {
     /// does not narrow `activities`).
     ///
     /// Resolution order:
-    /// 1. `workspace` → `WorkspaceNotFound` (silent no-op at dispatch).
+    /// 1. `workspace` → `WorkspaceNotFound`. Wire-surfaced via
+    ///    `DoActionError::UnsetWorkspaceSticky(UnsetWorkspaceStickyError::WorkspaceNotFound)`.
     ///
     /// No-op cases (return `Ok(ws_id)` without mutating):
     /// - `ws.is_sticky() == false` — already not sticky.
@@ -5797,7 +5828,8 @@ impl<W: LayoutElement> Layout<W> {
     /// [`Self::set_workspace_sticky`] / [`Self::unset_workspace_sticky`].
     ///
     /// Resolution order:
-    /// 1. `workspace` → `WorkspaceNotFound` (silent no-op at dispatch).
+    /// 1. `workspace` → `WorkspaceNotFound`. Wire-surfaced via
+    ///    `DoActionError::ToggleWorkspaceSticky(ToggleWorkspaceStickyError::WorkspaceNotFound)`.
     ///
     /// Dispatches on `is_sticky` alone. The non-empty `activities`
     /// invariant makes the `sticky == true ∧ activities == ∅` state

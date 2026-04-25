@@ -1721,19 +1721,25 @@ impl State {
                 // types independent of niri-ipc's wire enums; layout's API
                 // speaks the IPC type, so map variants at the boundary.
                 let arg: ActivityReferenceArg = reference.into();
-                if let Some(id) = self.niri.layout.resolve_activity_ref(&arg) {
-                    self.niri.layout.switch_activity(id);
-                    self.maybe_warp_cursor_to_focus();
-                    self.niri.layer_shell_on_demand_focus = None;
-                    self.niri.queue_redraw_all();
-                    // Reconcile inhibitor state with the new
-                    // visibility. Future activity-flipping actions
-                    // (e.g. `MoveWorkspaceToActivity`) must add the same
-                    // call.
-                    self.niri
-                        .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
-                } else {
-                    warn!("switch_activity: activity not found: {arg:?}");
+                match self.niri.layout.resolve_activity_ref(&arg) {
+                    Some(id) => {
+                        self.niri.layout.switch_activity(id);
+                        self.maybe_warp_cursor_to_focus();
+                        self.niri.layer_shell_on_demand_focus = None;
+                        self.niri.queue_redraw_all();
+                        // Reconcile inhibitor state with the new
+                        // visibility. Future activity-flipping actions
+                        // (e.g. `MoveWorkspaceToActivity`) must add the same
+                        // call.
+                        self.niri
+                            .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
+                    }
+                    None => {
+                        warn!("switch_activity: activity not found: {arg:?}");
+                        return Err(DoActionError::SwitchActivity(
+                            crate::layout::SwitchActivityError::NotFound,
+                        ));
+                    }
                 }
             }
             Action::SwitchActivityPrevious => {
@@ -1758,18 +1764,16 @@ impl State {
                     Ok(id) => {
                         debug!("CreateActivity: created {id:?} {name_str:?}");
                     }
-                    Err(crate::layout::CreateActivityError::EmptyName) => {
-                        warn!("CreateActivity: empty name {name_str:?}");
-                    }
-                    Err(crate::layout::CreateActivityError::DuplicateName) => {
-                        warn!("CreateActivity: duplicate name {name_str:?}");
+                    Err(e) => {
+                        warn!("CreateActivity: {e}: {name_str:?}");
+                        return Err(DoActionError::CreateActivity(e));
                     }
                 }
             }
             Action::RenameActivity(reference, name) => {
                 // Rename is pure metadata — no cascade, no view patching, no
                 // frame invalidation needed. Mirrors the `CreateActivity` arm
-                // shape (debug on Ok, warn on each Err variant), not
+                // shape (debug on Ok, warn + Err on the failure path), not
                 // `RemoveActivity`'s gated shape.
                 let name_str = name.clone();
                 let arg: ActivityReferenceArg = reference.into();
@@ -1777,17 +1781,9 @@ impl State {
                     Ok(id) => {
                         debug!("RenameActivity: renamed {id:?} ({arg:?}) to {name_str:?}");
                     }
-                    Err(crate::layout::RenameActivityError::NotFound) => {
-                        warn!("RenameActivity: not found {arg:?}");
-                    }
-                    Err(crate::layout::RenameActivityError::ConfigDeclared) => {
-                        warn!("RenameActivity: config-declared, cannot rename {arg:?}");
-                    }
-                    Err(crate::layout::RenameActivityError::EmptyName) => {
-                        warn!("RenameActivity: empty name for {arg:?}");
-                    }
-                    Err(crate::layout::RenameActivityError::DuplicateName) => {
-                        warn!("RenameActivity: duplicate name {name_str:?} for {arg:?}");
+                    Err(e) => {
+                        warn!("RenameActivity: {e}: {arg:?} new_name={name_str:?}");
+                        return Err(DoActionError::RenameActivity(e));
                     }
                 }
             }
@@ -1818,7 +1814,10 @@ impl State {
                         self.niri
                             .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
                     }
-                    Err(e) => warn!("remove_activity: {e}: {arg:?}"),
+                    Err(e) => {
+                        warn!("remove_activity: {e}: {arg:?}");
+                        return Err(DoActionError::RemoveActivity(e));
+                    }
                 }
             }
             Action::AddWorkspaceToActivity(ws_ref, activity_ref) => {
@@ -1967,16 +1966,7 @@ impl State {
                             "MoveWorkspaceToActivity: {e}: workspace={arg_ws_log:?} \
                              activity={arg_act:?} focus={focus}"
                         );
-                        match e {
-                            // Table row for Move does not list
-                            // WorkspaceNotFound — match the convention of
-                            // niri's other by-id actions that silently
-                            // no-op on workspace-id misses.
-                            crate::layout::MoveWorkspaceToActivityError::WorkspaceNotFound => {
-                                return Ok(());
-                            }
-                            e => return Err(DoActionError::MoveWorkspaceToActivity(e)),
-                        }
+                        return Err(DoActionError::MoveWorkspaceToActivity(e));
                     }
                 }
             }
@@ -2027,18 +2017,7 @@ impl State {
                             "SetWorkspaceActivities: {e}: workspace={arg_ws_log:?} \
                              activities={arg_acts:?}"
                         );
-                        match e {
-                            // Asymmetry with Add / Remove — Set
-                            // silently no-ops on workspace miss (log + Ok).
-                            // Do NOT "harmonize" this arm with Add / Remove
-                            // without first checking the wire table;
-                            // the dispatch-layer silent-drop IS the wire
-                            // contract for this action.
-                            crate::layout::SetWorkspaceActivitiesError::WorkspaceNotFound => {
-                                return Ok(());
-                            }
-                            e => return Err(DoActionError::SetWorkspaceActivities(e)),
-                        }
+                        return Err(DoActionError::SetWorkspaceActivities(e));
                     }
                 }
             }
@@ -3053,15 +3032,7 @@ impl State {
             }
             Err(e) => {
                 warn!("ToggleWorkspaceSticky: {e}: workspace={arg_ws_log:?}");
-                // ("No-op if workspace not found"): silent no-op on
-                // workspace-not-found. No DoActionError variant for sticky
-                // WorkspaceNotFound — that asymmetry with Add/Remove is the
-                // wire contract.
-                match e {
-                    crate::layout::ToggleWorkspaceStickyError::WorkspaceNotFound => {
-                        return Ok(());
-                    }
-                }
+                return Err(DoActionError::ToggleWorkspaceSticky(e));
             }
         }
         Ok(())
@@ -3092,12 +3063,7 @@ impl State {
             }
             Err(e) => {
                 warn!("SetWorkspaceSticky: {e}: workspace={arg_ws_log:?}");
-                // ("No-op if workspace not found"): silent no-op.
-                match e {
-                    crate::layout::SetWorkspaceStickyError::WorkspaceNotFound => {
-                        return Ok(());
-                    }
-                }
+                return Err(DoActionError::SetWorkspaceSticky(e));
             }
         }
         Ok(())
@@ -3124,12 +3090,7 @@ impl State {
             }
             Err(e) => {
                 warn!("UnsetWorkspaceSticky: {e}: workspace={arg_ws_log:?}");
-                // ("No-op if workspace not found"): silent no-op.
-                match e {
-                    crate::layout::UnsetWorkspaceStickyError::WorkspaceNotFound => {
-                        return Ok(());
-                    }
-                }
+                return Err(DoActionError::UnsetWorkspaceSticky(e));
             }
         }
         Ok(())

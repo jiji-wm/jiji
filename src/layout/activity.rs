@@ -346,6 +346,32 @@ impl fmt::Display for RemoveActivityError {
 
 impl std::error::Error for RemoveActivityError {}
 
+/// Validation failure for activity switching via `Layout::switch_activity` —
+/// surfaced through the dispatch layer as
+/// `DoActionError::SwitchActivity(SwitchActivityError::NotFound)`.
+///
+/// `Layout::switch_activity` itself takes an [`ActivityId`] and never fails
+/// — the rejection happens at the dispatch boundary when
+/// `resolve_activity_ref` returns `None`. This single-variant enum exists so
+/// every activity-action outer variant on [`super::DoActionError`] carries a
+/// layout-side `*Error` payload (cohort symmetry); it is constructed only by
+/// the dispatch arm in `input/mod.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchActivityError {
+    /// No activity in the pool matches the supplied reference.
+    NotFound,
+}
+
+impl fmt::Display for SwitchActivityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("activity not found"),
+        }
+    }
+}
+
+impl std::error::Error for SwitchActivityError {}
+
 /// Validation failure for runtime activity rename via [`Activities::rename_runtime`]
 /// / `Layout::rename_activity`. Each variant corresponds to one of the rejection
 /// rules the outer `Layout::rename_activity` and `rename_runtime` evaluate before
@@ -457,10 +483,12 @@ impl std::error::Error for RemoveWorkspaceFromActivityError {}
 /// `EmptyActivityList`; the empty-list guard is only reached when the list
 /// resolves to zero distinct live activities.
 ///
-/// `WorkspaceNotFound` is total on the `Display` side for symmetry with the
-/// other action errors, but per the dispatch layer intercepts it and
-/// returns `Ok(())` (silent no-op) so it never reaches the wire. Keeping the
-/// variant here lets the dispatch arm's `match e` stay exhaustive.
+/// `WorkspaceNotFound` is wire-surfaced via
+/// `DoActionError::SetWorkspaceActivities(SetWorkspaceActivitiesError::WorkspaceNotFound)`;
+/// the dispatch arm in `input/mod.rs` returns it directly. (Pre-harmonization
+/// the dispatch layer intercepted this variant and returned `Ok(())`;
+/// the silent intercept was dropped to harmonize the workspace-miss contract
+/// across the activity-action cohort.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetWorkspaceActivitiesError {
     /// At least one supplied activity reference does not resolve to a live
@@ -502,6 +530,11 @@ pub enum MoveWorkspaceToActivityError {
     ActivityNotFound,
     /// Workspace reference does not resolve to a live workspace (or
     /// `None` was supplied and there is no active workspace).
+    /// Wire-surfaced via
+    /// `DoActionError::MoveWorkspaceToActivity(MoveWorkspaceToActivityError::WorkspaceNotFound)`.
+    /// (Pre-harmonization the dispatch layer intercepted this and returned
+    /// `Ok(())` as a silent no-op; the intercept was dropped to harmonize
+    /// the workspace-miss contract across the activity-action cohort.)
     WorkspaceNotFound,
     /// Workspace is not a member of the currently-active activity.
     /// Move requires a well-defined source.
@@ -522,11 +555,13 @@ impl fmt::Display for MoveWorkspaceToActivityError {
 
 impl std::error::Error for MoveWorkspaceToActivityError {}
 
-/// Validation failure for `Layout::set_workspace_sticky`. Single-variant
-/// (no-op if workspace not found): the only failure mode is a workspace
-/// reference that does not resolve, and the dispatch layer treats that as a
-/// silent no-op so it never reaches the wire. The enum exists so the dispatch
-/// arm can keep its `match e` exhaustive.
+/// Validation failure for `Layout::set_workspace_sticky`. Single-variant: the
+/// only failure mode is a workspace reference that does not resolve. Wire-
+/// surfaced via
+/// `DoActionError::SetWorkspaceSticky(SetWorkspaceStickyError::WorkspaceNotFound)`.
+/// (Pre-harmonization the dispatch layer intercepted this as a silent no-op;
+/// the intercept was dropped to harmonize the workspace-miss contract across
+/// the activity-action cohort.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetWorkspaceStickyError {
     /// No workspace in the pool matches the supplied reference (or `None`
@@ -536,9 +571,9 @@ pub enum SetWorkspaceStickyError {
 }
 
 impl fmt::Display for SetWorkspaceStickyError {
-    /// Plain lowercase token. Sticky actions never produce a wire envelope;
-    /// this impl is kept for symmetry with the other action errors and for
-    /// `warn!` logging.
+    /// Plain lowercase token. The token is the entire envelope;
+    /// `format_do_action_error` does no further wrapping. Token drift will
+    /// fail `do_action_error_envelope_matches_wire_contract`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WorkspaceNotFound => f.write_str("workspace not found"),
@@ -549,7 +584,7 @@ impl fmt::Display for SetWorkspaceStickyError {
 impl std::error::Error for SetWorkspaceStickyError {}
 
 /// Validation failure for `Layout::unset_workspace_sticky`. Single-variant —
-/// see [`SetWorkspaceStickyError`] for the dispatch-layer silent-drop rule.
+/// see [`SetWorkspaceStickyError`] for the workspace-miss harmonization rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsetWorkspaceStickyError {
     /// No workspace in the pool matches the supplied reference (or `None`
@@ -558,6 +593,9 @@ pub enum UnsetWorkspaceStickyError {
 }
 
 impl fmt::Display for UnsetWorkspaceStickyError {
+    /// Plain lowercase token. The token is the entire envelope;
+    /// `format_do_action_error` does no further wrapping. Token drift will
+    /// fail `do_action_error_envelope_matches_wire_contract`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WorkspaceNotFound => f.write_str("workspace not found"),
@@ -568,7 +606,7 @@ impl fmt::Display for UnsetWorkspaceStickyError {
 impl std::error::Error for UnsetWorkspaceStickyError {}
 
 /// Validation failure for `Layout::toggle_workspace_sticky`. Single-variant —
-/// see [`SetWorkspaceStickyError`] for the dispatch-layer silent-drop rule.
+/// see [`SetWorkspaceStickyError`] for the workspace-miss harmonization rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToggleWorkspaceStickyError {
     /// No workspace in the pool matches the supplied reference (or `None`
@@ -577,6 +615,9 @@ pub enum ToggleWorkspaceStickyError {
 }
 
 impl fmt::Display for ToggleWorkspaceStickyError {
+    /// Plain lowercase token. The token is the entire envelope;
+    /// `format_do_action_error` does no further wrapping. Token drift will
+    /// fail `do_action_error_envelope_matches_wire_contract`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WorkspaceNotFound => f.write_str("workspace not found"),

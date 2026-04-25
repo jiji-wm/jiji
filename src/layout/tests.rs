@@ -5972,8 +5972,10 @@ fn do_action_error_display_matches_wire_contract() {
     // enum's `Display`; the envelope test confirms byte-identity and
     // disambiguates which clause is load-bearing.
     use super::{
-        AddWorkspaceToActivityError, MoveWorkspaceToActivityError,
-        RemoveWorkspaceFromActivityError, SetWorkspaceActivitiesError,
+        AddWorkspaceToActivityError, CreateActivityError, MoveWorkspaceToActivityError,
+        RemoveActivityError, RemoveWorkspaceFromActivityError, RenameActivityError,
+        SetWorkspaceActivitiesError, SetWorkspaceStickyError, SwitchActivityError,
+        ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
     };
     assert_eq!(
         format!(
@@ -6052,6 +6054,133 @@ fn do_action_error_display_matches_wire_contract() {
         ),
         "workspace not in active activity",
     );
+    // Newly wire-surfaced workspace-miss rows for Set / Move (the silent
+    // intercepts on these actions were dropped to harmonize the
+    // workspace-miss contract with Add / Remove).
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::SetWorkspaceActivities(SetWorkspaceActivitiesError::WorkspaceNotFound)
+        ),
+        "workspace not found",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::MoveWorkspaceToActivity(MoveWorkspaceToActivityError::WorkspaceNotFound)
+        ),
+        "workspace not found",
+    );
+    // Activity-pool action tokens (CreateActivity / RemoveActivity /
+    // RenameActivity / SwitchActivity).
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::CreateActivity(CreateActivityError::EmptyName)
+        ),
+        "activity name must not be empty",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::CreateActivity(CreateActivityError::DuplicateName)
+        ),
+        "activity name already exists",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::RemoveActivity(RemoveActivityError::NotFound)
+        ),
+        "activity not found",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::RemoveActivity(RemoveActivityError::ConfigDeclared)
+        ),
+        "activity is config-declared; edit config and reload to remove",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::RemoveActivity(RemoveActivityError::LastRemaining)
+        ),
+        "cannot remove the last remaining activity",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::RemoveActivity(RemoveActivityError::ExclusiveWorkspaceHasWindows)
+        ),
+        "activity owns an exclusive workspace with windows; close or move them first",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::RemoveActivity(RemoveActivityError::ExclusiveNamedWorkspace)
+        ),
+        "activity owns a named exclusive workspace (even if empty); unname it first",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::RenameActivity(RenameActivityError::NotFound)
+        ),
+        "activity not found",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::RenameActivity(RenameActivityError::ConfigDeclared)
+        ),
+        "activity is config-declared; edit config and reload to rename",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::RenameActivity(RenameActivityError::EmptyName)
+        ),
+        "activity name must not be empty",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::RenameActivity(RenameActivityError::DuplicateName)
+        ),
+        "activity name already exists",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::SwitchActivity(SwitchActivityError::NotFound)
+        ),
+        "activity not found",
+    );
+    // Sticky cohort tokens. Each enum has a single `WorkspaceNotFound`
+    // variant; the dispatch arm now surfaces it instead of silently
+    // returning `Ok(())`.
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::ToggleWorkspaceSticky(ToggleWorkspaceStickyError::WorkspaceNotFound)
+        ),
+        "workspace not found",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::SetWorkspaceSticky(SetWorkspaceStickyError::WorkspaceNotFound)
+        ),
+        "workspace not found",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::UnsetWorkspaceSticky(UnsetWorkspaceStickyError::WorkspaceNotFound)
+        ),
+        "workspace not found",
+    );
 }
 
 #[test]
@@ -6066,9 +6195,11 @@ fn do_action_error_envelope_matches_wire_contract() {
     //
     // The `WindowNotFound` case pins the new envelope.
     use super::{
-        format_do_action_error, ActivitySwitchBlock, AddWorkspaceToActivityError, DoActionError,
-        MoveWorkspaceToActivityError, RemoveWorkspaceFromActivityError,
-        SetWorkspaceActivitiesError,
+        format_do_action_error, ActivitySwitchBlock, AddWorkspaceToActivityError,
+        CreateActivityError, DoActionError, MoveWorkspaceToActivityError, RemoveActivityError,
+        RemoveWorkspaceFromActivityError, RenameActivityError, SetWorkspaceActivitiesError,
+        SetWorkspaceStickyError, SwitchActivityError, ToggleWorkspaceStickyError,
+        UnsetWorkspaceStickyError,
     };
     for (err, expected) in [
         (
@@ -6134,6 +6265,80 @@ fn do_action_error_envelope_matches_wire_contract() {
                 MoveWorkspaceToActivityError::WorkspaceNotInActiveActivity,
             ),
             "workspace not in active activity",
+        ),
+        // Newly wire-surfaced workspace-miss rows for Set / Move.
+        (
+            DoActionError::SetWorkspaceActivities(SetWorkspaceActivitiesError::WorkspaceNotFound),
+            "workspace not found",
+        ),
+        (
+            DoActionError::MoveWorkspaceToActivity(MoveWorkspaceToActivityError::WorkspaceNotFound),
+            "workspace not found",
+        ),
+        // CreateActivity rows.
+        (
+            DoActionError::CreateActivity(CreateActivityError::EmptyName),
+            "activity name must not be empty",
+        ),
+        (
+            DoActionError::CreateActivity(CreateActivityError::DuplicateName),
+            "activity name already exists",
+        ),
+        // RemoveActivity rows.
+        (
+            DoActionError::RemoveActivity(RemoveActivityError::NotFound),
+            "activity not found",
+        ),
+        (
+            DoActionError::RemoveActivity(RemoveActivityError::ConfigDeclared),
+            "activity is config-declared; edit config and reload to remove",
+        ),
+        (
+            DoActionError::RemoveActivity(RemoveActivityError::LastRemaining),
+            "cannot remove the last remaining activity",
+        ),
+        (
+            DoActionError::RemoveActivity(RemoveActivityError::ExclusiveWorkspaceHasWindows),
+            "activity owns an exclusive workspace with windows; close or move them first",
+        ),
+        (
+            DoActionError::RemoveActivity(RemoveActivityError::ExclusiveNamedWorkspace),
+            "activity owns a named exclusive workspace (even if empty); unname it first",
+        ),
+        // RenameActivity rows.
+        (
+            DoActionError::RenameActivity(RenameActivityError::NotFound),
+            "activity not found",
+        ),
+        (
+            DoActionError::RenameActivity(RenameActivityError::ConfigDeclared),
+            "activity is config-declared; edit config and reload to rename",
+        ),
+        (
+            DoActionError::RenameActivity(RenameActivityError::EmptyName),
+            "activity name must not be empty",
+        ),
+        (
+            DoActionError::RenameActivity(RenameActivityError::DuplicateName),
+            "activity name already exists",
+        ),
+        // SwitchActivity row.
+        (
+            DoActionError::SwitchActivity(SwitchActivityError::NotFound),
+            "activity not found",
+        ),
+        // Sticky cohort rows.
+        (
+            DoActionError::ToggleWorkspaceSticky(ToggleWorkspaceStickyError::WorkspaceNotFound),
+            "workspace not found",
+        ),
+        (
+            DoActionError::SetWorkspaceSticky(SetWorkspaceStickyError::WorkspaceNotFound),
+            "workspace not found",
+        ),
+        (
+            DoActionError::UnsetWorkspaceSticky(UnsetWorkspaceStickyError::WorkspaceNotFound),
+            "workspace not found",
         ),
     ] {
         assert_eq!(format_do_action_error(err), expected);

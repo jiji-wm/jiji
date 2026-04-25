@@ -956,6 +956,17 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(long))]
         path: Option<String>,
     },
+    // --- Activity-action cohort ---
+    //
+    // The actions below (`CreateActivity` through `UnsetWorkspaceSticky`) share a
+    // harmonized workspace-miss contract: a workspace reference that does not
+    // resolve surfaces as `Reply::Err("workspace not found")` rather than a
+    // silent no-op. This diverges from the pre-existing silent-on-miss behavior
+    // of non-cohort workspace actions (`FocusWorkspace`, `MoveWindowToWorkspace`,
+    // `MoveColumnToWorkspace`, `MoveWindowToWorkspaceById`), which retain their
+    // original silent-on-miss contract. The asymmetry is intentional: the cohort
+    // harmonization is an activity-action-specific carve-out; extending it to
+    // the older sibling actions requires separate architect review.
     /// Create a runtime (ephemeral) activity.
     ///
     /// The new activity exists only for the current session — it is not
@@ -964,9 +975,11 @@ pub enum Action {
     /// reload. On next reload, the runtime activity's name matches the new
     /// config entry and it is promoted.
     ///
-    /// Returns `Response::Handled`. To obtain the new activity's ID, listen on
-    /// the event stream; a per-activity creation event will be emitted (Phase
-    /// 1b scope — not yet implemented).
+    /// On success returns `Response::Handled`. To obtain the new activity's
+    /// ID, listen on the event stream; a per-activity creation event will be
+    /// emitted (not yet implemented). Errors with `Reply::Err` on: empty name
+    /// (`"activity name must not be empty"`), duplicate name
+    /// (`"activity name already exists"`).
     CreateActivity {
         /// Name for the new activity.
         name: String,
@@ -985,9 +998,8 @@ pub enum Action {
     /// exclusive unnamed-empty workspaces are destroyed, shared workspaces
     /// have the id pruned from their `activities` set, and if the target was
     /// active the compositor cascades to `previous` (or the first other
-    /// activity in declaration order) before removing. The validation rules
-    /// above map to a runtime error enum; handler-side mapping is currently
-    /// a single `warn!` log; per-connection reply wiring is not yet implemented.
+    /// activity in declaration order) before removing. Validation failures
+    /// surface as `Reply::Err` with the matching token.
     RemoveActivity {
         /// Activity to remove.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
@@ -1007,8 +1019,11 @@ pub enum Action {
     /// matching `activity "NewName"` config entry (if any) promotes this
     /// runtime activity to config-declared by name match.
     ///
-    /// Returns `Response::Handled`. Event-stream emission for activity rename
-    /// is not yet wired.
+    /// On success returns `Response::Handled`. Errors map to `Reply::Err` with
+    /// one of: `"activity not found"`, `"activity is config-declared; edit
+    /// config and reload to rename"`, `"activity name must not be empty"`,
+    /// `"activity name already exists"`. Event-stream emission for activity
+    /// rename is not yet wired.
     RenameActivity {
         /// Activity to rename.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
@@ -1016,7 +1031,11 @@ pub enum Action {
         /// New name for the activity.
         name: String,
     },
-    /// Switch to an activity.
+    /// Switch to an activity. Returns `Err("activity not found")` if the
+    /// reference does not resolve. Returns `Err("activity switch blocked:
+    /// <reason>")` while a hard-block (interactive move, DnD,
+    /// workspace-switch gesture) is in flight — IPC callers are queued and
+    /// re-dispatched on drain.
     SwitchActivity {
         /// Activity to switch to.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
@@ -1040,6 +1059,7 @@ pub enum Action {
     /// during workspace-switch animations AND gestures.
     AddWorkspaceToActivity {
         /// Workspace to modify. Defaults to focused.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
         workspace: Option<WorkspaceReferenceArg>,
         /// Activity to add the workspace to.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
@@ -1056,6 +1076,7 @@ pub enum Action {
     /// ends. Workspace-switch animations are snapped and the action proceeds.
     RemoveWorkspaceFromActivity {
         /// Workspace to modify. Defaults to focused.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
         workspace: Option<WorkspaceReferenceArg>,
         /// Activity to remove the workspace from.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
@@ -1075,16 +1096,17 @@ pub enum Action {
     /// `Err("activities list is empty")` — every workspace must
     /// belong to at least one activity.
     ///
-    /// Asymmetry with `Add` / `Remove`: a workspace reference that does not
-    /// resolve silently no-ops (logs `warn!` and returns `Handled`). `Add` / `Remove` surface
-    /// `Err` on the same miss; this is deliberate and pinned by
-    /// `do_action_error_envelope_matches_wire_contract`.
+    /// A workspace reference that does not resolve returns
+    /// `Err("workspace not found")`, matching `Add` / `Remove`'s
+    /// workspace-miss contract; the asymmetry that previously had `Set`
+    /// silently no-op on the same miss was harmonized away.
     ///
     /// Gesture blocks this action: see `RemoveWorkspaceFromActivity` for the
     /// gesture-only gate (animations snap, interactive_move / DnD are
     /// orthogonal).
     SetWorkspaceActivities {
         /// Workspace to modify. Defaults to focused.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
         workspace: Option<WorkspaceReferenceArg>,
         /// Activity IDs or names that the workspace must belong to after
         /// the call. Must be non-empty.
@@ -1112,6 +1134,11 @@ pub enum Action {
     /// need "add to target regardless of current membership" should use
     /// `AddWorkspaceToActivity` or `SetWorkspaceActivities`.
     ///
+    /// A workspace reference that does not resolve returns
+    /// `Err("workspace not found")`, matching `Add` / `Remove`'s
+    /// workspace-miss contract; the asymmetry that previously had `Move`
+    /// silently no-op on the same miss was harmonized away.
+    ///
     /// No-op when `activity` equals the currently-active activity.
     ///
     /// Gesture-block gate is `focus`-dependent:
@@ -1122,6 +1149,7 @@ pub enum Action {
     ///   `SwitchActivity`, because this path chains into it.
     MoveWorkspaceToActivity {
         /// Workspace to modify. Defaults to focused.
+        #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
         workspace: Option<WorkspaceReferenceArg>,
         /// Activity to move the workspace to.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
@@ -1138,7 +1166,8 @@ pub enum Action {
     /// Toggling off sets `is_sticky = false` but keeps the current `activities`
     /// set (the user can then narrow it with `RemoveWorkspaceFromActivity`).
     ///
-    /// Silent no-op if the workspace reference does not resolve.
+    /// Returns `Err("workspace not found")` if the workspace reference does
+    /// not resolve.
     ToggleWorkspaceSticky {
         /// Workspace to modify. Defaults to focused.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
@@ -1150,7 +1179,8 @@ pub enum Action {
     /// activity ids. No-op if the workspace is already sticky and its
     /// `activities` set already equals the full live id set.
     ///
-    /// Silent no-op if the workspace reference does not resolve.
+    /// Returns `Err("workspace not found")` if the workspace reference does
+    /// not resolve.
     SetWorkspaceSticky {
         /// Workspace to modify. Defaults to focused.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
@@ -1166,7 +1196,8 @@ pub enum Action {
     /// and re-expands `activities` to all current activities. To permanently unset, remove `sticky
     /// true` from the workspace's config block.
     ///
-    /// Silent no-op if the workspace reference does not resolve.
+    /// Returns `Err("workspace not found")` if the workspace reference does
+    /// not resolve.
     UnsetWorkspaceSticky {
         /// Workspace to modify. Defaults to focused.
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]

@@ -21,3 +21,4 @@ mod toggle_windowed_fullscreen_cross_activity;
 mod transactions;
 mod window_opening;
 mod window_opening_cross_activity;
+mod workspace_miss_dispatch_errors;

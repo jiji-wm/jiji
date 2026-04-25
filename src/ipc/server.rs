@@ -339,7 +339,14 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
             Err(err @ DoActionError::AddWorkspaceToActivity(_))
             | Err(err @ DoActionError::RemoveWorkspaceFromActivity(_))
             | Err(err @ DoActionError::SetWorkspaceActivities(_))
-            | Err(err @ DoActionError::MoveWorkspaceToActivity(_)) => {
+            | Err(err @ DoActionError::MoveWorkspaceToActivity(_))
+            | Err(err @ DoActionError::CreateActivity(_))
+            | Err(err @ DoActionError::RemoveActivity(_))
+            | Err(err @ DoActionError::RenameActivity(_))
+            | Err(err @ DoActionError::SwitchActivity(_))
+            | Err(err @ DoActionError::ToggleWorkspaceSticky(_))
+            | Err(err @ DoActionError::SetWorkspaceSticky(_))
+            | Err(err @ DoActionError::UnsetWorkspaceSticky(_)) => {
                 // Terminal errors. Same shape as `WindowNotFound`:
                 // forward and advance the walk — do not re-block.
                 let _ = waiter.tx.send_blocking(Err(err));
@@ -664,7 +671,14 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                     Err(err @ DoActionError::AddWorkspaceToActivity(_))
                     | Err(err @ DoActionError::RemoveWorkspaceFromActivity(_))
                     | Err(err @ DoActionError::SetWorkspaceActivities(_))
-                    | Err(err @ DoActionError::MoveWorkspaceToActivity(_)) => {
+                    | Err(err @ DoActionError::MoveWorkspaceToActivity(_))
+                    | Err(err @ DoActionError::CreateActivity(_))
+                    | Err(err @ DoActionError::RemoveActivity(_))
+                    | Err(err @ DoActionError::RenameActivity(_))
+                    | Err(err @ DoActionError::SwitchActivity(_))
+                    | Err(err @ DoActionError::ToggleWorkspaceSticky(_))
+                    | Err(err @ DoActionError::SetWorkspaceSticky(_))
+                    | Err(err @ DoActionError::UnsetWorkspaceSticky(_)) => {
                         let _ = tx.send_blocking(Err(err));
                     }
                 }
