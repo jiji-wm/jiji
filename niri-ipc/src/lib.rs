@@ -963,7 +963,9 @@ pub enum Action {
     // resolve surfaces as `Reply::Err("workspace not found")` rather than a
     // silent no-op. This diverges from the pre-existing silent-on-miss behavior
     // of non-cohort workspace actions (`FocusWorkspace`, `MoveWindowToWorkspace`,
-    // `MoveColumnToWorkspace`, `MoveWindowToWorkspaceById`), which retain their
+    // `MoveColumnToWorkspace`, `MoveWindowToWorkspaceById`,
+    // `MoveWorkspaceToIndex` (when `reference: Some(_)`),
+    // `MoveWorkspaceToMonitor` (when `reference: Some(_)`)), which retain their
     // original silent-on-miss contract. The asymmetry is intentional: the cohort
     // harmonization is an activity-action-specific carve-out; extending it to
     // the older sibling actions requires separate architect review.
