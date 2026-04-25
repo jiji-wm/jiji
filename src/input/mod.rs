@@ -1844,15 +1844,7 @@ impl State {
                             "AddWorkspaceToActivity: {e}: workspace={arg_ws_log:?} \
                              activity={arg_act:?}"
                         );
-                        let mapped = match e {
-                            crate::layout::AddWorkspaceToActivityError::ActivityNotFound => {
-                                DoActionError::AddWorkspaceToActivityActivityNotFound
-                            }
-                            crate::layout::AddWorkspaceToActivityError::WorkspaceNotFound => {
-                                DoActionError::AddWorkspaceToActivityWorkspaceNotFound
-                            }
-                        };
-                        return Err(mapped);
+                        return Err(DoActionError::AddWorkspaceToActivity(e));
                     }
                 }
             }
@@ -1906,18 +1898,7 @@ impl State {
                             "RemoveWorkspaceFromActivity: {e}: workspace={arg_ws_log:?} \
                              activity={arg_act:?}"
                         );
-                        let mapped = match e {
-                            crate::layout::RemoveWorkspaceFromActivityError::ActivityNotFound => {
-                                DoActionError::RemoveWorkspaceFromActivityActivityNotFound
-                            }
-                            crate::layout::RemoveWorkspaceFromActivityError::WorkspaceNotFound => {
-                                DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound
-                            }
-                            crate::layout::RemoveWorkspaceFromActivityError::LastActivity => {
-                                DoActionError::RemoveWorkspaceFromActivityLastActivity
-                            }
-                        };
-                        return Err(mapped);
+                        return Err(DoActionError::RemoveWorkspaceFromActivity(e));
                     }
                 }
             }
@@ -1986,10 +1967,7 @@ impl State {
                             "MoveWorkspaceToActivity: {e}: workspace={arg_ws_log:?} \
                              activity={arg_act:?} focus={focus}"
                         );
-                        let mapped = match e {
-                            crate::layout::MoveWorkspaceToActivityError::ActivityNotFound => {
-                                DoActionError::MoveWorkspaceToActivityActivityNotFound
-                            }
+                        match e {
                             // Table row for Move does not list
                             // WorkspaceNotFound — match the convention of
                             // niri's other by-id actions that silently
@@ -1997,11 +1975,8 @@ impl State {
                             crate::layout::MoveWorkspaceToActivityError::WorkspaceNotFound => {
                                 return Ok(());
                             }
-                            crate::layout::MoveWorkspaceToActivityError::WorkspaceNotInActiveActivity => {
-                                DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity
-                            }
-                        };
-                        return Err(mapped);
+                            e => return Err(DoActionError::MoveWorkspaceToActivity(e)),
+                        }
                     }
                 }
             }
@@ -2052,13 +2027,7 @@ impl State {
                             "SetWorkspaceActivities: {e}: workspace={arg_ws_log:?} \
                              activities={arg_acts:?}"
                         );
-                        let mapped = match e {
-                            crate::layout::SetWorkspaceActivitiesError::ActivityNotFound => {
-                                DoActionError::SetWorkspaceActivitiesActivityNotFound
-                            }
-                            crate::layout::SetWorkspaceActivitiesError::EmptyActivityList => {
-                                DoActionError::SetWorkspaceActivitiesEmptyActivityList
-                            }
+                        match e {
                             // Asymmetry with Add / Remove — Set
                             // silently no-ops on workspace miss (log + Ok).
                             // Do NOT "harmonize" this arm with Add / Remove
@@ -2068,8 +2037,8 @@ impl State {
                             crate::layout::SetWorkspaceActivitiesError::WorkspaceNotFound => {
                                 return Ok(());
                             }
-                        };
-                        return Err(mapped);
+                            e => return Err(DoActionError::SetWorkspaceActivities(e)),
+                        }
                     }
                 }
             }

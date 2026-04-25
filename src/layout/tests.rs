@@ -5968,43 +5968,68 @@ fn do_action_error_display_matches_wire_contract() {
         "window not found: id=42",
     );
     // Workspace-activity assignment tokens — plain lowercase, no
-    // payload interpolation. Add and Remove share "activity not found" /
-    // "workspace not found" text; the envelope test confirms byte-identity
-    // and disambiguates which clause is load-bearing.
-    assert_eq!(
-        format!("{}", DoActionError::AddWorkspaceToActivityActivityNotFound),
-        "activity not found",
-    );
-    assert_eq!(
-        format!("{}", DoActionError::AddWorkspaceToActivityWorkspaceNotFound),
-        "workspace not found",
-    );
+    // payload interpolation. Outer variants delegate to the wrapped inner
+    // enum's `Display`; the envelope test confirms byte-identity and
+    // disambiguates which clause is load-bearing.
+    use super::{
+        AddWorkspaceToActivityError, MoveWorkspaceToActivityError,
+        RemoveWorkspaceFromActivityError, SetWorkspaceActivitiesError,
+    };
     assert_eq!(
         format!(
             "{}",
-            DoActionError::RemoveWorkspaceFromActivityActivityNotFound
+            DoActionError::AddWorkspaceToActivity(AddWorkspaceToActivityError::ActivityNotFound)
         ),
         "activity not found",
     );
     assert_eq!(
         format!(
             "{}",
-            DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound
+            DoActionError::AddWorkspaceToActivity(AddWorkspaceToActivityError::WorkspaceNotFound)
         ),
         "workspace not found",
     );
     assert_eq!(
-        format!("{}", DoActionError::RemoveWorkspaceFromActivityLastActivity),
+        format!(
+            "{}",
+            DoActionError::RemoveWorkspaceFromActivity(
+                RemoveWorkspaceFromActivityError::ActivityNotFound
+            )
+        ),
+        "activity not found",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::RemoveWorkspaceFromActivity(
+                RemoveWorkspaceFromActivityError::WorkspaceNotFound
+            )
+        ),
+        "workspace not found",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::RemoveWorkspaceFromActivity(
+                RemoveWorkspaceFromActivityError::LastActivity
+            )
+        ),
         "workspace would be left with no activities",
     );
     // SetWorkspaceActivities tokens. ActivityNotFound shares
     // text with Add / Remove — byte-identity pins the shared row.
     assert_eq!(
-        format!("{}", DoActionError::SetWorkspaceActivitiesActivityNotFound),
+        format!(
+            "{}",
+            DoActionError::SetWorkspaceActivities(SetWorkspaceActivitiesError::ActivityNotFound)
+        ),
         "activity not found",
     );
     assert_eq!(
-        format!("{}", DoActionError::SetWorkspaceActivitiesEmptyActivityList),
+        format!(
+            "{}",
+            DoActionError::SetWorkspaceActivities(SetWorkspaceActivitiesError::EmptyActivityList)
+        ),
         "activities list is empty",
     );
     // MoveWorkspaceToActivity tokens. ActivityNotFound shares
@@ -6012,13 +6037,18 @@ fn do_action_error_display_matches_wire_contract() {
     // the wire-contract wording, minus the "use Add…" suggestion
     // (docstring concern, not wire token).
     assert_eq!(
-        format!("{}", DoActionError::MoveWorkspaceToActivityActivityNotFound),
+        format!(
+            "{}",
+            DoActionError::MoveWorkspaceToActivity(MoveWorkspaceToActivityError::ActivityNotFound)
+        ),
         "activity not found",
     );
     assert_eq!(
         format!(
             "{}",
-            DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity,
+            DoActionError::MoveWorkspaceToActivity(
+                MoveWorkspaceToActivityError::WorkspaceNotInActiveActivity
+            )
         ),
         "workspace not in active activity",
     );
@@ -6035,7 +6065,11 @@ fn do_action_error_envelope_matches_wire_contract() {
     // `format_activity_switch_block_err`.
     //
     // The `WindowNotFound` case pins the new envelope.
-    use super::{format_do_action_error, ActivitySwitchBlock, DoActionError};
+    use super::{
+        format_do_action_error, ActivitySwitchBlock, AddWorkspaceToActivityError, DoActionError,
+        MoveWorkspaceToActivityError, RemoveWorkspaceFromActivityError,
+        SetWorkspaceActivitiesError,
+    };
     for (err, expected) in [
         (
             DoActionError::ActivitySwitchBlocked(ActivitySwitchBlock::InteractiveMove),
@@ -6058,39 +6092,47 @@ fn do_action_error_envelope_matches_wire_contract() {
             "window not found: id=0",
         ),
         (
-            DoActionError::AddWorkspaceToActivityActivityNotFound,
+            DoActionError::AddWorkspaceToActivity(AddWorkspaceToActivityError::ActivityNotFound),
             "activity not found",
         ),
         (
-            DoActionError::AddWorkspaceToActivityWorkspaceNotFound,
+            DoActionError::AddWorkspaceToActivity(AddWorkspaceToActivityError::WorkspaceNotFound),
             "workspace not found",
         ),
         (
-            DoActionError::RemoveWorkspaceFromActivityActivityNotFound,
+            DoActionError::RemoveWorkspaceFromActivity(
+                RemoveWorkspaceFromActivityError::ActivityNotFound,
+            ),
             "activity not found",
         ),
         (
-            DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound,
+            DoActionError::RemoveWorkspaceFromActivity(
+                RemoveWorkspaceFromActivityError::WorkspaceNotFound,
+            ),
             "workspace not found",
         ),
         (
-            DoActionError::RemoveWorkspaceFromActivityLastActivity,
+            DoActionError::RemoveWorkspaceFromActivity(
+                RemoveWorkspaceFromActivityError::LastActivity,
+            ),
             "workspace would be left with no activities",
         ),
         (
-            DoActionError::SetWorkspaceActivitiesActivityNotFound,
+            DoActionError::SetWorkspaceActivities(SetWorkspaceActivitiesError::ActivityNotFound),
             "activity not found",
         ),
         (
-            DoActionError::SetWorkspaceActivitiesEmptyActivityList,
+            DoActionError::SetWorkspaceActivities(SetWorkspaceActivitiesError::EmptyActivityList),
             "activities list is empty",
         ),
         (
-            DoActionError::MoveWorkspaceToActivityActivityNotFound,
+            DoActionError::MoveWorkspaceToActivity(MoveWorkspaceToActivityError::ActivityNotFound),
             "activity not found",
         ),
         (
-            DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity,
+            DoActionError::MoveWorkspaceToActivity(
+                MoveWorkspaceToActivityError::WorkspaceNotInActiveActivity,
+            ),
             "workspace not in active activity",
         ),
     ] {

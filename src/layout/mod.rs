@@ -521,13 +521,20 @@ pub(crate) fn format_activity_switch_block_err(block: ActivitySwitchBlock) -> St
 }
 
 /// Error type returned by [`State::do_action_inner`] for actions that can fail
-/// with either an activity-switch hard-block or a missing window id.
+/// with either an activity-switch hard-block, a missing window id, or a
+/// layout-side validation rejection from one of the activity-action handlers.
 ///
-/// Wraps [`ActivitySwitchBlock`] (the hard-block reasons) and adds
-/// [`DoActionError::WindowNotFound`] for the `Action::FocusWindow`
-/// "window no longer exists" wire contract. Kept `pub(crate)` because it is
-/// an internal dispatch error — the IPC surface flattens it to a
-/// `Reply::Err(String)` envelope via [`format_do_action_error`].
+/// Wraps [`ActivitySwitchBlock`] (the hard-block reasons), surfaces
+/// [`DoActionError::WindowNotFound`] for the `Action::FocusWindow` "window no
+/// longer exists" wire contract, and carries the layout-side validation enums
+/// (e.g. [`AddWorkspaceToActivityError`]) verbatim as payloads on outer
+/// variants. Each outer variant's `Display` impl delegates to the wrapped
+/// inner enum's `Display` (one-line `e.fmt(f)`), so the inner enum's tokens
+/// are the source of truth for the wire string.
+///
+/// Kept `pub(crate)` because it is an internal dispatch error — the IPC
+/// surface flattens it to a `Reply::Err(String)` envelope via
+/// [`format_do_action_error`].
 ///
 /// The `Display` tokens and envelope format are part of the stable observable
 /// IPC wire contract and are pinned by three layered tests:
@@ -541,14 +548,8 @@ pub(crate) fn format_activity_switch_block_err(block: ActivitySwitchBlock) -> St
 ///   `Reply::Err` JSON.
 ///
 /// Any change to the token strings or the envelope wording must update all
-/// three pin sites together.
-///
-/// Note on absent `WorkspaceNotFound` variants: `SetWorkspaceActivities` and
-/// `MoveWorkspaceToActivity` have no `WorkspaceNotFound` variant here (unlike
-/// `AddWorkspaceToActivity` and `RemoveWorkspaceFromActivity` which do).
-/// The dispatch layer treats a workspace-not-found outcome from
-/// either of those two actions as a silent no-op and returns `Ok(())` without
-/// surfacing an error to the caller — so the variant has no dispatch path.
+/// three pin sites together. Token drift on a wrapped inner enum's `Display`
+/// fails the outer pin tests in addition to the inner enum's own pin tests.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DoActionError {
     /// A hard-block (interactive move, DnD, or workspace-switch
@@ -559,37 +560,18 @@ pub(crate) enum DoActionError {
     /// does not resolve to any pool-owned window. Terminal error — the
     /// waiter is signalled immediately, never parked.
     WindowNotFound { id: u64 },
-    /// `Action::AddWorkspaceToActivity` was dispatched with an
-    /// activity reference that does not resolve. Terminal error.
-    AddWorkspaceToActivityActivityNotFound,
-    /// `Action::AddWorkspaceToActivity` was dispatched with a
-    /// workspace reference that does not resolve (or `None` with no active
-    /// workspace). Terminal error.
-    AddWorkspaceToActivityWorkspaceNotFound,
-    /// `Action::RemoveWorkspaceFromActivity` was dispatched with an
-    /// activity reference that does not resolve. Terminal error.
-    RemoveWorkspaceFromActivityActivityNotFound,
-    /// `Action::RemoveWorkspaceFromActivity` was dispatched with a
-    /// workspace reference that does not resolve. Terminal error.
-    RemoveWorkspaceFromActivityWorkspaceNotFound,
-    /// `Action::RemoveWorkspaceFromActivity` would leave the
-    /// workspace's `activities` set empty — rejected before any mutation.
-    /// Terminal error.
-    RemoveWorkspaceFromActivityLastActivity,
-    /// `Action::SetWorkspaceActivities` was dispatched with an
-    /// activity reference in the list that does not resolve. Terminal error.
-    SetWorkspaceActivitiesActivityNotFound,
-    /// `Action::SetWorkspaceActivities` was dispatched with an
-    /// empty `activities` list — rejected before any mutation. Terminal
-    /// error.
-    SetWorkspaceActivitiesEmptyActivityList,
-    /// `Action::MoveWorkspaceToActivity` was dispatched with a
-    /// target activity reference that does not resolve. Terminal error.
-    MoveWorkspaceToActivityActivityNotFound,
-    /// `Action::MoveWorkspaceToActivity` was dispatched but the
-    /// workspace is not a member of the currently-active activity — Move
-    /// requires a well-defined source. Terminal error.
-    MoveWorkspaceToActivityWorkspaceNotInActiveActivity,
+    /// `Action::AddWorkspaceToActivity` validation failed. Wraps
+    /// the layout-side [`AddWorkspaceToActivityError`]. Terminal error.
+    AddWorkspaceToActivity(AddWorkspaceToActivityError),
+    /// `Action::RemoveWorkspaceFromActivity` validation failed. Wraps
+    /// the layout-side [`RemoveWorkspaceFromActivityError`]. Terminal error.
+    RemoveWorkspaceFromActivity(RemoveWorkspaceFromActivityError),
+    /// `Action::SetWorkspaceActivities` validation failed. Wraps
+    /// the layout-side [`SetWorkspaceActivitiesError`]. Terminal error.
+    SetWorkspaceActivities(SetWorkspaceActivitiesError),
+    /// `Action::MoveWorkspaceToActivity` validation failed. Wraps
+    /// the layout-side [`MoveWorkspaceToActivityError`]. Terminal error.
+    MoveWorkspaceToActivity(MoveWorkspaceToActivityError),
 }
 
 impl From<ActivitySwitchBlock> for DoActionError {
@@ -632,25 +614,14 @@ impl fmt::Display for DoActionError {
         match self {
             Self::ActivitySwitchBlocked(block) => write!(f, "{block}"),
             Self::WindowNotFound { id } => write!(f, "window not found: id={id}"),
-            // Plain lowercase tokens. `format_do_action_error` returns the bare
-            // `Display` token without further wrapping.
-            Self::AddWorkspaceToActivityActivityNotFound
-            | Self::RemoveWorkspaceFromActivityActivityNotFound
-            | Self::SetWorkspaceActivitiesActivityNotFound
-            | Self::MoveWorkspaceToActivityActivityNotFound => f.write_str("activity not found"),
-            Self::AddWorkspaceToActivityWorkspaceNotFound
-            | Self::RemoveWorkspaceFromActivityWorkspaceNotFound => {
-                f.write_str("workspace not found")
-            }
-            Self::RemoveWorkspaceFromActivityLastActivity => {
-                f.write_str("workspace would be left with no activities")
-            }
-            Self::SetWorkspaceActivitiesEmptyActivityList => {
-                f.write_str("activities list is empty")
-            }
-            Self::MoveWorkspaceToActivityWorkspaceNotInActiveActivity => {
-                f.write_str("workspace not in active activity")
-            }
+            // Outer variants wrapping a layout-side `*Error` delegate to the
+            // inner enum's `Display`. The inner enum's tokens are the source
+            // of truth for the wire string; `format_do_action_error` returns
+            // the bare token without further wrapping.
+            Self::AddWorkspaceToActivity(e) => e.fmt(f),
+            Self::RemoveWorkspaceFromActivity(e) => e.fmt(f),
+            Self::SetWorkspaceActivities(e) => e.fmt(f),
+            Self::MoveWorkspaceToActivity(e) => e.fmt(f),
         }
     }
 }
@@ -661,27 +632,20 @@ impl fmt::Display for DoActionError {
 /// `ActivitySwitchBlocked` variant this function delegates to
 /// [`format_activity_switch_block_err`] so the envelope is produced
 /// byte-identical to the pre-1b wire contract — IPC clients that
-/// pattern-match `"activity switch blocked: ..."` continue to work. For
-/// `WindowNotFound` the envelope is `"window not found: id={id}"`.
+/// pattern-match `"activity switch blocked: ..."` continue to work. Every
+/// other variant routes through `Display`, which itself delegates to the
+/// wrapped inner enum's `Display` for outer variants that carry a layout-side
+/// `*Error` payload.
 ///
 /// Both `ipc/server.rs` and the `do_action_error_envelope_matches_wire_contract`
 /// pin test call this function, so any regression to the format strings fails
-/// the test before reaching the wire.
+/// the test before reaching the wire. Adding a new outer variant with a bare
+/// inner-enum `Display` requires no edit here — the catch-all already covers
+/// it.
 pub(crate) fn format_do_action_error(err: DoActionError) -> String {
     match err {
         DoActionError::ActivitySwitchBlocked(block) => format_activity_switch_block_err(block),
-        DoActionError::WindowNotFound { .. } => format!("{err}"),
-        DoActionError::AddWorkspaceToActivityActivityNotFound
-        | DoActionError::AddWorkspaceToActivityWorkspaceNotFound
-        | DoActionError::RemoveWorkspaceFromActivityActivityNotFound
-        | DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound
-        | DoActionError::SetWorkspaceActivitiesActivityNotFound
-        | DoActionError::MoveWorkspaceToActivityActivityNotFound
-        | DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity => {
-            format!("{err}")
-        }
-        DoActionError::RemoveWorkspaceFromActivityLastActivity
-        | DoActionError::SetWorkspaceActivitiesEmptyActivityList => format!("{err}"),
+        err => format!("{err}"),
     }
 }
 

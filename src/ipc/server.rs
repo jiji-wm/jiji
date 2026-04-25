@@ -336,15 +336,10 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
                     .send_blocking(Err(DoActionError::WindowNotFound { id }));
                 continue;
             }
-            Err(err @ DoActionError::AddWorkspaceToActivityActivityNotFound)
-            | Err(err @ DoActionError::AddWorkspaceToActivityWorkspaceNotFound)
-            | Err(err @ DoActionError::RemoveWorkspaceFromActivityActivityNotFound)
-            | Err(err @ DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound)
-            | Err(err @ DoActionError::RemoveWorkspaceFromActivityLastActivity)
-            | Err(err @ DoActionError::SetWorkspaceActivitiesActivityNotFound)
-            | Err(err @ DoActionError::SetWorkspaceActivitiesEmptyActivityList)
-            | Err(err @ DoActionError::MoveWorkspaceToActivityActivityNotFound)
-            | Err(err @ DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity) => {
+            Err(err @ DoActionError::AddWorkspaceToActivity(_))
+            | Err(err @ DoActionError::RemoveWorkspaceFromActivity(_))
+            | Err(err @ DoActionError::SetWorkspaceActivities(_))
+            | Err(err @ DoActionError::MoveWorkspaceToActivity(_)) => {
                 // Terminal errors. Same shape as `WindowNotFound`:
                 // forward and advance the walk — do not re-block.
                 let _ = waiter.tx.send_blocking(Err(err));
@@ -666,17 +661,10 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                     // no hard-block condition, do not park — forward to the
                     // waiter so the IPC envelope is produced on the main
                     // dispatch path.
-                    Err(err @ DoActionError::AddWorkspaceToActivityActivityNotFound)
-                    | Err(err @ DoActionError::AddWorkspaceToActivityWorkspaceNotFound)
-                    | Err(err @ DoActionError::RemoveWorkspaceFromActivityActivityNotFound)
-                    | Err(err @ DoActionError::RemoveWorkspaceFromActivityWorkspaceNotFound)
-                    | Err(err @ DoActionError::RemoveWorkspaceFromActivityLastActivity)
-                    | Err(err @ DoActionError::SetWorkspaceActivitiesActivityNotFound)
-                    | Err(err @ DoActionError::SetWorkspaceActivitiesEmptyActivityList)
-                    | Err(err @ DoActionError::MoveWorkspaceToActivityActivityNotFound)
-                    | Err(
-                        err @ DoActionError::MoveWorkspaceToActivityWorkspaceNotInActiveActivity,
-                    ) => {
+                    Err(err @ DoActionError::AddWorkspaceToActivity(_))
+                    | Err(err @ DoActionError::RemoveWorkspaceFromActivity(_))
+                    | Err(err @ DoActionError::SetWorkspaceActivities(_))
+                    | Err(err @ DoActionError::MoveWorkspaceToActivity(_)) => {
                         let _ = tx.send_blocking(Err(err));
                     }
                 }
