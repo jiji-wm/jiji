@@ -267,7 +267,7 @@ impl Activity {
     }
 
     /// Mutable access to per-output views. Same key-domain semantics as [`Self::views`].
-    pub fn views_mut(&mut self) -> &mut HashMap<OutputId, WorkspaceView> {
+    pub(super) fn views_mut(&mut self) -> &mut HashMap<OutputId, WorkspaceView> {
         &mut self.views
     }
 
