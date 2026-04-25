@@ -4409,10 +4409,10 @@ fn layout_seed_stamps_workspace_with_declared_activities() {
     // on both because neither config block sets it.
     let config = Config {
         activities: vec![
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Work".to_owned()),
             },
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Personal".to_owned()),
             },
         ],
@@ -4478,10 +4478,10 @@ fn layout_seed_sticky_stamps_all_activity_ids() {
     // must be auto-tagged with every activity id in the pool.
     let config = Config {
         activities: vec![
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Work".to_owned()),
             },
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Personal".to_owned()),
             },
         ],
@@ -4529,10 +4529,10 @@ fn layout_seed_unknown_activity_name_falls_back_to_default() {
     // preserved.
     let config = Config {
         activities: vec![
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Work".to_owned()),
             },
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Personal".to_owned()),
             },
         ],
@@ -7084,10 +7084,10 @@ fn rename_activity_config_declared_errs() {
     // Config-declared activities cannot be renamed at runtime (mirrors the
     // remove policy — edit config + reload instead).
     let cfg = vec![
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Work".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Personal".to_owned()),
         },
     ];
@@ -7315,7 +7315,7 @@ fn remove_activity_config_declared_errs() {
     // A config-declared activity cannot be removed at runtime (
     // bullet 1). Seed a config-declared "Alpha" as the first activity, create
     // a runtime "Beta", then attempt to remove Alpha → ConfigDeclared.
-    let cfg = vec![niri_config::Activity {
+    let cfg = vec![niri_config::ActivityDecl {
         name: niri_config::ActivityName("Alpha".to_owned()),
     }];
     // Swap in a config-declared seed pool after the default construction.
@@ -10235,10 +10235,10 @@ fn reload_adds_new_config_activity_appends_and_promotes_runtime_name_match() {
     );
 
     let cfg = [
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Work".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Default".to_owned()),
         },
     ];
@@ -10348,7 +10348,7 @@ fn reload_adds_new_config_activity_preserves_views_and_assignments_on_promotion(
     // reconcile_activities_on_reload_add enforces this precondition.
     layout.unname_workspace("ws1");
 
-    let cfg = [niri_config::Activity {
+    let cfg = [niri_config::ActivityDecl {
         name: niri_config::ActivityName("Work".to_owned()),
     }];
     layout.reconcile_activities_on_reload_add(&cfg, &[]);
@@ -10406,13 +10406,13 @@ fn reload_reorders_to_match_config_declaration_order() {
     let previous_before = layout.activities.previous_id();
 
     let cfg = [
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("C".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("B".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("A".to_owned()),
         },
     ];
@@ -10461,13 +10461,13 @@ fn reload_preserves_active_and_previous_cursors_across_reorder() {
     assert_eq!(layout.activities.previous_id(), Some(a_id));
 
     let cfg = [
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("C".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("B".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("A".to_owned()),
         },
     ];
@@ -10523,7 +10523,7 @@ fn reload_sticky_workspace_reexpands_activities_set_to_all_current() {
         sticky_id
     };
 
-    let cfg = [niri_config::Activity {
+    let cfg = [niri_config::ActivityDecl {
         name: niri_config::ActivityName("Work".to_owned()),
     }];
     layout.reconcile_activities_on_reload_add(&cfg, &[]);
@@ -10586,10 +10586,10 @@ fn reload_config_workspace_activities_reset_to_declared_values() {
     layout.workspaces.get_mut(&home_id).unwrap().activities = HashSet::from([default_id, work_id]);
 
     let cfg_activities = [
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Default".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Work".to_owned()),
         },
     ];
@@ -10644,13 +10644,13 @@ fn reload_dynamic_workspace_keeps_runtime_activity_assignments() {
         .clone();
 
     let cfg_activities = [
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Default".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Work".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Personal".to_owned()),
         },
     ];
@@ -10672,10 +10672,10 @@ fn reload_no_change_is_semantically_noop_on_activities_and_workspaces() {
     // workspace state must be unchanged, and invariants must hold.
     let config = Config {
         activities: vec![
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Work".to_owned()),
             },
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Personal".to_owned()),
             },
         ],
@@ -10772,7 +10772,7 @@ fn reload_promotion_preserves_runtime_name_casing() {
     );
 
     // Reload declares "WORK" (all-caps) — case-insensitively matches "work".
-    let cfg = [niri_config::Activity {
+    let cfg = [niri_config::ActivityDecl {
         name: niri_config::ActivityName("WORK".to_owned()),
     }];
     layout.reconcile_activities_on_reload_add(&cfg, &[]);
@@ -10811,7 +10811,7 @@ fn reconcile_remove_no_op_when_config_retains_all_activities() {
     let mut layout = Layout::<TestWindow>::default();
     let default_id = layout.active_activity_id();
 
-    let cfg = [niri_config::Activity {
+    let cfg = [niri_config::ActivityDecl {
         name: niri_config::ActivityName("Default".to_owned()),
     }];
     layout.reconcile_activities_on_reload_add(&cfg, &[]);
@@ -10851,10 +10851,10 @@ fn reconcile_remove_drops_config_activity_with_no_exclusive_workspaces() {
     let seed_id = layout.active_activity_id();
 
     let cfg_init = [
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Default".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Beta".to_owned()),
         },
     ];
@@ -10869,7 +10869,7 @@ fn reconcile_remove_drops_config_activity_with_no_exclusive_workspaces() {
     let pool_before = layout.activities.len();
     let ws_before = layout.workspaces.len();
 
-    let cfg_reload = [niri_config::Activity {
+    let cfg_reload = [niri_config::ActivityDecl {
         name: niri_config::ActivityName("Default".to_owned()),
     }];
     layout
@@ -10902,10 +10902,10 @@ fn reconcile_remove_destroys_empty_unnamed_exclusive_workspace() {
 
     // Seed config-declared [Default, Beta].
     let cfg_init = [
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Default".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Beta".to_owned()),
         },
     ];
@@ -10932,7 +10932,7 @@ fn reconcile_remove_destroys_empty_unnamed_exclusive_workspace() {
     );
     let ws_baseline = layout.workspaces.len();
 
-    let cfg_reload = [niri_config::Activity {
+    let cfg_reload = [niri_config::ActivityDecl {
         name: niri_config::ActivityName("Default".to_owned()),
     }];
     layout
@@ -10992,7 +10992,7 @@ fn reconcile_remove_destroys_empty_named_exclusive_workspace() {
         .expect("live pool key")
         .activities = std::iter::once(beta_id).collect();
 
-    let cfg_reload = [niri_config::Activity {
+    let cfg_reload = [niri_config::ActivityDecl {
         name: niri_config::ActivityName("Default".to_owned()),
     }];
     layout
@@ -11016,10 +11016,10 @@ fn reconcile_remove_prunes_shared_workspaces() {
     let mut layout = check_ops(ops);
 
     let cfg_init = [
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Default".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Beta".to_owned()),
         },
     ];
@@ -11052,7 +11052,7 @@ fn reconcile_remove_prunes_shared_workspaces() {
 
     let ws_before = layout.workspaces.len();
 
-    let cfg_reload = [niri_config::Activity {
+    let cfg_reload = [niri_config::ActivityDecl {
         name: niri_config::ActivityName("Default".to_owned()),
     }];
     layout
@@ -11093,10 +11093,10 @@ fn reconcile_remove_rejects_on_exclusive_workspace_has_windows() {
     let mut layout = check_ops(ops);
 
     let cfg_init = [
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Default".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Beta".to_owned()),
         },
     ];
@@ -11125,7 +11125,7 @@ fn reconcile_remove_rejects_on_exclusive_workspace_has_windows() {
     let active_before = layout.active_activity_id();
     let previous_before = layout.activities.previous_id();
 
-    let cfg_reload = [niri_config::Activity {
+    let cfg_reload = [niri_config::ActivityDecl {
         name: niri_config::ActivityName("Default".to_owned()),
     }];
     let err = layout
@@ -11170,7 +11170,7 @@ fn reconcile_remove_rejects_would_empty_pool() {
     // in the seed config makes the pool `[Solo (config-declared)]`. Reload
     // declares zero activities. Expected: Err(WouldEmptyPool), no mutation.
     let config = Config {
-        activities: vec![niri_config::Activity {
+        activities: vec![niri_config::ActivityDecl {
             name: niri_config::ActivityName("Solo".to_owned()),
         }],
         ..Config::default()
@@ -11191,7 +11191,7 @@ fn reconcile_remove_rejects_would_empty_pool() {
     let ws_before = layout.workspaces.len();
     let active_before = layout.active_activity_id();
 
-    let cfg_reload: [niri_config::Activity; 0] = [];
+    let cfg_reload: [niri_config::ActivityDecl; 0] = [];
     let err = layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
         .expect_err("would-empty-pool must err");
@@ -11217,10 +11217,10 @@ fn reconcile_remove_cascades_active_cursor_to_previous() {
     // removed.
     let mut layout = Layout::<TestWindow>::default();
     let cfg_init = [
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Default".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Beta".to_owned()),
         },
     ];
@@ -11242,7 +11242,7 @@ fn reconcile_remove_cascades_active_cursor_to_previous() {
     assert_eq!(layout.active_activity_id(), beta_id);
     assert_eq!(layout.activities.previous_id(), Some(default_id));
 
-    let cfg_reload = [niri_config::Activity {
+    let cfg_reload = [niri_config::ActivityDecl {
         name: niri_config::ActivityName("Default".to_owned()),
     }];
     layout
@@ -11271,13 +11271,13 @@ fn reconcile_remove_cascades_active_cursor_to_first_when_previous_also_in_remove
     // (first declaration-order id not in remove_set).
     let mut layout = Layout::<TestWindow>::default();
     let cfg_init = [
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Default".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Beta".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Gamma".to_owned()),
         },
     ];
@@ -11306,7 +11306,7 @@ fn reconcile_remove_cascades_active_cursor_to_first_when_previous_also_in_remove
     assert_eq!(layout.active_activity_id(), gamma_id);
     assert_eq!(layout.activities.previous_id(), Some(beta_id));
 
-    let cfg_reload = [niri_config::Activity {
+    let cfg_reload = [niri_config::ActivityDecl {
         name: niri_config::ActivityName("Default".to_owned()),
     }];
     layout
@@ -11335,10 +11335,10 @@ fn reconcile_remove_rejects_on_hard_block_when_cascade_required() {
     let mut layout = check_ops(ops);
 
     let cfg_init = [
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Default".to_owned()),
         },
-        niri_config::Activity {
+        niri_config::ActivityDecl {
             name: niri_config::ActivityName("Beta".to_owned()),
         },
     ];
@@ -11376,7 +11376,7 @@ fn reconcile_remove_rejects_on_hard_block_when_cascade_required() {
     let active_before = layout.active_activity_id();
     let previous_before = layout.activities.previous_id();
 
-    let cfg_reload = [niri_config::Activity {
+    let cfg_reload = [niri_config::ActivityDecl {
         name: niri_config::ActivityName("Default".to_owned()),
     }];
     let err = layout
@@ -14008,10 +14008,10 @@ fn cross_activity_config(
     }
     niri_config::Config {
         activities: vec![
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("alpha".to_owned()),
             },
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("beta".to_owned()),
             },
         ],

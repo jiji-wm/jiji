@@ -700,7 +700,7 @@ impl Activities {
     /// are flagged `is_config_declared`. After construction, `active_id()`
     /// equals the id of the `Activity` minted from the first config entry, and
     /// `previous_id() == None`.
-    pub fn from_config_or_default(config_activities: &[niri_config::Activity]) -> Self {
+    pub fn from_config_or_default(config_activities: &[niri_config::ActivityDecl]) -> Self {
         if config_activities.is_empty() {
             return Self::new(Activity::new_runtime("Default".to_owned()));
         }
@@ -1493,10 +1493,10 @@ mod tests {
     #[test]
     fn resolve_config_names_case_insensitive_match() {
         let cfg = vec![
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Work".to_owned()),
             },
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Personal".to_owned()),
             },
         ];
@@ -1513,10 +1513,10 @@ mod tests {
     #[test]
     fn resolve_config_names_unknown_returns_in_unknowns_list() {
         let cfg = vec![
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Work".to_owned()),
             },
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Personal".to_owned()),
             },
         ];
@@ -1532,10 +1532,10 @@ mod tests {
     #[test]
     fn activities_from_config_or_default_multiple_preserves_order_and_first_active() {
         let cfg = vec![
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Work".to_owned()),
             },
-            niri_config::Activity {
+            niri_config::ActivityDecl {
                 name: niri_config::ActivityName("Personal".to_owned()),
             },
         ];

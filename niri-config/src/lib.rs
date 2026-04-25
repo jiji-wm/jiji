@@ -45,7 +45,7 @@ pub mod utils;
 pub mod window_rule;
 pub mod workspace;
 
-pub use crate::activity::{Activity, ActivityName};
+pub use crate::activity::{ActivityDecl, ActivityName};
 pub use crate::animations::{Animation, Animations};
 pub use crate::appearance::*;
 pub use crate::binds::*;
@@ -93,7 +93,7 @@ pub struct Config {
     pub switch_events: SwitchBinds,
     pub debug: Debug,
     pub workspaces: Vec<Workspace>,
-    pub activities: Vec<Activity>,
+    pub activities: Vec<ActivityDecl>,
     pub recent_windows: RecentWindows,
 }
 
@@ -2343,17 +2343,17 @@ mod tests {
                 },
             ],
             activities: [
-                Activity {
+                ActivityDecl {
                     name: ActivityName(
                         "Work",
                     ),
                 },
-                Activity {
+                ActivityDecl {
                     name: ActivityName(
                         "Personal",
                     ),
                 },
-                Activity {
+                ActivityDecl {
                     name: ActivityName(
                         "Gaming",
                     ),

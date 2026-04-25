@@ -8,8 +8,11 @@ use knuffel::errors::DecodeError;
 ///
 /// Cross-reference validation (a workspace naming an activity that doesn't exist)
 /// happens at layout consumption time, not during parsing — parsing is liberal.
+///
+/// Named `ActivityDecl` to avoid a name clash with `niri_ipc::Activity`, which
+/// carries the runtime/wire representation of an activity.
 #[derive(knuffel::Decode, Debug, Clone, PartialEq)]
-pub struct Activity {
+pub struct ActivityDecl {
     #[knuffel(argument)]
     pub name: ActivityName,
 }

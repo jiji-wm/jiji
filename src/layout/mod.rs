@@ -6851,7 +6851,7 @@ impl<W: LayoutElement> Layout<W> {
     /// callers need not re-check.
     pub(crate) fn reconcile_activities_on_reload_remove(
         &mut self,
-        config_activities: &[niri_config::Activity],
+        config_activities: &[niri_config::ActivityDecl],
     ) -> Result<(), ReloadActivityRemovalError> {
         // Validation phase: read-only, no `self` mutation until every error
         // class has been ruled out. Mirrors the atomicity contract of
@@ -7114,7 +7114,7 @@ impl<W: LayoutElement> Layout<W> {
     /// callers need not re-check.
     pub(crate) fn reconcile_activities_on_reload_add(
         &mut self,
-        config_activities: &[niri_config::Activity],
+        config_activities: &[niri_config::ActivityDecl],
         config_workspaces: &[niri_config::Workspace],
     ) {
         // Precondition: every named non-sticky workspace's name must appear in
