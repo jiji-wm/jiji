@@ -644,7 +644,8 @@ impl<W: LayoutElement> Monitor<W> {
 
     /// Advances per-monitor animations. Returns `true` when a workspace-switch animation
     /// completed this tick; the caller must then run `Layout::clean_up_workspaces_on` for this
-    /// monitor — `clean_up_workspaces` lives on `Layout`, so Monitor can no longer call it inline.
+    /// monitor — `clean_up_workspaces` lives on `Layout` (which owns the pool), so
+    /// `Monitor` cannot call it inline.
     #[must_use]
     pub fn advance_animations(
         &mut self,
@@ -843,9 +844,9 @@ impl<W: LayoutElement> Monitor<W> {
         {
             if options.layout.empty_workspace_above_first {
                 // Inlined former `self.add_workspace_top(pool)` — the pool-taking
-                // structural methods live on `Layout`, but `update_config` still runs on
-                // `&mut Monitor` and only needs a fresh top bookend here, so we build it
-                // directly.
+                // structural methods live on `Layout` (which owns the pool), but
+                // `update_config` runs on `&mut Monitor` and only needs a fresh top
+                // bookend here, so we build it directly.
                 let ws = Workspace::new(
                     &self.output,
                     HashSet::from([seed_activity]),

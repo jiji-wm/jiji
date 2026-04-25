@@ -13627,8 +13627,8 @@ fn set_workspace_sticky_re_expands_when_activities_was_narrowed_to_subset() {
     // when re-adding a named workspace to the *active* activity's
     // view; lazy view rebuild covers dormant activities only). That
     // limitation is orthogonal to the sticky-action triplet and is not
-    // addressed box 2015 — see the implementer's notes in the
-    // landing commit body for a follow-up Part 2 candidate.
+    // addressed here — see the implementer's notes in the landing commit body
+    // for a follow-up candidate.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();

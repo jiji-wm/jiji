@@ -1711,8 +1711,8 @@ impl State {
                 // Keybinding-triggered switches are silently dropped while
                 // hard-blocked (no cursor warp, no redraw, no focus reset). IPC callers
                 // receive `Reply::Err("activity switch blocked: ...")` with the block
-                // reason; per-connection queue-and-await is deferred
-                // (see the TODO in ipc/server.rs).
+                // reason; per-connection queue-and-await is implemented via
+                // `drain_blocked_action_waiters` in ipc/server.rs.
                 if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
                     debug!("switch_activity: hard-blocked by {block:?}, ignoring");
                     return Err(block.into());
@@ -3045,12 +3045,11 @@ impl State {
 
     /// Dispatch handler for `Action::ToggleWorkspaceSticky` /
     /// `Action::ToggleWorkspaceStickyByRef`.
-    /// box 2015 for the contract.
     ///
-    /// ("blocked while a workspace switch gesture is in flight"):
-    /// Set/Toggle-on are append-only on views (delegate to
-    /// set_workspace_activities which handles animation-snap internally);
-    /// Unset/Toggle-off touches no views. No hard-block gate.
+    /// Sticky toggles are not hard-blocked during workspace-switch gestures:
+    /// Toggle-on is append-only on views (delegates to `set_workspace_activities`
+    /// which handles animation-snap internally); Toggle-off touches no views.
+    /// No hard-block gate.
     fn dispatch_toggle_workspace_sticky(
         &mut self,
         reference: Option<WorkspaceReference>,
@@ -3101,12 +3100,10 @@ impl State {
 
     /// Dispatch handler for `Action::SetWorkspaceSticky` /
     /// `Action::SetWorkspaceStickyByRef`.
-    /// box 2015 for the contract.
     ///
-    /// ("blocked while a workspace switch gesture is in flight"):
-    /// Set/Toggle-on are append-only on views (delegate to
-    /// set_workspace_activities which handles animation-snap internally).
-    /// No hard-block gate.
+    /// Sticky set is not hard-blocked during workspace-switch gestures:
+    /// Set is append-only on views (delegates to `set_workspace_activities`
+    /// which handles animation-snap internally). No hard-block gate.
     fn dispatch_set_workspace_sticky(
         &mut self,
         reference: Option<WorkspaceReference>,
@@ -3139,10 +3136,9 @@ impl State {
 
     /// Dispatch handler for `Action::UnsetWorkspaceSticky` /
     /// `Action::UnsetWorkspaceStickyByRef`.
-    /// box 2015 for the contract.
     ///
-    /// ("blocked while a workspace switch gesture is in flight"):
-    /// Unset/Toggle-off touches no views. No hard-block gate. No cursor-warp /
+    /// Sticky unset is not hard-blocked during workspace-switch gestures:
+    /// Unset touches no views. No hard-block gate. No cursor-warp /
     /// redraw — visibility for the active activity does not change (precedent:
     /// see the `act_id == active_before` gate in the
     /// `Action::RemoveWorkspaceFromActivity` dispatch arm which only redraws
