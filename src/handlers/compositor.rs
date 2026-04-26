@@ -136,13 +136,6 @@ impl CompositorHandler for State {
                         // matches the fall-through discipline for destroyed-
                         // between-configure-and-map workspaces; this is a
                         // benign race, not a user error).
-                        // FIXME(test): the `.filter(contains_key)` below covers the case where
-                        // the workspace was destroyed between configure and map time. This path
-                        // is exercised manually but there is no automated regression test —
-                        // `src/tests/fixture.rs` has no workspace-destroy primitive. A test
-                        // would need to: (1) configure a window with `open-on-activity`, (2)
-                        // destroy the target workspace, (3) map the window, and assert it lands
-                        // on the fallback output/workspace rather than panicking.
                         let workspace_id = target_workspace_id
                             .filter(|id| self.niri.layout.workspace_pool().contains_key(id))
                             .or_else(|| {
