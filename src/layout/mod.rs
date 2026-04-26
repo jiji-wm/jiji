@@ -7015,6 +7015,144 @@ impl<W: LayoutElement> Layout<W> {
             self.switch_activity(cascade_target);
         }
 
+        // Step 6.5: rebind orphan workspaces from to-be-removed activities
+        // into the cascade target's view, before Step 7 drops the activities.
+        //
+        // An "orphan" here is a workspace that appears in some to-be-removed
+        // activity's view of a given output AND is not present in any
+        // surviving activity's view of that same output. The membership
+        // pruning in Step 7 leaves it in the pool, but its only anchoring
+        // view evaporates with `self.activities.remove`.
+        //
+        // Note: a workspace tagged with *both* a removed and a surviving
+        // activity (e.g. `activities = [alpha, gamma]`) can still be an
+        // orphan if the surviving activity's view on that output does not
+        // contain it. This arises because `ensure_view_for` filters by real-
+        // output match and never lifts a sentinel-`OutputId("")` workspace.
+        // The predicate must be "not anchored by any surviving view on that
+        // output", not "workspace.activities disjoint from remove_set" — the
+        // latter misses the mixed-tag case and would leave the workspace
+        // unanchored after Step 7 prunes alpha from its memberships.
+        //
+        // Background on how an orphan reaches us: named config workspaces
+        // seeded via `Workspace::new_with_config_no_outputs` carry the
+        // empty-string sentinel from `unwrap_or_default()` on `open_on_output`,
+        // and `Workspace::bind_output` only refreshes `output_id` when
+        // `matches(output)` is already true (reclaim semantic of
+        // `Workspace::bind_output`'s guard). The sentinel matches no real
+        // output, so it survives `add_output`'s lift loop. `Monitor::new`
+        // then pulls every disconnected workspace into the seed-active
+        // activity's view at first-monitor-attach regardless of each
+        // workspace's own `activities` tagging. On reload-drop-active, the
+        // cascade target's `ensure_active_views` cannot reclaim such an
+        // orphan (its `output_id` is the sentinel, not the real output), so
+        // without this rebind the orphan loses its only anchoring view.
+        //
+        // We rebind here rather than fixing the sentinel at its source: that
+        // upstream fix touches `bind_output`'s reclaim semantic and
+        // `Monitor::new`'s lift-loop activity-tagging filter — both parked.
+        // Cascade-time rebind is the lowest-ripple choice.
+        let cascade_target_id = self.activities.active_id();
+
+        // Pass 1: collect (ws_id, out_id) pairs that are anchored by at
+        // least one surviving activity's view. Snapshot before the orphan
+        // walk to avoid concurrent-borrow issues.
+        let surviving_anchored: HashSet<(WorkspaceId, OutputId)> = self
+            .activities
+            .iter()
+            .filter(|a| !remove_set.contains(&a.id()))
+            .flat_map(|a| {
+                a.views().iter().flat_map(|(out_id, view)| {
+                    view.ids().iter().map(move |ws_id| (*ws_id, out_id.clone()))
+                })
+            })
+            .collect();
+
+        // Pass 2: enumerate workspaces in to-be-removed views that are not
+        // in the surviving-anchored snapshot.
+        let mut orphans: Vec<(WorkspaceId, OutputId)> = Vec::new();
+        for activity in self.activities.iter() {
+            if !remove_set.contains(&activity.id()) {
+                continue;
+            }
+            for (out_id, view) in activity.views() {
+                for ws_id in view.ids() {
+                    if !surviving_anchored.contains(&(*ws_id, out_id.clone())) {
+                        orphans.push((*ws_id, out_id.clone()));
+                    }
+                }
+            }
+        }
+
+        // A single workspace can appear in multiple to-be-removed activities'
+        // views; insert once per (ws_id, out_id) pair.
+        let mut seen: HashSet<(WorkspaceId, OutputId)> = HashSet::new();
+        for (ws_id, out_id) in orphans {
+            if !seen.insert((ws_id, out_id.clone())) {
+                continue;
+            }
+
+            // Refresh the sentinel `OutputId("")` if present: bind the orphan
+            // to the real output it now lives on so future
+            // `ensure_active_views` filters can recognise it. Gated strictly
+            // on the empty-string sentinel — preserves the documented
+            // `bind_output` reclaim semantic for any other shape.
+            {
+                let ws = self
+                    .workspaces
+                    .get_mut(&ws_id)
+                    .expect("orphan id was sourced from a live view above");
+                if ws
+                    .output_id
+                    .as_ref()
+                    .is_none_or(|oid| oid.as_str().is_empty())
+                {
+                    debug_assert!(
+                        !out_id.as_str().is_empty(),
+                        "rebind must produce a real OutputId, not the sentinel",
+                    );
+                    ws.output_id = Some(out_id.clone());
+                }
+            }
+
+            let cascade_target_act = self
+                .activities
+                .get_mut(cascade_target_id)
+                .expect("cascade target id was set as active by Step 6");
+            let view = cascade_target_act
+                .views_mut()
+                .get_mut(&out_id)
+                .unwrap_or_else(|| {
+                    unreachable!(
+                        "cascade target's view on {out_id:?} must exist post-ensure_active_views",
+                    )
+                });
+            debug_assert!(
+                view.position_of(ws_id).is_none(),
+                "orphan must not already be in cascade target's view \
+                 (surviving_anchored would have caught it)",
+            );
+            debug_assert!(
+                view.len() > 0,
+                "ensure_active_views guarantees view non-empty",
+            );
+            // When the cascade target's view was a fresh-branch singleton (len == 1
+            // means only the trailing-empty bookend, per Monitor::verify_invariants
+            // "1 or 3+ length" rule), the user was about to land on a blank
+            // workspace because `ensure_view_for` couldn't lift the orphan
+            // (sentinel output_id). Now that the orphan is rebound into this view,
+            // shift the active cursor onto it so the user lands on the orphan that
+            // was active under the removed activity.
+            let was_fresh_singleton = view.len() == 1;
+            // Insert before the trailing-empty bookend so Monitor invariant
+            // "last must be empty/unnamed" is preserved.
+            let insert_pos = view.len() - 1;
+            view.insert(insert_pos, ws_id);
+            if was_fresh_singleton {
+                view.set_active_at(insert_pos);
+            }
+        }
+
         // Step 7: per target in the remove-set, destroy exclusive workspaces
         // (named and unnamed) and prune shared memberships.
         //

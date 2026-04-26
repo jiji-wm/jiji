@@ -135,6 +135,16 @@ impl OutputId {
         let output_name = output.user_data().get::<OutputName>().unwrap();
         output_name.matches(&self.0)
     }
+
+    /// Borrow the inner identifier string.
+    ///
+    /// Provided so callers in this module's parent (e.g. the orphan-rebind
+    /// path in `Layout::reconcile_activities_on_reload_remove`) can detect
+    /// the empty-string sentinel produced by `new_with_config_no_outputs`
+    /// without re-exporting the private tuple field.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 static WORKSPACE_ID_COUNTER: IdCounter = IdCounter::new();

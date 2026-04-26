@@ -180,6 +180,14 @@ impl Fixture {
             .drain_test_events()
     }
 
+    /// Drive `State::reload_config(Ok(config))` end-to-end: validate phase of
+    /// `reconcile_activities_on_reload_remove`, the unname-prewalk, and
+    /// `reconcile_activities_on_reload_add`. Mirrors how the niri loop
+    /// dispatches a reload after a config-file change.
+    pub fn reload_config(&mut self, config: Config) {
+        self.niri_state().reload_config(Ok(config));
+    }
+
     /// Snapshot the server's current event-stream state as a replay burst
     /// (the same sequence a freshly-connected client would receive before
     /// any flow deltas). Forwards to `IpcServer::replicate_event_stream_state`.

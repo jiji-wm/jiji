@@ -11661,6 +11661,514 @@ fn reconcile_remove_cascades_active_cursor_to_first_when_previous_also_in_remove
 }
 
 #[test]
+fn reconcile_remove_rebinds_orphan_workspace_into_cascade_target_view() {
+    // Setup: seed `Default` (pool starts with it), promote via reload-add to
+    // config-declared `[Default, alpha, beta]`. Switch active to alpha so
+    // `active = alpha`, `previous = Default`. Mint a sentinel workspace via
+    // `Workspace::new_no_outputs` (carries `OutputId("")`), tag it as
+    // exclusively beta's, and splice it into alpha's view of monitor 1 just
+    // before the trailing-empty bookend — mirroring what `Monitor::new`'s
+    // lift loop does on first-monitor-attach when an orphan sits in
+    // `disconnected_workspace_ids`.
+    //
+    // Reload drops `Default` and `alpha`, keeps `beta`. Both `active=alpha`
+    // and `previous=Default` are in remove_set, so Step 6's cascade falls
+    // through `previous.filter(...)` → None and lands on the first
+    // declaration-order non-remove-set survivor (`beta`). Without Step 6.5
+    // the orphan's only anchoring view (alpha's view of mon_out) evaporates
+    // with `self.activities.remove(alpha)`, breaking pool-keys-equal-union.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let cfg_init = [
+        niri_config::ActivityDecl {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+        niri_config::ActivityDecl {
+            name: niri_config::ActivityName("alpha".to_owned()),
+        },
+        niri_config::ActivityDecl {
+            name: niri_config::ActivityName("beta".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let default_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Default")
+        .expect("Default in pool")
+        .id();
+    let alpha_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "alpha")
+        .expect("alpha in pool")
+        .id();
+    let beta_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "beta")
+        .expect("beta in pool")
+        .id();
+
+    layout.switch_activity(alpha_id);
+    assert_eq!(layout.active_activity_id(), alpha_id);
+    assert_eq!(layout.activities.previous_id(), Some(default_id));
+
+    let mon_out = layout.monitors[0].output_id();
+
+    // Mint the orphan with the empty-string sentinel. Named so the Monitor
+    // invariant "non-active non-last workspaces must be empty-and-unnamed"
+    // does not fire: an unnamed empty workspace at a non-last position would
+    // violate it. This matches the production scenario the surface-C panic
+    // reproduces from — a config-named workspace tagged to a non-active
+    // activity, lifted by `Monitor::new` into the seed-active activity's
+    // view at first-monitor-attach.
+    let orphan_cfg = niri_config::Workspace {
+        name: niri_config::workspace::WorkspaceName("ws_b".to_owned()),
+        open_on_output: None,
+        layout: None,
+        activities: vec!["beta".to_owned()],
+        sticky: None,
+    };
+    let orphan = Workspace::<TestWindow>::new_with_config_no_outputs(
+        Some(orphan_cfg),
+        HashSet::from([beta_id]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let orphan_id = orphan.id();
+    assert_eq!(
+        orphan.output_id().map(|oid| oid.as_str()),
+        Some(""),
+        "precondition: new_with_config_no_outputs seeds the empty-string sentinel",
+    );
+    assert!(
+        layout.workspaces.insert(orphan_id, orphan).is_none(),
+        "fresh id is unique",
+    );
+
+    // Splice the orphan into alpha's view of mon_out at position
+    // `len() - 1` (just before the trailing-empty bookend).
+    let alpha_view = layout
+        .activities
+        .get_mut(alpha_id)
+        .expect("alpha live")
+        .views_mut()
+        .get_mut(&mon_out)
+        .expect("alpha holds a view on mon_out post-add_output");
+    let insert_pos = alpha_view.len() - 1;
+    alpha_view.insert(insert_pos, orphan_id);
+
+    layout.verify_invariants();
+
+    // Reload: keep only beta — drops Default and alpha. Both active and
+    // previous are in remove_set, so the cascade falls through to the
+    // first-declaration-order non-remove-set survivor (beta).
+    let cfg_reload = [niri_config::ActivityDecl {
+        name: niri_config::ActivityName("beta".to_owned()),
+    }];
+    layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect("cascade to beta with orphan rebind must succeed");
+
+    // (a) Cascade target is beta.
+    assert_eq!(
+        layout.active_activity_id(),
+        beta_id,
+        "cascade-target arm: previous (Default) was itself in remove_set, so cascade falls \
+         through `previous.filter(...)` → first declaration-order non-remove-set survivor (beta)",
+    );
+
+    // (b) Orphan in beta's view of mon_out at position `len() - 1`.
+    let beta_view = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta's view on mon_out must exist post-cascade");
+    let orphan_pos = beta_view
+        .position_of(orphan_id)
+        .expect("orphan must be in beta's view post-rebind");
+    assert!(
+        beta_view.len() >= 2,
+        "post-rebind view must have ≥ 2 ids (orphan + trailing bookend)",
+    );
+    assert_eq!(
+        orphan_pos,
+        beta_view.len() - 2,
+        "rebind inserts immediately before the trailing-empty bookend",
+    );
+
+    // (b2) Active-cursor patch landed: beta's view on mon_out had `len == 1`
+    // pre-insert (only the trailing-empty bookend, since beta was a fresh
+    // branch whose `ensure_active_views` synthesized a singleton view), so the
+    // cascade promotes the rebound orphan to the active cursor — the user
+    // lands on the orphan that was active under the removed activity, not on
+    // the empty bookend.
+    assert_eq!(
+        beta_view.active(),
+        orphan_id,
+        "fresh-branch singleton path must shift active cursor onto the rebound orphan",
+    );
+
+    // (c) Sentinel rebind landed: orphan now carries the real OutputId.
+    let orphan_oid = layout
+        .workspaces
+        .get(&orphan_id)
+        .expect("orphan still in pool")
+        .output_id()
+        .cloned()
+        .expect("orphan output_id must be Some");
+    assert_eq!(
+        orphan_oid, mon_out,
+        "sentinel `OutputId(\"\")` must be rewritten to the real output id",
+    );
+
+    // (d) Pool still contains the orphan.
+    assert!(
+        layout.workspaces.contains_key(&orphan_id),
+        "orphan must survive in the pool — it is not exclusive to alpha",
+    );
+
+    // (e) Cross-field invariants intact.
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_remove_predicate_skips_workspace_already_anchored_by_surviving_view() {
+    // Pins the Pass-2 predicate's correct skip behaviour. The orphan is
+    // pre-spliced into beta's view of mon_out before reconcile fires.
+    //
+    // Under the view-membership predicate, a workspace already present in a
+    // surviving activity's view on the same output is part of
+    // `surviving_anchored` and is therefore never emitted by Pass 2. The
+    // rebind path is bypassed at the predicate, not at a downstream guard —
+    // `reconcile_remove_activities`'s Step 6.5 body never executes for this
+    // orphan, so beta's view structure is unchanged after reconcile.
+    //
+    // `occurrences == 1` holds because Pass 2 did not emit the orphan (not
+    // because a rebind happened then was deduped). The discriminating
+    // `view.len() == beta_len_before` assertion pins the latter: if the rebind
+    // body had run, it would have grown the view.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let cfg_init = [
+        niri_config::ActivityDecl {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+        niri_config::ActivityDecl {
+            name: niri_config::ActivityName("alpha".to_owned()),
+        },
+        niri_config::ActivityDecl {
+            name: niri_config::ActivityName("beta".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let alpha_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "alpha")
+        .expect("alpha in pool")
+        .id();
+    let beta_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "beta")
+        .expect("beta in pool")
+        .id();
+    // Switch beta active first so `ensure_active_views` materializes a
+    // well-formed view (trailing empty bookend) for beta on mon_out, then
+    // switch to alpha for the test's pre-reload state. Required because we
+    // need to splice the orphan into beta's view as a non-last entry, which
+    // would violate the Monitor invariant if beta's view were a bare
+    // singleton.
+    layout.switch_activity(beta_id);
+    layout.switch_activity(alpha_id);
+
+    let mon_out = layout.monitors[0].output_id();
+
+    // Named for the same Monitor-invariant reason as the rebind test.
+    let orphan_cfg = niri_config::Workspace {
+        name: niri_config::workspace::WorkspaceName("ws_b".to_owned()),
+        open_on_output: None,
+        layout: None,
+        activities: vec!["beta".to_owned()],
+        sticky: None,
+    };
+    let orphan = Workspace::<TestWindow>::new_with_config_no_outputs(
+        Some(orphan_cfg),
+        HashSet::from([beta_id]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let orphan_id = orphan.id();
+    assert!(
+        layout.workspaces.insert(orphan_id, orphan).is_none(),
+        "fresh id is unique",
+    );
+
+    // Splice the orphan into BOTH alpha's view (so it is a genuine orphan when
+    // alpha is removed) and beta's view (so that Pass 2's `surviving_anchored`
+    // set contains it and the orphan is never emitted by Pass 2).
+    {
+        let alpha_view = layout
+            .activities
+            .get_mut(alpha_id)
+            .expect("alpha live")
+            .views_mut()
+            .get_mut(&mon_out)
+            .expect("alpha holds a view on mon_out post-add_output");
+        let insert_pos = alpha_view.len() - 1;
+        alpha_view.insert(insert_pos, orphan_id);
+    }
+    {
+        // Beta already has a view on mon_out (we toggled `switch_activity`
+        // through beta in the setup). Splice the orphan in just before the
+        // trailing-empty bookend — this puts it into `surviving_anchored`
+        // so Pass 2 will not emit it.
+        let v = layout
+            .activities
+            .get_mut(beta_id)
+            .expect("beta live")
+            .views_mut()
+            .get_mut(&mon_out)
+            .expect("beta has a view on mon_out from the setup switch_activity");
+        let pos = v.len() - 1;
+        v.insert(pos, orphan_id);
+    }
+
+    // Capture beta's view state before reconcile. Pre-reconcile beta's view
+    // holds [orphan, bookend] (`len == 2`). Since the orphan is in
+    // `surviving_anchored`, Pass 2 does not emit it; the rebind body never
+    // runs; view length and active cursor remain unchanged post-reconcile.
+    let beta_active_before = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta has a view on mon_out from the setup switch_activity")
+        .active();
+    let beta_len_before = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta has a view on mon_out from the setup switch_activity")
+        .len();
+    assert!(
+        beta_len_before >= 2,
+        "predicate precondition: beta's view must already hold orphan + bookend \
+         so that the orphan is in `surviving_anchored` and Pass 2 skips it",
+    );
+
+    let cfg_reload = [niri_config::ActivityDecl {
+        name: niri_config::ActivityName("beta".to_owned()),
+    }];
+    layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect("reconcile must succeed when orphan is already anchored by surviving view");
+
+    let beta_view = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta's view on mon_out must exist post-cascade");
+    let occurrences = beta_view
+        .ids()
+        .iter()
+        .filter(|id| **id == orphan_id)
+        .count();
+    assert_eq!(
+        occurrences, 1,
+        "orphan was pre-existing in beta's view; Pass 2 did not emit it, so count stays 1",
+    );
+
+    // The rebind body never executed, so the view structure is unchanged: no
+    // insert occurred and the active cursor was not patched.
+    assert_eq!(
+        beta_view.len(),
+        beta_len_before,
+        "Pass 2 did not emit the orphan; rebind body was bypassed — view length unchanged",
+    );
+    assert_eq!(
+        beta_view.active(),
+        beta_active_before,
+        "active-cursor patch must not fire; rebind body was bypassed at the predicate",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_remove_rebinds_orphan_when_workspace_tagged_to_both_removed_and_surviving_activity() {
+    // Mixed-tag case: the orphan workspace carries `activities = {alpha, gamma}`
+    // — alpha is in remove_set, gamma survives. With the old disjoint-set
+    // predicate (`!ws.activities().iter().any(|aid| remove_set.contains(aid))`),
+    // `disjoint` is `false` (alpha ∈ remove_set ∩ ws.activities), so Step 6.5
+    // would skip the orphan. Step 7 then prunes alpha from the workspace's
+    // `activities`, leaving `{gamma}`, but gamma's view of mon_out never
+    // contained it (it was only in alpha's view via the sentinel-output-id
+    // lift path). The pool-keys-equal-union invariant is violated.
+    //
+    // The corrected predicate is view-membership-based: "not anchored by any
+    // surviving activity's view of the same output" — gamma's view of mon_out
+    // does NOT contain the orphan, so it is correctly emitted as an orphan and
+    // rebound into the cascade target's view.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let cfg_init = [
+        niri_config::ActivityDecl {
+            name: niri_config::ActivityName("Default".to_owned()),
+        },
+        niri_config::ActivityDecl {
+            name: niri_config::ActivityName("alpha".to_owned()),
+        },
+        niri_config::ActivityDecl {
+            name: niri_config::ActivityName("gamma".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let alpha_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "alpha")
+        .expect("alpha in pool")
+        .id();
+    let gamma_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "gamma")
+        .expect("gamma in pool")
+        .id();
+
+    // Switch alpha active so alpha is the seed-active activity before reload.
+    layout.switch_activity(alpha_id);
+    assert_eq!(layout.active_activity_id(), alpha_id);
+
+    let mon_out = layout.monitors[0].output_id();
+
+    // Mint orphan tagged to BOTH alpha and gamma — the mixed-tag case.
+    let orphan_cfg = niri_config::Workspace {
+        name: niri_config::workspace::WorkspaceName("ws_shared".to_owned()),
+        open_on_output: None,
+        layout: None,
+        activities: vec!["alpha".to_owned(), "gamma".to_owned()],
+        sticky: None,
+    };
+    let orphan = Workspace::<TestWindow>::new_with_config_no_outputs(
+        Some(orphan_cfg),
+        HashSet::from([alpha_id, gamma_id]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let orphan_id = orphan.id();
+    assert_eq!(
+        orphan.output_id().map(|oid| oid.as_str()),
+        Some(""),
+        "precondition: new_with_config_no_outputs seeds the empty-string sentinel",
+    );
+    assert!(
+        layout.workspaces.insert(orphan_id, orphan).is_none(),
+        "fresh id is unique",
+    );
+
+    // Splice the orphan into alpha's view of mon_out (the sentinel-lift path),
+    // but NOT into gamma's view. This is the precondition that exposes the bug:
+    // gamma is a surviving activity but its view on mon_out does not contain
+    // the orphan, so the orphan is unanchored after Step 7.
+    {
+        let alpha_view = layout
+            .activities
+            .get_mut(alpha_id)
+            .expect("alpha live")
+            .views_mut()
+            .get_mut(&mon_out)
+            .expect("alpha holds a view on mon_out post-add_output");
+        let insert_pos = alpha_view.len() - 1;
+        alpha_view.insert(insert_pos, orphan_id);
+    }
+
+    layout.verify_invariants();
+
+    // Reload: keep only gamma — drops Default and alpha.
+    // Cascade target: alpha was active, previous = Default (in remove_set) →
+    // falls through to first-declaration-order non-remove-set survivor (gamma).
+    let cfg_reload = [niri_config::ActivityDecl {
+        name: niri_config::ActivityName("gamma".to_owned()),
+    }];
+    layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect("mixed-tag orphan rebind must succeed");
+
+    // (a) Cascade target is gamma.
+    assert_eq!(
+        layout.active_activity_id(),
+        gamma_id,
+        "cascade-target arm: previous_id == Some(Default) but Default ∈ remove_set, \
+         so cascade falls through `previous.filter(...)` → first declaration-order \
+         non-remove-set survivor (gamma)",
+    );
+
+    // (b) Orphan is now in gamma's view of mon_out.
+    let gamma_view = layout
+        .activities
+        .get(gamma_id)
+        .expect("gamma live")
+        .views()
+        .get(&mon_out)
+        .expect("gamma's view on mon_out must exist post-cascade");
+    let orphan_pos = gamma_view
+        .position_of(orphan_id)
+        .expect("orphan must be in gamma's view post-rebind (mixed-tag case)");
+    assert!(
+        gamma_view.len() >= 2,
+        "post-rebind view must have ≥ 2 ids (orphan + trailing bookend)",
+    );
+    assert_eq!(
+        orphan_pos,
+        gamma_view.len() - 2,
+        "rebind inserts immediately before the trailing-empty bookend",
+    );
+
+    // (b2) gamma's view was a fresh-branch singleton (len == 1) before the
+    // insert, so the active-cursor patch must fire — the user lands on the
+    // orphan, not on the empty bookend.
+    assert_eq!(
+        gamma_view.active(),
+        orphan_id,
+        "fresh-branch singleton path must shift active cursor onto the rebound orphan",
+    );
+
+    // (c) Orphan still in pool; sentinel rewritten.
+    assert!(
+        layout.workspaces.contains_key(&orphan_id),
+        "orphan must survive in the pool — it is not exclusive to alpha",
+    );
+    let orphan_oid = layout
+        .workspaces
+        .get(&orphan_id)
+        .expect("orphan still in pool")
+        .output_id()
+        .cloned()
+        .expect("orphan output_id must be Some");
+    assert_eq!(
+        orphan_oid, mon_out,
+        "sentinel `OutputId(\"\")` must be rewritten to the real output id",
+    );
+
+    // (d) Cross-field invariants intact.
+    layout.verify_invariants();
+}
+
+#[test]
 fn reconcile_remove_rejects_on_hard_block_when_cascade_required() {
     // Active in remove_set, plus an in-flight interactive_move: cascade is
     // required but is_activity_switch_hard_blocked returns Some(_). Expected:

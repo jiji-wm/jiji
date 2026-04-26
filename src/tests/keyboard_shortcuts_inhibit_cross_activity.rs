@@ -16,8 +16,6 @@
 //! - `Action::FocusWindow` auto-switch (input/mod.rs:990–992): testing this hook requires
 //!   synthesising a focus event that also triggers an activity switch, which needs cross-activity
 //!   window placement not yet available in this sub-phase's fixture vocabulary. Deferred.
-//! - `State::reload_config` (niri.rs:1492–1500): the fixture setup required (a config change that
-//!   triggers an activity cascade) is non-trivial. Deferred.
 
 use niri_config::{Action, ActivityReference};
 use smithay::reexports::wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1;
