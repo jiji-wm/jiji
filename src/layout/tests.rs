@@ -11672,11 +11672,11 @@ fn reconcile_remove_rebinds_orphan_workspace_into_cascade_target_view() {
     // `disconnected_workspace_ids`.
     //
     // Reload drops `Default` and `alpha`, keeps `beta`. Both `active=alpha`
-    // and `previous=Default` are in remove_set, so Step 6's cascade falls
-    // through `previous.filter(...)` → None and lands on the first
-    // declaration-order non-remove-set survivor (`beta`). Without Step 6.5
-    // the orphan's only anchoring view (alpha's view of mon_out) evaporates
-    // with `self.activities.remove(alpha)`, breaking pool-keys-equal-union.
+    // and `previous=Default` are in remove_set, so the cascade falls through
+    // `previous.filter(...)` → None and lands on the first declaration-order
+    // non-remove-set survivor (`beta`). Without the orphan-rebind pass, the
+    // orphan's only anchoring view (alpha's view of mon_out) evaporates with
+    // `self.activities.remove(alpha)`, breaking pool-keys-equal-union.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
 
@@ -11845,8 +11845,8 @@ fn reconcile_remove_predicate_skips_workspace_already_anchored_by_surviving_view
     // surviving activity's view on the same output is part of
     // `surviving_anchored` and is therefore never emitted by Pass 2. The
     // rebind path is bypassed at the predicate, not at a downstream guard —
-    // `reconcile_remove_activities`'s Step 6.5 body never executes for this
-    // orphan, so beta's view structure is unchanged after reconcile.
+    // the orphan-rebind body never executes for this orphan, so beta's view
+    // structure is unchanged after reconcile.
     //
     // `occurrences == 1` holds because Pass 2 did not emit the orphan (not
     // because a rebind happened then was deduped). The discriminating
@@ -12011,9 +12011,9 @@ fn reconcile_remove_rebinds_orphan_when_workspace_tagged_to_both_removed_and_sur
     // Mixed-tag case: the orphan workspace carries `activities = {alpha, gamma}`
     // — alpha is in remove_set, gamma survives. With the old disjoint-set
     // predicate (`!ws.activities().iter().any(|aid| remove_set.contains(aid))`),
-    // `disjoint` is `false` (alpha ∈ remove_set ∩ ws.activities), so Step 6.5
-    // would skip the orphan. Step 7 then prunes alpha from the workspace's
-    // `activities`, leaving `{gamma}`, but gamma's view of mon_out never
+    // `disjoint` is `false` (alpha ∈ remove_set ∩ ws.activities), so the old
+    // predicate would skip the orphan. The remove pass then prunes alpha from
+    // the workspace's `activities`, leaving `{gamma}`, but gamma's view of mon_out never
     // contained it (it was only in alpha's view via the sentinel-output-id
     // lift path). The pool-keys-equal-union invariant is violated.
     //
@@ -12083,7 +12083,7 @@ fn reconcile_remove_rebinds_orphan_when_workspace_tagged_to_both_removed_and_sur
     // Splice the orphan into alpha's view of mon_out (the sentinel-lift path),
     // but NOT into gamma's view. This is the precondition that exposes the bug:
     // gamma is a surviving activity but its view on mon_out does not contain
-    // the orphan, so the orphan is unanchored after Step 7.
+    // the orphan, so the orphan is unanchored after the remove pass.
     {
         let alpha_view = layout
             .activities

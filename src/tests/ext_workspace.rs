@@ -144,8 +144,7 @@ fn refresh_narrows_on_activity_switch() {
     // with a fresh trailing-empty instead. This asymmetry between Monitor::new
     // (unfiltered parked-id load at Layout::add_output, mod.rs:858-890) and
     // ensure_active_views (output_id-filtered) is orthogonal to the projection
-    // contract — this asymmetry will be captured in Appendix C
-    // "OutputId(\"\") reclaim gap".
+    // contract — this asymmetry is not yet addressed.
     assert!(
         !s1.contains(&ws_a_id),
         "post-switch snapshot must not contain ws_a (alpha's view is dormant)",

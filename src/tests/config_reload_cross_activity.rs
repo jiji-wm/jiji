@@ -4,9 +4,9 @@
 //!
 //! Two load-bearing properties this test pins:
 //!
-//! 1. **The orphan-rebind production path** (`Layout::reconcile_activities_on_reload_remove` Step
-//!    6.5). Without Step 6.5, `Workspace::new_with_config_no_outputs` seeds named config workspaces
-//!    with the empty-string `OutputId` sentinel, `Monitor::new`'s lift loop pulls every
+//! 1. **The orphan-rebind production path** (`Layout::reconcile_activities_on_reload_remove`
+//!    orphan-rebind leg). Without it, `Workspace::new_with_config_no_outputs` seeds named config
+//!    workspaces with the empty-string `OutputId` sentinel, `Monitor::new`'s lift loop pulls every
 //!    disconnected workspace into the seed-active activity's view at first-monitor-attach
 //!    regardless of `activities` tagging, and the cascade target's `ensure_active_views` cannot
 //!    reclaim such an orphan (sentinel ≠ real output id). On reload-drop-active the orphan's only
@@ -18,8 +18,8 @@
 //!
 //! 2. **The cascade-target arm exercised**: `previous_id == None` → first-declaration-order
 //!    non-remove-set survivor (= beta), per the cascade-target resolution in
-//!    `Layout::reconcile_activities_on_reload_remove` Step 6. The reload comes from the seed-active
-//!    state with no prior `switch_activity`, so `previous_id` is `None`. This pins the `or_else(||
+//!    `Layout::reconcile_activities_on_reload_remove`. The reload comes from the seed-active state
+//!    with no prior `switch_activity`, so `previous_id` is `None`. This pins the `or_else(||
 //!    ...find...)` branch, distinct from the `previous.filter(...)` branch covered by the
 //!    layout-suite cluster.
 
@@ -117,7 +117,7 @@ fn reload_config_removing_active_activity_cascades_and_recreates_names() {
         "cascade target arm: previous_id == None → first-declaration-order survivor (beta)",
     );
 
-    // (b) Pool reflects §5.15: ws_a gone from workspaces pool; ws_b survives;
+    // (b) Pool: ws_a gone from workspaces pool; ws_b survives;
     // alpha gone from activities pool; beta present + still config-declared;
     // no surviving activity's view contains ws_a_id.
     assert!(

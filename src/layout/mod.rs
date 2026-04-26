@@ -2136,9 +2136,9 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Step 1 (shared): find the matching workspace id and remember its
-        // bound output id, if any. `OutputId` is owned/cheap; copying it
-        // here lets the shared borrow of the pool drop before step 2.
+        // Find the matching workspace id and remember its bound output id, if
+        // any. `OutputId` is owned/cheap; copying it here lets the shared
+        // borrow of the pool drop before the next section.
         let matching: Option<(WorkspaceId, Option<OutputId>)> = self
             .workspaces
             .iter()
@@ -2146,11 +2146,11 @@ impl<W: LayoutElement> Layout<W> {
             .map(|(id, ws)| (*id, ws.output_id().cloned()));
 
         let (id, output_id) = matching?;
-        // Step 2 (exclusive + disjoint shared): `self.monitors` and
-        // `self.workspaces` are disjoint fields, so the borrow checker
-        // permits a shared borrow of one concurrent with a mutable borrow
-        // of the other — provided we reach each through the field directly
-        // (not via `self.monitor_for_output_id(...)` which takes `&self`).
+        // `self.monitors` and `self.workspaces` are disjoint fields, so the
+        // borrow checker permits a shared borrow of one concurrent with a
+        // mutable borrow of the other — provided we reach each through the
+        // field directly (not via `self.monitor_for_output_id(...)` which
+        // takes `&self`).
         let output: Option<&Output> = output_id.as_ref().and_then(|oid| {
             self.monitors
                 .iter()
@@ -3880,8 +3880,7 @@ impl<W: LayoutElement> Layout<W> {
     /// `None` or `Some(OutputId(""))` — the disconnected / unbound-config
     /// sentinels) or if no workspace matches. The empty-`OutputId` sentinel
     /// is never the id of a real connected monitor, so the
-    /// `monitor_for_output_id` filter naturally rejects it (Appendix C entry
-    /// 1 risk neutralized).
+    /// `monitor_for_output_id` filter naturally rejects it.
     ///
     /// Used by `xdg_shell::send_initial_configure` to scope the
     /// `open-on-workspace`-derived monitor lookup against an
@@ -5345,7 +5344,6 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Step 1: mutate `ws.activities`.
         {
             let ws = self
                 .workspaces
@@ -5354,11 +5352,10 @@ impl<W: LayoutElement> Layout<W> {
             ws.activities.remove(&activity_id);
         }
 
-        // Step 2: patch the activity's view for the workspace's output (if
-        // the output is known and the activity has a view there). Track
-        // whether we dropped the last entry of the *active* activity's view
-        // on a connected monitor so the cross-field invariant can be
-        // reinstated below.
+        // Patch the activity's view for the workspace's output (if the output
+        // is known and the activity has a view there). Track whether we dropped
+        // the last entry of the *active* activity's view on a connected monitor
+        // so the cross-field invariant can be reinstated below.
         let mut dropped_active_view_entry = false;
         if let Some(out_id) = out_id.as_ref() {
             let is_active_activity = activity_id == self.activities.active_id();
@@ -5384,10 +5381,10 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Step 3: reinstate the active activity's view for the connected
-        // monitor we just emptied. `ensure_active_views` takes `&mut self`,
-        // so every nested borrow above must already be released (they are —
-        // the scope above ended).
+        // Reinstate the active activity's view for the connected monitor we
+        // just emptied. `ensure_active_views` takes `&mut self`, so every
+        // nested borrow above must already be released (they are — the scope
+        // above ended).
         if dropped_active_view_entry {
             self.ensure_active_views();
         }
@@ -5451,11 +5448,10 @@ impl<W: LayoutElement> Layout<W> {
         workspace: Option<WorkspaceReference>,
         activity_refs: &[ActivityReferenceArg],
     ) -> Result<(WorkspaceId, HashSet<ActivityId>, bool), SetWorkspaceActivitiesError> {
-        // Step 1: resolve every activity ref. First unresolvable ref →
-        // ActivityNotFound (precedence over EmptyActivityList — matches the
-        // `resolve_activity_ref` precedence of `Add` / `Remove` so a
-        // `[unresolvable_id]` of length 1 yields `ActivityNotFound`, not
-        // `EmptyActivityList`).
+        // Resolve every activity ref. First unresolvable ref → ActivityNotFound
+        // (precedence over EmptyActivityList — matches the `resolve_activity_ref`
+        // precedence of `Add` / `Remove` so a `[unresolvable_id]` of length 1
+        // yields `ActivityNotFound`, not `EmptyActivityList`).
         let mut new_set: HashSet<ActivityId> = HashSet::with_capacity(activity_refs.len());
         for r in activity_refs {
             let id = self
@@ -5464,19 +5460,18 @@ impl<W: LayoutElement> Layout<W> {
             new_set.insert(id);
         }
 
-        // Step 2: non-empty invariant gate.
         if new_set.is_empty() {
             return Err(SetWorkspaceActivitiesError::EmptyActivityList);
         }
 
-        // Step 3: resolve the workspace. On miss → WorkspaceNotFound (wire-surfaced).
+        // Resolve the workspace. On miss → WorkspaceNotFound (wire-surfaced).
         let ws_id = match workspace {
             Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
             None => self.active_workspace_mut().map(|ws| ws.id()),
         }
         .ok_or(SetWorkspaceActivitiesError::WorkspaceNotFound)?;
 
-        // Step 4: read-only inspection — snapshot old set + output binding.
+        // Snapshot old set + output binding before any mutation.
         let (old_set, out_id) = {
             let ws = self
                 .workspaces
@@ -5485,7 +5480,6 @@ impl<W: LayoutElement> Layout<W> {
             (ws.activities().clone(), ws.output_id().cloned())
         };
 
-        // Step 5: compute symmetric diff.
         let to_remove: Vec<ActivityId> = old_set.difference(&new_set).copied().collect();
         let to_add: Vec<ActivityId> = new_set.difference(&old_set).copied().collect();
         let active_id = self.activities.active_id();
@@ -5497,10 +5491,9 @@ impl<W: LayoutElement> Layout<W> {
             return Ok((ws_id, new_set, active_activity_affected));
         }
 
-        // Step 6: snap any in-flight animation on every monitor if the
-        // active activity is in the diff — the animation's fractional
-        // targets refer to the active activity's view, which may change
-        // length ( snap+proceed).
+        // Snap any in-flight animation on every monitor if the active activity
+        // is in the diff — the animation's fractional targets refer to the
+        // active activity's view, which may change length (snap+proceed).
         if active_activity_affected {
             for mon in &mut self.monitors {
                 if matches!(mon.workspace_switch, Some(WorkspaceSwitch::Animation(_))) {
@@ -5509,7 +5502,6 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Step 7: mutate ws.activities = new_set.
         {
             let ws = self
                 .workspaces
@@ -5518,10 +5510,10 @@ impl<W: LayoutElement> Layout<W> {
             ws.activities = new_set.clone();
         }
 
-        // Step 8 + 9: patch each affected activity's view for the
-        // workspace's bound output. Track whether we dropped the last
-        // entry of the *active* activity's view on a connected monitor so
-        // the cross-field invariant can be reinstated below.
+        // Patch each affected activity's view for the workspace's bound
+        // output. Track whether we dropped the last entry of the *active*
+        // activity's view on a connected monitor so the cross-field invariant
+        // can be reinstated below.
         let mut dropped_active_view_entry = false;
         if let Some(out_id) = out_id.as_ref() {
             let is_connected = self.monitors.iter().any(|m| &m.output_id() == out_id);
@@ -5568,9 +5560,8 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Step 10: reinstate active activity's view for the connected
-        // monitor we just emptied. Matches the `remove_workspace_from_activity`
-        // recipe.
+        // Reinstate active activity's view for the connected monitor we just
+        // emptied — mirrors the `remove_workspace_from_activity` recipe.
         if dropped_active_view_entry {
             self.ensure_active_views();
         }
@@ -5638,20 +5629,18 @@ impl<W: LayoutElement> Layout<W> {
         workspace: Option<WorkspaceReference>,
         activity_ref: &ActivityReferenceArg,
     ) -> Result<(WorkspaceId, ActivityId, ActivityId), MoveWorkspaceToActivityError> {
-        // Step 1: resolve target activity.
         let target_id = self
             .resolve_activity_ref(activity_ref)
             .ok_or(MoveWorkspaceToActivityError::ActivityNotFound)?;
 
-        // Step 2: resolve workspace id.
         let ws_id = match workspace {
             Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
             None => self.active_workspace_mut().map(|ws| ws.id()),
         }
         .ok_or(MoveWorkspaceToActivityError::WorkspaceNotFound)?;
 
-        // Step 3: membership check — Move requires the workspace to be a
-        // member of the currently-active activity.
+        // Move requires the workspace to be a member of the currently-active
+        // activity.
         let source_id = self.activities.active_id();
         {
             let ws = self
@@ -5731,21 +5720,20 @@ impl<W: LayoutElement> Layout<W> {
         &mut self,
         workspace: Option<WorkspaceReference>,
     ) -> Result<(WorkspaceId, bool), SetWorkspaceStickyError> {
-        // Step 1: resolve the workspace.
         let ws_id = match workspace {
             Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
             None => self.active_workspace_mut().map(|ws| ws.id()),
         }
         .ok_or(SetWorkspaceStickyError::WorkspaceNotFound)?;
 
-        // Step 2: collect the full live id set up front. Two views needed:
-        // a `HashSet<ActivityId>` for the no-op equality check, and a
-        // `Vec<ActivityReferenceArg>` for the delegate call.
+        // Two views of the full live id set: a `HashSet<ActivityId>` for the
+        // no-op equality check, and a `Vec<ActivityReferenceArg>` for the
+        // delegate call.
         let all_live_ids: HashSet<ActivityId> = self.activities.iter().map(|a| a.id()).collect();
 
-        // Step 3: no-op early-exit on the typical "already sticky + already
-        // expanded" state. Skip the entire delegate / flag-flip path so we
-        // don't churn animation state or rerun verify_invariants chains.
+        // No-op early-exit on the typical "already sticky + already expanded"
+        // state. Skip the entire delegate / flag-flip path so we don't churn
+        // animation state or rerun verify_invariants chains.
         {
             let ws = self
                 .workspaces
@@ -5756,12 +5744,12 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Step 4: delegate to set_workspace_activities. The delegate handles
-        // animation snap, view patching, and ensure_active_views. All three
-        // delegate error classes are statically impossible here:
+        // Delegate to set_workspace_activities. The delegate handles animation
+        // snap, view patching, and ensure_active_views. All three delegate
+        // error classes are statically impossible here:
         //   - ActivityNotFound: ids came from the live pool.
         //   - EmptyActivityList: Activities is non-empty by type.
-        //   - WorkspaceNotFound: ws_id was resolved in step 1.
+        //   - WorkspaceNotFound: ws_id was resolved above.
         let all_ids_arg: Vec<ActivityReferenceArg> = all_live_ids
             .iter()
             .map(|id| ActivityReferenceArg::Id(id.get()))
@@ -5775,7 +5763,7 @@ impl<W: LayoutElement> Layout<W> {
                  (WorkspaceNotFound impossible)",
             );
 
-        // Step 5: flip is_sticky AFTER the delegate so any intermediate
+        // Flip is_sticky AFTER the delegate so any intermediate
         // verify_invariants run sees a coherent intermediate state. The flip
         // alone (with activities already at all_ids) is invariant-preserving.
         self.workspaces
@@ -6861,16 +6849,17 @@ impl<W: LayoutElement> Layout<W> {
     /// 3. **Prune the target from every remaining workspace's `activities` set** where it still
     ///    appears. The set shrinks by one but remains non-empty: exclusives were destroyed in step
     ///    2, so every remaining membership is shared with at least one other activity.
-    /// 4. **Remove the target from the activity pool** via [`Activities::remove`]. Step 1's cascade
-    ///    satisfies the `id != self.active` precondition; step 5's validation guard satisfies the
-    ///    `len() > 1` precondition (evaluated once over the whole remove-set, not per-iteration).
+    /// 4. **Remove the target from the activity pool** via [`Activities::remove`]. The
+    ///    switch_activity call satisfies the `id != self.active` precondition; the would-empty-pool
+    ///    validation guard satisfies the `len() > 1` precondition (evaluated once over the whole
+    ///    remove-set, not per-iteration).
     ///
     /// Call ordering: this method must run BEFORE
-    /// [`Self::reconcile_activities_on_reload_add`] so that additive path's
-    /// step 4 (`resolve_workspace_activities_for` on config workspaces) sees
-    /// a post-remove pool. Any config workspace whose `activity` reference
-    /// was dropped from the new config falls through to the additive path's
-    /// `unknown`-name fallback (`{active_id}`).
+    /// [`Self::reconcile_activities_on_reload_add`] so that the additive path's
+    /// `resolve_workspace_activities_for` on config workspaces sees a post-remove
+    /// pool. Any config workspace whose `activity` reference was dropped from the
+    /// new config falls through to the additive path's `unknown`-name fallback
+    /// (`{active_id}`).
     ///
     /// In debug builds, runs [`Self::verify_invariants`] at the tail so
     /// callers need not re-check.
@@ -6882,10 +6871,10 @@ impl<W: LayoutElement> Layout<W> {
         // class has been ruled out. Mirrors the atomicity contract of
         // `Layout::remove_activity`.
 
-        // Step 1: compute remove_set. Walk `self.activities.iter()` (declaration
-        // order via IndexMap) and keep config-declared activities whose name is
-        // not found in the new config (case-insensitive match, same matcher
-        // `resolve_config_names` uses).
+        // Walk `self.activities.iter()` (declaration order via IndexMap) and
+        // keep config-declared activities whose name is not found in the new
+        // config (case-insensitive match, same matcher `resolve_config_names`
+        // uses).
         let new_names: Vec<&str> = config_activities
             .iter()
             .map(|a| a.name.0.as_str())
@@ -6900,12 +6889,11 @@ impl<W: LayoutElement> Layout<W> {
             .map(|a| a.id())
             .collect();
 
-        // Step 2: no-op fast path.
         if remove_set.is_empty() {
             return Ok(());
         }
 
-        // Step 3: classify every exclusive workspace of a remove-set activity.
+        // Classify every exclusive workspace of a remove-set activity.
         // Non-deterministic HashMap::values() order: collect all offenders then
         // pick the min by WorkspaceId::get() so the user-visible error doesn't
         // flip between runs. Same precedent as
@@ -6943,10 +6931,9 @@ impl<W: LayoutElement> Layout<W> {
             });
         }
 
-        // Step 4: would-empty-pool. Evaluated once over the whole remove-set
-        // (not per-iteration) because step 8 iteration asserts `len() > 1`
-        // against the *starting* pool size minus the iteration prefix; the
-        // cleanest guarantee is that the post-remove-set pool has ≥ 1 entry.
+        // Would-empty-pool check. Evaluated once over the whole remove-set
+        // (not per-iteration) — the cleanest guarantee is that the
+        // post-remove-set pool has ≥ 1 entry.
         debug_assert!(
             remove_set.len() <= self.activities.len(),
             "remove_set ⊆ live activities, so subtraction cannot overflow",
@@ -6957,7 +6944,7 @@ impl<W: LayoutElement> Layout<W> {
             let act_id = *remove_set
                 .iter()
                 .min_by_key(|id| id.get())
-                .expect("remove_set non-empty (step 2 fast-path handles empty)");
+                .expect("remove_set non-empty (empty case returned Ok above)");
             let name = self
                 .activities
                 .get(act_id)
@@ -6969,9 +6956,9 @@ impl<W: LayoutElement> Layout<W> {
             });
         }
 
-        // Step 5: hard-block guard. Only relevant when the active activity is
-        // in the remove-set (step 7 below will cascade); otherwise no
-        // switch_activity call happens, so no hard-block gate is needed.
+        // Hard-block guard. Only relevant when the active activity is in the
+        // remove-set (the cascade below will call switch_activity); otherwise
+        // no switch_activity call happens, so no hard-block gate is needed.
         if remove_set.contains(&self.activities.active_id()) {
             if let Some(block) = self.is_activity_switch_hard_blocked() {
                 let active_id = self.activities.active_id();
@@ -6992,11 +6979,11 @@ impl<W: LayoutElement> Layout<W> {
         // class, so every `.expect()` below names a condition the validator
         // established.
 
-        // Step 6: cascade the active cursor if the active activity is in the
-        // remove-set. Prefer `previous_id()` when it is not itself in the
-        // remove-set; otherwise the first declaration-order id not in the
-        // remove-set. Resolve the cascade target inside a narrow shared-borrow
-        // scope so the subsequent `&mut self` call via switch_activity compiles.
+        // Cascade the active cursor if the active activity is in the remove-set.
+        // Prefer `previous_id()` when it is not itself in the remove-set;
+        // otherwise the first declaration-order id not in the remove-set.
+        // Resolve the cascade target inside a narrow shared-borrow scope so the
+        // subsequent `&mut self` call via switch_activity compiles.
         if remove_set.contains(&self.activities.active_id()) {
             let cascade_target: ActivityId = {
                 let previous = self
@@ -7015,14 +7002,14 @@ impl<W: LayoutElement> Layout<W> {
             self.switch_activity(cascade_target);
         }
 
-        // Step 6.5: rebind orphan workspaces from to-be-removed activities
-        // into the cascade target's view, before Step 7 drops the activities.
+        // Rebind orphan workspaces from to-be-removed activities into the
+        // cascade target's view, before the remove pass drops the activities.
         //
-        // An "orphan" here is a workspace that appears in some to-be-removed
+        // An "orphan" is a workspace that appears in some to-be-removed
         // activity's view of a given output AND is not present in any
         // surviving activity's view of that same output. The membership
-        // pruning in Step 7 leaves it in the pool, but its only anchoring
-        // view evaporates with `self.activities.remove`.
+        // pruning below leaves it in the pool, but its only anchoring view
+        // evaporates with `self.activities.remove`.
         //
         // Note: a workspace tagged with *both* a removed and a surviving
         // activity (e.g. `activities = [alpha, gamma]`) can still be an
@@ -7032,7 +7019,7 @@ impl<W: LayoutElement> Layout<W> {
         // The predicate must be "not anchored by any surviving view on that
         // output", not "workspace.activities disjoint from remove_set" — the
         // latter misses the mixed-tag case and would leave the workspace
-        // unanchored after Step 7 prunes alpha from its memberships.
+        // unanchored after the remove pass prunes the activity memberships.
         //
         // Background on how an orphan reaches us: named config workspaces
         // seeded via `Workspace::new_with_config_no_outputs` carry the
@@ -7050,7 +7037,7 @@ impl<W: LayoutElement> Layout<W> {
         //
         // We rebind here rather than fixing the sentinel at its source: that
         // upstream fix touches `bind_output`'s reclaim semantic and
-        // `Monitor::new`'s lift-loop activity-tagging filter — both parked.
+        // `Monitor::new`'s lift-loop activity-tagging filter — both deferred.
         // Cascade-time rebind is the lowest-ripple choice.
         let cascade_target_id = self.activities.active_id();
 
@@ -7118,7 +7105,7 @@ impl<W: LayoutElement> Layout<W> {
             let cascade_target_act = self
                 .activities
                 .get_mut(cascade_target_id)
-                .expect("cascade target id was set as active by Step 6");
+                .expect("cascade target was just switched to via switch_activity above");
             let view = cascade_target_act
                 .views_mut()
                 .get_mut(&out_id)
@@ -7153,13 +7140,12 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Step 7: per target in the remove-set, destroy exclusive workspaces
-        // (named and unnamed) and prune shared memberships.
+        // Per target in the remove-set, destroy exclusive workspaces (named and
+        // unnamed) and prune shared memberships.
         //
-        // Iterate `self.activities.iter()` in declaration order and filter by
-        // `remove_set.contains()`. A Vec<ActivityId> snapshot is required
-        // because `Activities::remove` shrinks the map each pass, so iterating
-        // the live Activities would skip entries.
+        // A Vec<ActivityId> snapshot is required because `Activities::remove`
+        // shrinks the map each pass, so iterating the live Activities would
+        // skip entries.
         let targets: Vec<ActivityId> = self
             .activities
             .iter()
@@ -7308,8 +7294,8 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Step 1: walk config activities in declaration order, resolve each
-        // against the live pool, promoting on-match or appending on-miss.
+        // Walk config activities in declaration order, resolve each against the
+        // live pool, promoting on-match or appending on-miss.
         // `resolve_config_names` returns at most one match per name because
         // `ActivityNameSet` at parse time guarantees config names are unique.
         let mut config_declared_ids: Vec<ActivityId> = Vec::with_capacity(config_activities.len());
@@ -7336,14 +7322,14 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Step 2: reorder to match config declaration order; runtime-only
-        // activities follow after the prefix in their current relative order.
+        // Reorder to match config declaration order; runtime-only activities
+        // follow after the prefix in their current relative order.
         self.activities
             .reorder_to_match_config(&config_declared_ids);
 
-        // Step 3: sticky re-expansion — snapshot the live id universe before
-        // the mutating walk so the borrow on `self.activities` is released
-        // while we mutate `self.workspaces`.
+        // Sticky re-expansion — snapshot the live id universe before the
+        // mutating walk so the borrow on `self.activities` is released while
+        // we mutate `self.workspaces`.
         let all_ids: HashSet<ActivityId> = self.activities.iter().map(|a| a.id()).collect();
         for ws in self.workspaces.values_mut() {
             if ws.is_sticky() {
@@ -7351,9 +7337,9 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Step 4: reset config-declared workspaces' `activities` sets.
-        // Pre-collect (ws_id, new_set) pairs so the shared borrow of
-        // `self.activities` is released before the mutating second walk.
+        // Reset config-declared workspaces' `activities` sets. Pre-collect
+        // (ws_id, new_set) pairs so the shared borrow of `self.activities` is
+        // released before the mutating second walk.
         let mut resets: Vec<(WorkspaceId, HashSet<ActivityId>)> = Vec::new();
         for ws in self.workspaces.values() {
             if ws.is_sticky() {
@@ -8051,13 +8037,14 @@ impl<W: LayoutElement> Layout<W> {
         // activity's view is already migrated by remove/insert_workspace_onto_monitor above, so
         // skip it here to avoid the `WorkspaceView::insert` duplicate-id panic.
         //
-        // Source side mirrors the `set_workspace_activities` Step 8 precedent (single-entry drop
-        // vs. `remove_at` to preserve `WorkspaceView::active`/`previous`). Target side diverges:
-        // inserts at `len-1` to preserve the trailing-empty bookend that `ensure_view_for`
-        // materialized (`set_workspace_activities` appends at `len` because its Step 10
-        // `ensure_active_views` repairs the bookend afterward). Dormant activities lacking a
-        // target-side view are left absent — `ensure_view_for` materializes lazily on the next
-        // switch.
+        // Source side: single-entry drop vs. `remove_at` to preserve
+        // `WorkspaceView::active`/`previous` — mirrors `set_workspace_activities`.
+        // Target side diverges: inserts at `len-1` to preserve the
+        // trailing-empty bookend that `ensure_view_for` materialized
+        // (`set_workspace_activities` appends at `len` because its trailing
+        // `ensure_active_views` repairs the bookend afterward). Dormant
+        // activities lacking a target-side view are left absent —
+        // `ensure_view_for` materializes lazily on the next switch.
         let source_out_id = self.monitors[current_idx].output_id();
         let target_out_id = self.monitors[target_idx].output_id();
         let active_id = self.activities.active_id();
@@ -8087,8 +8074,8 @@ impl<W: LayoutElement> Layout<W> {
             });
 
             // Source side: drop the workspace from this activity's source-output view if present.
-            // Single-entry view → remove the map entry entirely (mirrors set_workspace_activities
-            // Step 8 precedent); multi-entry view → `remove_at` to preserve the rest.
+            // Single-entry view → remove the map entry entirely (mirrors set_workspace_activities);
+            // multi-entry view → `remove_at` to preserve the rest.
             if let Some(view) = activity.views_mut().get_mut(&source_out_id) {
                 if let Some(pos) = view.position_of(ws_id) {
                     if view.len() == 1 {

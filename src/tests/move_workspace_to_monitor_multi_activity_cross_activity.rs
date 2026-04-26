@@ -40,7 +40,7 @@ fn move_workspace_to_monitor_fans_out_to_dormant_activity_views() {
     // `ws.output_id() == Some(&out1_id)`; with the sentinel intact, ws_shared is
     // not lifted into beta's view of out1 and the warm-up below cannot populate
     // the dormant view that the discriminating assertions need. The sentinel
-    // semantics is captured as a parked item in Appendix C of the activities DD;
+    // sentinel semantics is not yet fully addressed;
     // pinning the connector here gives ws_shared a `bind_output`-matching
     // `OutputId("headless-1")` that gets refreshed to canonical
     // `OutputId("niri headless 1")` on first bind.

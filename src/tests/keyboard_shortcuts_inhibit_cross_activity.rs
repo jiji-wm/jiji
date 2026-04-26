@@ -15,7 +15,7 @@
 //! Two of the five hook sites are not covered here:
 //! - `Action::FocusWindow` auto-switch (input/mod.rs:990–992): testing this hook requires
 //!   synthesising a focus event that also triggers an activity switch, which needs cross-activity
-//!   window placement not yet available in this sub-phase's fixture vocabulary. Deferred.
+//!   window placement not yet available in the test fixture vocabulary. Deferred.
 
 use niri_config::{Action, ActivityReference};
 use smithay::reexports::wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1;

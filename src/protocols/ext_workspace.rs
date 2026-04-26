@@ -507,8 +507,8 @@ impl ExtWorkspaceManagerState {
 
     /// Protocol state flag cache for the given workspace id, or `None` if the
     /// id is not currently tracked. Test-only helper used to assert the
-    /// `Active` bit surfaced via `ext-workspace-handle-v1` (`Urgent` in a
-    /// later sub-phase).
+    /// `Active` bit surfaced via `ext-workspace-handle-v1` (`Urgent` is not
+    /// yet surfaced in this protocol).
     #[cfg(test)]
     pub(crate) fn workspace_state(
         &self,

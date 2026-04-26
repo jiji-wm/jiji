@@ -1310,7 +1310,7 @@ impl State {
             // not the workspace is in any active view AND whether or not it
             // is bound to a real output (config-declared workspaces with no
             // `open-on-output` start with the empty-OutputId sentinel and may
-            // never get rebound — see Appendix C entry 1). On a name miss, or
+            // never get rebound). On a name miss, or
             // when no name is set, fall back to the active workspace in the
             // target activity's view (per point 1 / point 3 fallthrough).
             let by_name = rules
