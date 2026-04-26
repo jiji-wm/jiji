@@ -53,7 +53,7 @@ const EVENT_STREAM_BUFFER_SIZE: usize = 64;
 /// connection an entry belongs to without holding a reference to the
 /// connection's async task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct IpcConnId(u64);
+pub(crate) struct IpcConnId(u64);
 
 static IPC_CONN_ID_COUNTER: IdCounter = IdCounter::new();
 
@@ -63,7 +63,7 @@ impl IpcConnId {
     }
 
     #[cfg(test)]
-    fn specific(id: u64) -> Self {
+    pub(crate) fn specific(id: u64) -> Self {
         Self(id)
     }
 }
@@ -221,6 +221,71 @@ impl IpcServer {
     #[cfg(test)]
     pub(crate) fn replicate_event_stream_state(&self) -> Vec<Event> {
         self.event_stream_state.borrow().replicate()
+    }
+
+    /// Simulate the registry-insert side of a [`Request::Action`] arrival
+    /// that observed a hard-block at dispatch time. Mirrors the contains-key
+    /// admission gate at the live `Request::Action` site (depth-1 per
+    /// connection) and, on admission, allocates a `bounded(1)` channel,
+    /// inserts a [`BlockedWaiter`] keyed by `conn_id`, and returns the
+    /// receive half so the test can later assert the waiter is woken on
+    /// drain.
+    ///
+    /// On admission failure (a waiter already exists for `conn_id`) the
+    /// `Err("request already queued")` literal matches the live error string
+    /// at the IPC dispatch site; do not paraphrase.
+    ///
+    /// Validation skip is intentional. The live site runs synchronously:
+    /// (1) `contains_key` admission gate (`"request already queued"`),
+    /// (2) `validate_action`,
+    /// (3) `bounded(1)` channel allocation,
+    /// (4) schedules a single `insert_idle` task.
+    ///
+    /// That deferred task calls `do_action_inner` and inserts into the
+    /// registry **only** on `Err(`[`DoActionError::ActivitySwitchBlocked`]`)`; `Ok`
+    /// and other `Err` variants send on the channel without ever touching the
+    /// registry.
+    ///
+    /// This helper collapses (1) and the conditional registry insert into one
+    /// synchronous call so the test can assert registry state without standing
+    /// up a real [`calloop::EventLoop`]. None of the actions exercised under
+    /// this contract have a `validate_action` rejection path, so bypassing the
+    /// validator is faithful to production. Do not "fix" this by re-adding the
+    /// validator call.
+    #[cfg(test)]
+    pub(crate) fn test_simulate_blocked_request(
+        &self,
+        conn_id: IpcConnId,
+        action: niri_config::Action,
+    ) -> Result<async_channel::Receiver<Result<(), DoActionError>>, &'static str> {
+        // Mirror the contains-key admission gate at the live
+        // [`niri_ipc::Request::Action`] site. Read borrow dropped before the
+        // bounded channel is allocated so the registry's RefCell is free for
+        // the subsequent insert.
+        if self.blocked_action_waiters.borrow().contains_key(&conn_id) {
+            return Err("request already queued");
+        }
+
+        let (tx, rx) = async_channel::bounded::<Result<(), DoActionError>>(1);
+        let prev = self
+            .blocked_action_waiters
+            .borrow_mut()
+            .insert(conn_id, BlockedWaiter { action, tx });
+        assert!(
+            prev.is_none(),
+            "test_simulate_blocked_request: contains-key gate must keep registry empty for {conn_id:?}",
+        );
+        Ok(rx)
+    }
+
+    /// Read-only test accessor: does the blocked-action registry currently
+    /// hold an entry for `conn_id`? Returns `bool`, not a borrow guard, so
+    /// callers can interleave it freely with mutating fixture calls
+    /// (`refresh_and_flush_clients`, `interactive_move_end`, …) without
+    /// fighting the `RefCell` borrow scope.
+    #[cfg(test)]
+    pub(crate) fn test_blocked_waiters_contains_key(&self, conn_id: IpcConnId) -> bool {
+        self.blocked_action_waiters.borrow().contains_key(&conn_id)
     }
 
     fn send_event(&self, event: Event) {
