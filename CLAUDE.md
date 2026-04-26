@@ -26,7 +26,7 @@ This file covers **fork-specific coding conventions** that are enforced in revie
 ### 2. Comment hygiene — WHY, not WHAT
 
 - Rustdoc describes the contract. Inline comments explain non-obvious decisions. Bare one-liners that restate the code are deleted on sight.
-- **No phase markers in committed source.** `// Phase 0b-2 sub-step 3c` belongs in the DD, not in `mod.rs`. The only exception is a deliberate `// Phase Na:` breadcrumb where the code has a known upcoming reshape; if you add one, mention it in the DD too.
+- **No design-document references in committed source.** No phase markers, sub-phase / sub-step / §X.X / Box N / Appendix X / "DD" / "design.md" — those all belong in the DD, not in source. The pre-commit hook (`.git/hooks/check-no-dd-refs.sh`) rejects them; bypass only for legitimate meta-commits with `git commit --no-verify`.
 
 ### 3. Invariant enforcement
 
@@ -52,9 +52,9 @@ This file covers **fork-specific coding conventions** that are enforced in revie
 
 ## Commit conventions
 
-- Subject form: `<module>: <imperative short summary> (<phase marker>)`. Example: `layout: tracy span + soften block comment around per-refresh verify_invariants (Phase 1a prerequisite follow-up)`.
+- Subject form: `<module>: <imperative short summary>`. Example: `layout: tracy span around per-refresh verify_invariants`.
 - Module prefix is the directory the primary change lives in (`layout`, `tests/layout`, `niri-ipc`, etc.).
-- Phase marker in parentheses at the end for fork-branch refactor commits; strip before upstream PR. Detailed context goes in the DD, not the commit body.
+- **No design-document references in commit messages.** No phase markers (e.g. `Phase 1a`), sub-phase / sub-step / §X.X / Box N / Appendix X / "DD" / "design.md" / "Reviewed: YYYY-MM-DD". Enforced by `.git/hooks/pre-commit` and `.git/hooks/commit-msg`. Bypass with `git commit --no-verify` only for legitimate meta-commits (e.g., scrubbing historical references with filter-repo). Detailed context goes in the DD, not the commit body or source.
 - Post-review fixes typically **squash** into the commit they fix (`git commit --amend`). The exception: a fix that doesn't belong in the reviewed commit's subject — a regression test pinning the refactor, post-main polish, or a surfaced pre-existing bug — lands as a **separate follow-up commit** instead. The fixer decides based on the *"would the reviewed commit's subject still describe all its changes after squash?"* test. The DD `Reviewed: YYYY-MM-DD (<hash1>, <hash2>, ...)` entry cites all commits covered. If amend changes the hash, update the DD's hash reference in the review-scribing commit.
 - Trailers per global `~/CLAUDE.md`. The `<mode>` in `AI-Assisted: <mode> (<model>)` extends to these niri-specific values for fork work:
   - `full-loop` — fork commit that went through `/land-subphase` (architect → implementer → review → fixer).
