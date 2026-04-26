@@ -7906,6 +7906,73 @@ impl<W: LayoutElement> Layout<W> {
             .output_id = Some(OutputId::new(new_output));
         self.insert_workspace_onto_monitor(target_idx, ws_id, target_pos, activate);
 
+        // Cross-activity fan-out: a workspace that belongs to multiple activities must move in
+        // *every* activity's view of the source output to the corresponding view of the target
+        // output — otherwise dormant activities keep a stale entry pointing at the prior output
+        // and the next switch surfaces the workspace under the wrong monitor. The active
+        // activity's view is already migrated by remove/insert_workspace_onto_monitor above, so
+        // skip it here to avoid the `WorkspaceView::insert` duplicate-id panic.
+        //
+        // Source side mirrors the `set_workspace_activities` Step 8 precedent (single-entry drop
+        // vs. `remove_at` to preserve `WorkspaceView::active`/`previous`). Target side diverges:
+        // inserts at `len-1` to preserve the trailing-empty bookend that `ensure_view_for`
+        // materialized (`set_workspace_activities` appends at `len` because its Step 10
+        // `ensure_active_views` repairs the bookend afterward). Dormant activities lacking a
+        // target-side view are left absent — `ensure_view_for` materializes lazily on the next
+        // switch.
+        let source_out_id = self.monitors[current_idx].output_id();
+        let target_out_id = self.monitors[target_idx].output_id();
+        let active_id = self.activities.active_id();
+
+        let act_ids: Vec<ActivityId> = self
+            .workspaces
+            .get(&ws_id)
+            .expect(
+                "ws_id must be a live pool key — pool ownership is invariant across \
+                 remove/insert_workspace_onto_monitor (only the view binding moves)",
+            )
+            .activities()
+            .iter()
+            .copied()
+            .collect();
+
+        for act_id in act_ids {
+            if act_id == active_id {
+                continue;
+            }
+            let activity = self.activities.get_mut(act_id).unwrap_or_else(|| {
+                unreachable!(
+                    "Layout invariant: act_id {act_id:?} from workspace {ws_id:?}.activities \
+                     must be a live key in Layout.activities \
+                     (verify_invariants:6138-6145)"
+                )
+            });
+
+            // Source side: drop the workspace from this activity's source-output view if present.
+            // Single-entry view → remove the map entry entirely (mirrors set_workspace_activities
+            // Step 8 precedent); multi-entry view → `remove_at` to preserve the rest.
+            if let Some(view) = activity.views_mut().get_mut(&source_out_id) {
+                if let Some(pos) = view.position_of(ws_id) {
+                    if view.len() == 1 {
+                        activity.views_mut().remove(&source_out_id);
+                    } else {
+                        view.remove_at(pos);
+                    }
+                }
+            }
+
+            // Target side: insert just before the trailing-empty bookend. `view.len() - 1` is
+            // safe because every existing view has at least one id by `WorkspaceView`'s
+            // non-empty invariant. If no view exists for the target output, leave absent —
+            // `ensure_view_for` materializes a fresh view on the next switch into this activity.
+            if let Some(view) = activity.views_mut().get_mut(&target_out_id) {
+                if !view.ids().contains(&ws_id) {
+                    let insert_pos = view.len() - 1;
+                    view.insert(insert_pos, ws_id);
+                }
+            }
+        }
+
         if activate {
             // The insert_workspace_onto_monitor call above took &mut self, so the earlier
             // shared-borrow scope is gone. `monitors` is still non-empty (early-return above guards
