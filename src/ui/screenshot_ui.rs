@@ -852,6 +852,7 @@ impl ScreenshotUi {
         output: Output,
         point: Point<i32, Physical>,
         slot: Option<TouchSlot>,
+        move_existing: bool,
     ) -> bool {
         let Self::Open {
             selection,
@@ -884,6 +885,23 @@ impl ScreenshotUi {
 
         if button.is_down() {
             return false;
+        }
+
+        if move_existing {
+            if output != selection.0 {
+                return false;
+            }
+
+            *button = Button::Down {
+                touch_slot: slot,
+                on_capture_button: false,
+                last_pos: (output, point),
+                move_state: Some(MoveState {
+                    pointer_offset: point - selection.1,
+                    touch_slot: slot,
+                }),
+            };
+            return true;
         }
 
         let Some(output_data) = output_data.get(&output) else {
@@ -947,15 +965,14 @@ impl ScreenshotUi {
             return None;
         };
 
-        // Check if this is a move touch and if so, stop the move.
-        if let Some(state) = move_state {
-            if state.touch_slot.is_some_and(|m_slot| Some(m_slot) == slot) {
-                *move_state = None;
-                return None;
-            }
-        };
-
         if touch_slot != slot {
+            // This is not our main touch, but it might be the move touch. If so, stop the move.
+            if let Some(state) = move_state {
+                if state.touch_slot.is_some_and(|m_slot| Some(m_slot) == slot) {
+                    *move_state = None;
+                }
+            };
+
             return None;
         }
 
