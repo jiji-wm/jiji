@@ -2818,6 +2818,9 @@ impl State {
                     let bindings =
                         make_binds_iter(&config, &mut self.niri.window_mru_ui, modifiers);
                     find_configured_bind(bindings, mod_key, trigger, mods)
+                })
+                .filter(|bind| {
+                    !self.niri.screenshot_ui.is_open() || allowed_during_screenshot(&bind.action)
                 }) {
                     self.niri.suppressed_buttons.insert(button_code);
                     self.handle_bind(bind.clone());
@@ -3173,13 +3176,21 @@ impl State {
                                 mod_key,
                                 Trigger::WheelScrollLeft,
                                 mods,
-                            );
+                            )
+                            .filter(|bind| {
+                                !self.niri.screenshot_ui.is_open()
+                                    || allowed_during_screenshot(&bind.action)
+                            });
                             let bind_right = find_configured_bind(
                                 bindings,
                                 mod_key,
                                 Trigger::WheelScrollRight,
                                 mods,
-                            );
+                            )
+                            .filter(|bind| {
+                                !self.niri.screenshot_ui.is_open()
+                                    || allowed_during_screenshot(&bind.action)
+                            });
                             (bind_left, bind_right)
                         };
 
@@ -3260,9 +3271,17 @@ impl State {
                             mod_key,
                             Trigger::WheelScrollUp,
                             mods,
-                        );
+                        )
+                        .filter(|bind| {
+                            !self.niri.screenshot_ui.is_open()
+                                || allowed_during_screenshot(&bind.action)
+                        });
                         let bind_down =
-                            find_configured_bind(bindings, mod_key, Trigger::WheelScrollDown, mods);
+                            find_configured_bind(bindings, mod_key, Trigger::WheelScrollDown, mods)
+                                .filter(|bind| {
+                                    !self.niri.screenshot_ui.is_open()
+                                        || allowed_during_screenshot(&bind.action)
+                                });
                         (bind_up, bind_down)
                     };
 
@@ -3405,9 +3424,17 @@ impl State {
                         mod_key,
                         Trigger::TouchpadScrollLeft,
                         mods,
-                    );
+                    )
+                    .filter(|bind| {
+                        !self.niri.screenshot_ui.is_open()
+                            || allowed_during_screenshot(&bind.action)
+                    });
                     let bind_right =
-                        find_configured_bind(bindings, mod_key, Trigger::TouchpadScrollRight, mods);
+                        find_configured_bind(bindings, mod_key, Trigger::TouchpadScrollRight, mods)
+                            .filter(|bind| {
+                                !self.niri.screenshot_ui.is_open()
+                                    || allowed_during_screenshot(&bind.action)
+                            });
                     drop(config);
 
                     if let Some(right) = bind_right {
@@ -3435,9 +3462,17 @@ impl State {
                         mod_key,
                         Trigger::TouchpadScrollUp,
                         mods,
-                    );
+                    )
+                    .filter(|bind| {
+                        !self.niri.screenshot_ui.is_open()
+                            || allowed_during_screenshot(&bind.action)
+                    });
                     let bind_down =
-                        find_configured_bind(bindings, mod_key, Trigger::TouchpadScrollDown, mods);
+                        find_configured_bind(bindings, mod_key, Trigger::TouchpadScrollDown, mods)
+                            .filter(|bind| {
+                                !self.niri.screenshot_ui.is_open()
+                                    || allowed_during_screenshot(&bind.action)
+                            });
                     drop(config);
 
                     if let Some(down) = bind_down {
