@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::cmp::min;
 use std::collections::hash_map::Entry;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -2547,15 +2546,9 @@ impl State {
 
         if let Some(output) = self.niri.screenshot_ui.selection_output() {
             let geom = self.niri.global_space.output_geometry(output).unwrap();
-            let mut point = (new_pos - geom.loc.to_f64())
+            let point = (new_pos - geom.loc.to_f64())
                 .to_physical(output.current_scale().fractional_scale())
                 .to_i32_round::<i32>();
-
-            let size = output.current_mode().unwrap().size;
-            let transform = output.current_transform();
-            let size = transform.transform_size(size);
-            point.x = point.x.clamp(0, size.w - 1);
-            point.y = point.y.clamp(0, size.h - 1);
 
             self.niri.screenshot_ui.pointer_motion(point, None);
         }
@@ -2684,15 +2677,9 @@ impl State {
 
         if let Some(output) = self.niri.screenshot_ui.selection_output() {
             let geom = self.niri.global_space.output_geometry(output).unwrap();
-            let mut point = (pos - geom.loc.to_f64())
+            let point = (pos - geom.loc.to_f64())
                 .to_physical(output.current_scale().fractional_scale())
                 .to_i32_round::<i32>();
-
-            let size = output.current_mode().unwrap().size;
-            let transform = output.current_transform();
-            let size = transform.transform_size(size);
-            point.x = point.x.clamp(0, size.w - 1);
-            point.y = point.y.clamp(0, size.h - 1);
 
             self.niri.screenshot_ui.pointer_motion(point, None);
         }
@@ -3044,15 +3031,9 @@ impl State {
                 if let Some((output, _)) = self.niri.output_under(pos) {
                     let output = output.clone();
                     let geom = self.niri.global_space.output_geometry(&output).unwrap();
-                    let mut point = (pos - geom.loc.to_f64())
+                    let point = (pos - geom.loc.to_f64())
                         .to_physical(output.current_scale().fractional_scale())
                         .to_i32_round();
-
-                    let size = output.current_mode().unwrap().size;
-                    let transform = output.current_transform();
-                    let size = transform.transform_size(size);
-                    point.x = min(size.w - 1, point.x);
-                    point.y = min(size.h - 1, point.y);
 
                     if self.niri.screenshot_ui.pointer_down(output, point, None) {
                         self.niri.queue_redraw_all();
@@ -3570,15 +3551,9 @@ impl State {
 
         if let Some(output) = self.niri.screenshot_ui.selection_output() {
             let geom = self.niri.global_space.output_geometry(output).unwrap();
-            let mut point = (pos - geom.loc.to_f64())
+            let point = (pos - geom.loc.to_f64())
                 .to_physical(output.current_scale().fractional_scale())
                 .to_i32_round::<i32>();
-
-            let size = output.current_mode().unwrap().size;
-            let transform = output.current_transform();
-            let size = transform.transform_size(size);
-            point.x = point.x.clamp(0, size.w - 1);
-            point.y = point.y.clamp(0, size.h - 1);
 
             self.niri.screenshot_ui.pointer_motion(point, None);
         }
@@ -3654,15 +3629,9 @@ impl State {
                     if self.niri.screenshot_ui.is_open() {
                         if let Some(output) = under.output.clone() {
                             let geom = self.niri.global_space.output_geometry(&output).unwrap();
-                            let mut point = (pos - geom.loc.to_f64())
+                            let point = (pos - geom.loc.to_f64())
                                 .to_physical(output.current_scale().fractional_scale())
                                 .to_i32_round();
-
-                            let size = output.current_mode().unwrap().size;
-                            let transform = output.current_transform();
-                            let size = transform.transform_size(size);
-                            point.x = min(size.w - 1, point.x);
-                            point.y = min(size.h - 1, point.y);
 
                             if self.niri.screenshot_ui.pointer_down(output, point, None) {
                                 self.niri.queue_redraw_all();
@@ -4130,15 +4099,9 @@ impl State {
         if self.niri.screenshot_ui.is_open() {
             if let Some(output) = under.output.clone() {
                 let geom = self.niri.global_space.output_geometry(&output).unwrap();
-                let mut point = (pos - geom.loc.to_f64())
+                let point = (pos - geom.loc.to_f64())
                     .to_physical(output.current_scale().fractional_scale())
                     .to_i32_round();
-
-                let size = output.current_mode().unwrap().size;
-                let transform = output.current_transform();
-                let size = transform.transform_size(size);
-                point.x = min(size.w - 1, point.x);
-                point.y = min(size.h - 1, point.y);
 
                 if self
                     .niri
@@ -4278,15 +4241,9 @@ impl State {
 
         if let Some(output) = self.niri.screenshot_ui.selection_output().cloned() {
             let geom = self.niri.global_space.output_geometry(&output).unwrap();
-            let mut point = (pos - geom.loc.to_f64())
+            let point = (pos - geom.loc.to_f64())
                 .to_physical(output.current_scale().fractional_scale())
                 .to_i32_round::<i32>();
-
-            let size = output.current_mode().unwrap().size;
-            let transform = output.current_transform();
-            let size = transform.transform_size(size);
-            point.x = point.x.clamp(0, size.w - 1);
-            point.y = point.y.clamp(0, size.h - 1);
 
             self.niri.screenshot_ui.pointer_motion(point, Some(slot));
             self.niri.queue_redraw(&output);

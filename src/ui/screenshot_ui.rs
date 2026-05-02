@@ -799,6 +799,8 @@ impl ScreenshotUi {
     }
 
     /// The pointer has moved to `point` relative to the current selection output.
+    ///
+    /// The point may be outside output bounds.
     pub fn pointer_motion(&mut self, point: Point<i32, Physical>, slot: Option<TouchSlot>) {
         let Self::Open {
             selection,
@@ -838,7 +840,8 @@ impl ScreenshotUi {
             selection.1 += delta;
             selection.2 += delta;
         } else {
-            selection.2 = point;
+            let size = output_data[&selection.0].size;
+            selection.2 = Point::new(point.x.clamp(0, size.w - 1), point.y.clamp(0, size.h - 1));
         }
 
         self.update_buffers();
@@ -909,6 +912,11 @@ impl ScreenshotUi {
             last_pos: (output.clone(), point),
             move_state: None,
         };
+
+        let point = Point::new(
+            point.x.clamp(0, output_data.size.w - 1),
+            point.y.clamp(0, output_data.size.h - 1),
+        );
         *selection = (output, point, point);
 
         self.update_buffers();
