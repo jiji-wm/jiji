@@ -4653,6 +4653,9 @@ fn allowed_during_screenshot(action: &Action) -> bool {
             | Action::Suspend
             | Action::PowerOffMonitors
             | Action::PowerOnMonitors
+            // Intended for binds such as volume up/down, lock the screen, etc.
+            | Action::Spawn(_)
+            | Action::SpawnSh(_)
             // The screenshot UI can handle these.
             | Action::MoveColumnLeft
             | Action::MoveColumnLeftOrToMonitorLeft
