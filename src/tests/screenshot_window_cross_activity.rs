@@ -87,15 +87,20 @@ fn screenshot_window_resolves_hidden_activity_window() {
     //   3. Invoke the screenshot path without panicking.
     //   4. NOT switch the active activity (screenshot is read-only; unlike `FocusWindow`, no
     //      activity-cursor side effect).
-    f.niri_state().do_action(
-        Action::ScreenshotWindowById {
-            id: window_id,
-            write_to_disk: false,
-            show_pointer: false,
-            path: None,
-        },
-        false,
-    );
+    f.niri_state()
+        .do_action_inner(
+            Action::ScreenshotWindowById {
+                id: window_id,
+                write_to_disk: false,
+                show_pointer: false,
+                path: None,
+            },
+            false,
+        )
+        .expect(
+            "ScreenshotWindowById dispatch must return Ok(()) — missing-id is a silent \
+             no-op, not a DoActionError",
+        );
     f.niri_state().refresh_and_flush_clients();
 
     assert_eq!(

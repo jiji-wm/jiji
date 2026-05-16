@@ -71,7 +71,8 @@ fn remove_activity_shrinks_shared_workspace_membership() {
 
     // Create beta at runtime — does not flip active.
     f.niri_state()
-        .do_action(Action::CreateActivity("beta".to_string()), false);
+        .do_action_inner(Action::CreateActivity("beta".to_string()), false)
+        .expect("CreateActivity(beta) must succeed on a unique name");
     f.niri_state().refresh_and_flush_clients();
 
     let beta_id = f
@@ -85,16 +86,21 @@ fn remove_activity_shrinks_shared_workspace_membership() {
 
     // Multi-activity assignment: W now belongs to {alpha, beta}. The order
     // [alpha, beta] keeps alpha first — matching the seed-active activity.
-    f.niri_state().do_action(
-        Action::SetWorkspaceActivities(
-            Some(WorkspaceReference::Id(w_id.get())),
-            vec![
-                ActivityReference::Name("alpha".into()),
-                ActivityReference::Name("beta".into()),
-            ],
-        ),
-        false,
-    );
+    f.niri_state()
+        .do_action_inner(
+            Action::SetWorkspaceActivities(
+                Some(WorkspaceReference::Id(w_id.get())),
+                vec![
+                    ActivityReference::Name("alpha".into()),
+                    ActivityReference::Name("beta".into()),
+                ],
+            ),
+            false,
+        )
+        .expect(
+            "SetWorkspaceActivities with valid workspace ref and existing activity \
+             names must succeed",
+        );
     f.niri_state().refresh_and_flush_clients();
 
     // Map a window onto alpha's active workspace W. After this, alpha's view
@@ -152,10 +158,15 @@ fn remove_activity_shrinks_shared_workspace_membership() {
     // Drop beta. W has activities = {alpha, beta}, so the SHRINK branch
     // fires: W remains in the pool, the window stays put, but W's
     // activities set drops beta.
-    f.niri_state().do_action(
-        Action::RemoveActivity(ActivityReference::Name("beta".into())),
-        false,
-    );
+    f.niri_state()
+        .do_action_inner(
+            Action::RemoveActivity(ActivityReference::Name("beta".into())),
+            false,
+        )
+        .expect(
+            "RemoveActivity(beta) must succeed: runtime, not last, no windows on \
+             exclusive workspaces, no hard-block in effect",
+        );
     f.niri_state().refresh_and_flush_clients();
 
     // (a) W remains in the pool — catches a regression that orphaned a
@@ -259,7 +270,8 @@ fn remove_activity_destroys_exclusive_unnamed_empty_workspace() {
 
     // Create gamma at runtime.
     f.niri_state()
-        .do_action(Action::CreateActivity("gamma".to_string()), false);
+        .do_action_inner(Action::CreateActivity("gamma".to_string()), false)
+        .expect("CreateActivity(gamma) must succeed on a unique name");
     f.niri_state().refresh_and_flush_clients();
 
     let gamma_id = f
@@ -273,10 +285,12 @@ fn remove_activity_destroys_exclusive_unnamed_empty_workspace() {
 
     // Switch into gamma — `ensure_view_for(gamma, out1_id)` materializes a
     // fresh unnamed-empty workspace bound to gamma.
-    f.niri_state().do_action(
-        Action::SwitchActivity(ActivityReference::Name("gamma".into())),
-        false,
-    );
+    f.niri_state()
+        .do_action_inner(
+            Action::SwitchActivity(ActivityReference::Name("gamma".into())),
+            false,
+        )
+        .expect("SwitchActivity(gamma) must succeed: target exists, no hard-block in effect");
     f.niri_state().refresh_and_flush_clients();
 
     // Capture gamma's freshly materialized workspace id. At this point the
@@ -333,10 +347,15 @@ fn remove_activity_destroys_exclusive_unnamed_empty_workspace() {
     // Remove gamma. Cascade fires (gamma is active → alpha via previous_id),
     // then the destroy branch removes gamma's exclusive unnamed-empty
     // workspace from both the pool and every activity's views.
-    f.niri_state().do_action(
-        Action::RemoveActivity(ActivityReference::Name("gamma".into())),
-        false,
-    );
+    f.niri_state()
+        .do_action_inner(
+            Action::RemoveActivity(ActivityReference::Name("gamma".into())),
+            false,
+        )
+        .expect(
+            "RemoveActivity(gamma) must succeed: runtime, not last, no windows on \
+             exclusive workspaces, no hard-block in effect",
+        );
     f.niri_state().refresh_and_flush_clients();
 
     // (a) gamma's workspace is gone from the pool — the destroy contract.

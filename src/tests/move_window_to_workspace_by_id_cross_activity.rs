@@ -83,14 +83,19 @@ fn move_window_to_workspace_by_id_reaches_hidden_activity_window_without_panic()
 
     // Dispatch `Action::MoveWindowToWorkspaceById` under beta-active.
     // The hidden-activity gate must silently drop (with `warn!`).
-    f.niri_state().do_action(
-        Action::MoveWindowToWorkspaceById {
-            window_id,
-            reference: WorkspaceReference::Index(0),
-            focus: false,
-        },
-        false,
-    );
+    f.niri_state()
+        .do_action_inner(
+            Action::MoveWindowToWorkspaceById {
+                window_id,
+                reference: WorkspaceReference::Index(0),
+                focus: false,
+            },
+            false,
+        )
+        .expect(
+            "MoveWindowToWorkspaceById dispatch must return Ok(()) — the \
+             cross-activity drop is a layout-level silent no-op, not a DoActionError",
+        );
     f.niri_state().refresh_and_flush_clients();
 
     // Invariant: window still exists and still lives on its original

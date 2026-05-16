@@ -93,7 +93,11 @@ fn close_window_by_id_delivers_close_to_hidden_activity_window() {
     // `windows_all()` lookup must resolve the dormant-activity window
     // and hand its toplevel a close request.
     f.niri_state()
-        .do_action(Action::CloseWindowById(window_id), false);
+        .do_action_inner(Action::CloseWindowById(window_id), false)
+        .expect(
+            "CloseWindowById dispatch must return Ok(()) — missing-id is a silent no-op, \
+             not a DoActionError",
+        );
     f.niri_state().refresh_and_flush_clients();
     f.roundtrip(client_id);
 

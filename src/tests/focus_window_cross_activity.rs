@@ -88,7 +88,8 @@ fn focus_window_on_hidden_activity_switches_then_focuses() {
     //   3. Pick alpha (tier 1: `last_focused_activity` hint was set at map).
     //   4. `switch_activity(alpha)` + `focus_window`.
     f.niri_state()
-        .do_action(Action::FocusWindow(window_id), false);
+        .do_action_inner(Action::FocusWindow(window_id), false)
+        .expect("FocusWindow(window_id) must succeed: window id resolved before dispatch");
     f.niri_state().refresh_and_flush_clients();
 
     assert_eq!(

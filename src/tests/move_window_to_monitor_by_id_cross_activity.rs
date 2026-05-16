@@ -83,13 +83,18 @@ fn move_window_to_monitor_by_id_reaches_hidden_activity_window_without_panic() {
 
     // Dispatch `Action::MoveWindowToMonitorById` targeting the second
     // monitor. The hidden-activity gate must silently drop.
-    f.niri_state().do_action(
-        Action::MoveWindowToMonitorById {
-            id: window_id,
-            output: "headless-2".to_string(),
-        },
-        false,
-    );
+    f.niri_state()
+        .do_action_inner(
+            Action::MoveWindowToMonitorById {
+                id: window_id,
+                output: "headless-2".to_string(),
+            },
+            false,
+        )
+        .expect(
+            "MoveWindowToMonitorById dispatch must return Ok(()) — the \
+             cross-activity drop is a layout-level silent no-op, not a DoActionError",
+        );
     f.niri_state().refresh_and_flush_clients();
 
     // Invariant: window still exists and still lives on its original

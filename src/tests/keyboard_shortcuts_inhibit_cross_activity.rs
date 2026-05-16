@@ -124,7 +124,8 @@ fn inhibitor_deactivated_on_switch_away() {
     // Switch to beta via the Action path so the hook at input/mod.rs fires.
     let beta = beta_id(&mut f);
     f.niri_state()
-        .do_action(Action::SwitchActivity(beta), false);
+        .do_action_inner(Action::SwitchActivity(beta), false)
+        .expect("SwitchActivity(beta) must succeed: target exists, no hard-block in effect");
     f.niri_state().refresh_and_flush_clients();
 
     assert!(
@@ -161,10 +162,12 @@ fn inhibitor_reactivated_on_switch_back() {
     let alpha = alpha_id(&mut f);
 
     f.niri_state()
-        .do_action(Action::SwitchActivity(beta), false);
+        .do_action_inner(Action::SwitchActivity(beta), false)
+        .expect("SwitchActivity(beta) must succeed: target exists, no hard-block in effect");
     f.niri_state().refresh_and_flush_clients();
     f.niri_state()
-        .do_action(Action::SwitchActivity(alpha), false);
+        .do_action_inner(Action::SwitchActivity(alpha), false)
+        .expect("SwitchActivity(alpha) must succeed: target exists, no hard-block in effect");
     f.niri_state().refresh_and_flush_clients();
 
     assert!(
@@ -230,10 +233,12 @@ fn inhibitor_user_inactivated_not_reactivated_on_switch_back() {
     let beta = beta_id(&mut f);
     let alpha = alpha_id(&mut f);
     f.niri_state()
-        .do_action(Action::SwitchActivity(beta), false);
+        .do_action_inner(Action::SwitchActivity(beta), false)
+        .expect("SwitchActivity(beta) must succeed: target exists, no hard-block in effect");
     f.niri_state().refresh_and_flush_clients();
     f.niri_state()
-        .do_action(Action::SwitchActivity(alpha), false);
+        .do_action_inner(Action::SwitchActivity(alpha), false)
+        .expect("SwitchActivity(alpha) must succeed: target exists, no hard-block in effect");
     f.niri_state().refresh_and_flush_clients();
 
     assert!(
@@ -271,7 +276,8 @@ fn inhibitor_destroyed_while_hidden_clears_tracking_set() {
     // Hide the window — surface should be tracked as deactivated.
     let beta = beta_id(&mut f);
     f.niri_state()
-        .do_action(Action::SwitchActivity(beta), false);
+        .do_action_inner(Action::SwitchActivity(beta), false)
+        .expect("SwitchActivity(beta) must succeed: target exists, no hard-block in effect");
     f.niri_state().refresh_and_flush_clients();
     assert!(
         f.niri()
@@ -304,7 +310,8 @@ fn inhibitor_destroyed_while_hidden_clears_tracking_set() {
     // must not panic.
     let alpha = alpha_id(&mut f);
     f.niri_state()
-        .do_action(Action::SwitchActivity(alpha), false);
+        .do_action_inner(Action::SwitchActivity(alpha), false)
+        .expect("SwitchActivity(alpha) must succeed: target exists, no hard-block in effect");
     f.niri_state().refresh_and_flush_clients();
     assert!(
         f.niri()
@@ -335,12 +342,17 @@ fn inhibitor_reactivated_on_switch_activity_previous() {
     // the other four).
     let beta = beta_id(&mut f);
     f.niri_state()
-        .do_action(Action::SwitchActivity(beta), false);
+        .do_action_inner(Action::SwitchActivity(beta), false)
+        .expect("SwitchActivity(beta) must succeed: target exists, no hard-block in effect");
     f.niri_state().refresh_and_flush_clients();
     // Now switch back to alpha via `SwitchActivityPrevious`. Inhibitor
     // should reactivate through the sweep hook at that arm.
     f.niri_state()
-        .do_action(Action::SwitchActivityPrevious {}, false);
+        .do_action_inner(Action::SwitchActivityPrevious {}, false)
+        .expect(
+            "SwitchActivityPrevious must succeed: previous_id set after the prior switch, \
+             no hard-block in effect",
+        );
     f.niri_state().refresh_and_flush_clients();
 
     assert!(
@@ -403,16 +415,19 @@ fn inhibitor_reactivated_on_remove_activity_cascade() {
 
     // Create a runtime activity "gamma" — does not flip active.
     f.niri_state()
-        .do_action(Action::CreateActivity("gamma".to_string()), false);
+        .do_action_inner(Action::CreateActivity("gamma".to_string()), false)
+        .expect("CreateActivity(gamma) must succeed on a unique name");
     f.niri_state().refresh_and_flush_clients();
 
     // Switch to gamma: alpha is hidden, inhibitor deactivates, surface
     // enters `deactivated_inhibitors_by_activity_switch`, previous_id
     // becomes alpha.
-    f.niri_state().do_action(
-        Action::SwitchActivity(ActivityReference::Name("gamma".into())),
-        false,
-    );
+    f.niri_state()
+        .do_action_inner(
+            Action::SwitchActivity(ActivityReference::Name("gamma".into())),
+            false,
+        )
+        .expect("SwitchActivity(gamma) must succeed: target exists, no hard-block in effect");
     f.niri_state().refresh_and_flush_clients();
 
     assert!(
@@ -447,10 +462,15 @@ fn inhibitor_reactivated_on_remove_activity_cascade() {
     // `switch_activity(previous_id = alpha)` is called inside
     // `remove_activity`, then the dispatcher calls
     // `refresh_keyboard_shortcut_inhibitors_after_activity_switch`.
-    f.niri_state().do_action(
-        Action::RemoveActivity(ActivityReference::Name("gamma".into())),
-        false,
-    );
+    f.niri_state()
+        .do_action_inner(
+            Action::RemoveActivity(ActivityReference::Name("gamma".into())),
+            false,
+        )
+        .expect(
+            "RemoveActivity(gamma) must succeed: runtime, not last, no windows on \
+             exclusive workspaces, no hard-block in effect",
+        );
     f.niri_state().refresh_and_flush_clients();
 
     assert!(

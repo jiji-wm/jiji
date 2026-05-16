@@ -86,7 +86,11 @@ fn toggle_windowed_fullscreen_by_id_reaches_hidden_activity_window() {
     // The `with_windows_all_mut` path must reach the dormant-activity
     // window and flip is_pending_windowed_fullscreen to true.
     f.niri_state()
-        .do_action(Action::ToggleWindowedFullscreenById(window_id), false);
+        .do_action_inner(Action::ToggleWindowedFullscreenById(window_id), false)
+        .expect(
+            "ToggleWindowedFullscreenById dispatch must return Ok(()) — missing-id is a \
+             silent no-op, not a DoActionError",
+        );
 
     let (_out, mapped) = f
         .niri()
