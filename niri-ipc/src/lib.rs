@@ -1780,7 +1780,9 @@ pub struct Workspace {
     /// Whether this workspace is sticky (auto-tagged with all activities). The distinction between
     /// sticky and non-sticky workspaces is only observable when multiple activities exist.
     pub is_sticky: bool,
-    /// Whether this workspace belongs to the active activity.
+    /// Whether this workspace is visible via the active activity — `true` when the
+    /// active activity is a member of `activities` (including sticky workspaces, whose
+    /// `activities` set is auto-tagged with all live activities).
     ///
     /// **`idx` contract:** the `idx` field on this workspace is only meaningful when
     /// `is_in_active_activity` is `true`; clients must ignore `idx` for workspaces where this
