@@ -3545,7 +3545,10 @@ impl State {
                     self.niri.output_under_cursor().and_then(|output| {
                         let mon = layout.monitor_for_output(&output)?;
                         let view = layout.active_view(&mon.output_id());
-                        Some((output, mon.active_workspace_ref(layout.workspace_pool(), view)))
+                        Some((
+                            output,
+                            mon.active_workspace_ref(layout.workspace_pool(), view),
+                        ))
                     })
                 };
 
