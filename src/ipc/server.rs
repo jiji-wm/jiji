@@ -35,7 +35,9 @@ use crate::backend::IpcOutputMap;
 use crate::input::pick_window_grab::PickWindowGrab;
 use crate::layout::activity::ActivityId;
 use crate::layout::workspace::WorkspaceId;
-use crate::layout::{format_do_action_error, DoActionError, Layout, LayoutElement};
+use crate::layout::{
+    format_do_action_error, DoActionError, DoActionOutcome, Layout, LayoutElement,
+};
 use crate::niri::State;
 use crate::utils::id::IdCounter;
 use crate::utils::{version, with_toplevel_role};
@@ -74,14 +76,16 @@ impl IpcConnId {
 /// without cloning from caller state, plus the send half of the response
 /// channel the async `process` task is awaiting on. On drain:
 ///
-/// - Send `Ok(())` once the action lands → `process` returns `Response::Handled`.
+/// - Send `Ok(DoActionOutcome::Handled)` once the action lands → `process` returns
+///   `Response::Handled`. Send `Ok(DoActionOutcome::NoOp(reason))` for a durable no-op → `process`
+///   returns `Response::NoOp(reason)`.
 /// - On re-block mid-drain: re-insert the entry and leave `tx` untouched; the sender is not
 ///   dropped, so the `process` task stays parked.
 /// - Drop without sending on a closed receiver (client gone between enqueue and drain). `process`'s
 ///   `rx.recv().await` has already been dropped in that case.
 struct BlockedWaiter {
     action: niri_config::Action,
-    tx: async_channel::Sender<Result<(), DoActionError>>,
+    tx: async_channel::Sender<Result<DoActionOutcome, DoActionError>>,
 }
 
 pub struct IpcServer {
@@ -257,7 +261,7 @@ impl IpcServer {
         &self,
         conn_id: IpcConnId,
         action: niri_config::Action,
-    ) -> Result<async_channel::Receiver<Result<(), DoActionError>>, &'static str> {
+    ) -> Result<async_channel::Receiver<Result<DoActionOutcome, DoActionError>>, &'static str> {
         // Mirror the contains-key admission gate at the live
         // [`niri_ipc::Request::Action`] site. Read borrow dropped before the
         // bounded channel is allocated so the registry's RefCell is free for
@@ -266,7 +270,7 @@ impl IpcServer {
             return Err("request already queued");
         }
 
-        let (tx, rx) = async_channel::bounded::<Result<(), DoActionError>>(1);
+        let (tx, rx) = async_channel::bounded::<Result<DoActionOutcome, DoActionError>>(1);
         let prev = self
             .blocked_action_waiters
             .borrow_mut()
@@ -341,8 +345,11 @@ impl Drop for IpcServer {
 ///
 /// # Invariants
 ///
-/// - **`Handled` ≡ performed**: a waiter is only signalled `Ok(())` after its `do_action_inner`
-///   call returned `Ok(())`. The send half is dropped without signalling on silent-prune paths
+/// - **`Handled` ≡ performed; `NoOp(reason)` ≡ considered-and-unchanged**: a waiter is only
+///   signalled `Ok(DoActionOutcome::Handled)` after its `do_action_inner` call returned
+///   `Ok(Handled)`. `Ok(NoOp(reason))` from `do_action_inner` is forwarded verbatim as
+///   `Ok(DoActionOutcome::NoOp(reason))`; the `process` recv site maps it to
+///   `Response::NoOp(reason)`. The send half is dropped without signalling on silent-prune paths
 ///   (closed receiver).
 /// - **FIFO preserved across re-block** (scoped to `Err(DoActionError::ActivitySwitchBlocked)`): if
 ///   `do_action_inner` re-raises a hard block mid-drain (no current action reaches this;
@@ -415,11 +422,14 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
 
         let result = state.do_action_inner(waiter.action.clone(), false);
         match result {
-            Ok(()) => {
+            Ok(outcome) => {
                 // Receiver may have dropped between wake and send; safe to
                 // ignore because the action already executed with no state
                 // loss (same contract as the initial-dispatch success path).
-                let _ = waiter.tx.send_blocking(Ok(()));
+                // The outcome (`Handled` vs `NoOp(reason)`) is forwarded
+                // verbatim so the IPC `process` site can map it to the right
+                // `Response` variant.
+                let _ = waiter.tx.send_blocking(Ok(outcome));
             }
             Err(DoActionError::ActivitySwitchBlocked(block)) => {
                 // Re-block mid-drain: re-insert at its index at removal so
@@ -755,7 +765,7 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
 
             validate_action(&action)?;
 
-            let (tx, rx) = async_channel::bounded::<Result<(), DoActionError>>(1);
+            let (tx, rx) = async_channel::bounded::<Result<DoActionOutcome, DoActionError>>(1);
 
             let action = niri_config::Action::from(action);
             let waiters = ctx.blocked_action_waiters.clone();
@@ -767,11 +777,14 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                 // Clone so the waiter entry owns the original if do_action_inner hard-blocks (the drain site re-dispatches from it).
                 let result = state.do_action_inner(action.clone(), false);
                 match result {
-                    Ok(()) => {
+                    Ok(outcome) => {
                         // Connection may have closed between enqueue and action
                         // completion. Safe to drop the send: on Ok the action
-                        // already executed with no state loss.
-                        let _ = tx.send_blocking(Ok(()));
+                        // already executed with no state loss. Forward the
+                        // outcome verbatim so the `process` recv site can map
+                        // `Handled` and `NoOp(reason)` to their respective
+                        // `Response` variants.
+                        let _ = tx.send_blocking(Ok(outcome));
                     }
                     Err(DoActionError::ActivitySwitchBlocked(block)) => {
                         // Park; drain on next refresh preserves Handled ≡ performed.
@@ -818,7 +831,8 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             // contents were sampled into the texture. Under a hard block, the
             // receiver parks here until the drain site wakes it.
             match rx.recv().await {
-                Ok(Ok(())) => Response::Handled,
+                Ok(Ok(DoActionOutcome::Handled)) => Response::Handled,
+                Ok(Ok(DoActionOutcome::NoOp(reason))) => Response::NoOp(reason),
                 Ok(Err(err)) => {
                     return Err(format_do_action_error(err));
                 }
@@ -1836,9 +1850,9 @@ mod tests {
 
     fn make_waiter() -> (
         BlockedWaiter,
-        async_channel::Receiver<Result<(), DoActionError>>,
+        async_channel::Receiver<Result<DoActionOutcome, DoActionError>>,
     ) {
-        let (tx, rx) = async_channel::bounded::<Result<(), DoActionError>>(1);
+        let (tx, rx) = async_channel::bounded::<Result<DoActionOutcome, DoActionError>>(1);
         (
             BlockedWaiter {
                 action: dummy_action(),
@@ -1865,12 +1879,15 @@ mod tests {
             .shift_remove(&conn)
             .expect("waiter inserted just now");
         assert!(waiters.is_empty());
-        drained.tx.send_blocking(Ok(())).expect("receiver is alive");
+        drained
+            .tx
+            .send_blocking(Ok(DoActionOutcome::Handled))
+            .expect("receiver is alive");
 
         let observed = rx
             .recv_blocking()
             .expect("sender alive until send_blocking returned");
-        assert!(matches!(observed, Ok(())));
+        assert!(matches!(observed, Ok(DoActionOutcome::Handled)));
     }
 
     #[test]
@@ -1920,14 +1937,15 @@ mod tests {
 
         for conn in order {
             let w = waiters.shift_remove(&conn).expect("inserted just now");
-            w.tx.send_blocking(Ok(())).expect("receivers alive");
+            w.tx.send_blocking(Ok(DoActionOutcome::Handled))
+                .expect("receivers alive");
         }
 
         // Pull each response: A first, B second.
         let first = rx_a.recv_blocking().expect("sent above");
         let second = rx_b.recv_blocking().expect("sent above");
-        assert!(matches!(first, Ok(())));
-        assert!(matches!(second, Ok(())));
+        assert!(matches!(first, Ok(DoActionOutcome::Handled)));
+        assert!(matches!(second, Ok(DoActionOutcome::Handled)));
     }
 
     #[test]

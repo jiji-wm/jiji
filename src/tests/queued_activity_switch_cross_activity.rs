@@ -36,7 +36,7 @@ use smithay::utils::Point;
 
 use super::fixture::{config_with_two_activities, Fixture};
 use crate::ipc::server::{IpcConnId, IpcServer};
-use crate::layout::{ActivitySwitchBlock, DoActionError};
+use crate::layout::{ActivitySwitchBlock, DoActionError, DoActionOutcome};
 
 /// Borrow the [`IpcServer`] from the fixture, panicking with a clear message
 /// if the fixture was constructed without one.
@@ -214,8 +214,8 @@ fn hard_blocked_switch_activity_queues_drains_on_unblock() {
         "conn drain did not signal within 5s",
     );
     assert!(
-        matches!(observed, Ok(())),
-        "drained waiter must observe Ok(()) (Handled ≡ performed); got {observed:?}",
+        matches!(observed, Ok(DoActionOutcome::Handled)),
+        "drained waiter must observe Ok(Handled) (Handled ≡ performed); got {observed:?}",
     );
 }
 
@@ -304,9 +304,9 @@ fn depth_one_admission_rejects_second_enqueue_per_connection() {
                 Duration::from_secs(5),
                 "conn_a drain did not signal within 5s",
             ),
-            Ok(())
+            Ok(DoActionOutcome::Handled)
         ),
-        "conn_a waiter must observe Ok(())",
+        "conn_a waiter must observe Ok(Handled)",
     );
     assert!(
         matches!(
@@ -315,8 +315,8 @@ fn depth_one_admission_rejects_second_enqueue_per_connection() {
                 Duration::from_secs(5),
                 "conn_b drain did not signal within 5s",
             ),
-            Ok(())
+            Ok(DoActionOutcome::Handled)
         ),
-        "conn_b waiter must observe Ok(()) (no-op same-target SwitchActivity)",
+        "conn_b waiter must observe Ok(Handled) (no-op same-target SwitchActivity)",
     );
 }

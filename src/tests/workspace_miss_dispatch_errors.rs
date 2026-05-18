@@ -18,7 +18,7 @@ use niri_config::{Action, ActivityReference, WorkspaceReference};
 
 use super::fixture::{config_with_two_activities, Fixture};
 use crate::layout::{
-    DoActionError, MoveWorkspaceToActivityError, SetWorkspaceActivitiesError,
+    DoActionError, DoActionOutcome, MoveWorkspaceToActivityError, SetWorkspaceActivitiesError,
     SetWorkspaceStickyError, SwitchActivityError, ToggleWorkspaceStickyError,
     UnsetWorkspaceStickyError,
 };
@@ -181,8 +181,8 @@ fn move_workspace_to_activity_valid_ref_returns_ok() {
 
     assert_eq!(
         result,
-        Ok(()),
-        "MoveWorkspaceToActivity with a valid workspace ref must return Ok(())",
+        Ok(DoActionOutcome::Handled),
+        "MoveWorkspaceToActivity with a valid workspace ref must return Ok(Handled)",
     );
 }
 
@@ -208,8 +208,8 @@ fn set_workspace_activities_valid_ref_returns_ok() {
 
     assert_eq!(
         result,
-        Ok(()),
-        "SetWorkspaceActivities with a valid workspace ref must return Ok(())",
+        Ok(DoActionOutcome::Handled),
+        "SetWorkspaceActivities with a valid workspace ref must return Ok(Handled)",
     );
 }
 
@@ -232,8 +232,8 @@ fn toggle_workspace_sticky_valid_ref_returns_ok() {
 
     assert_eq!(
         result,
-        Ok(()),
-        "ToggleWorkspaceStickyByRef with a valid workspace ref must return Ok(())",
+        Ok(DoActionOutcome::Handled),
+        "ToggleWorkspaceStickyByRef with a valid workspace ref must return Ok(Handled)",
     );
 }
 
@@ -256,8 +256,8 @@ fn set_workspace_sticky_valid_ref_returns_ok() {
 
     assert_eq!(
         result,
-        Ok(()),
-        "SetWorkspaceStickyByRef with a valid workspace ref must return Ok(())",
+        Ok(DoActionOutcome::Handled),
+        "SetWorkspaceStickyByRef with a valid workspace ref must return Ok(Handled)",
     );
 }
 
@@ -280,8 +280,8 @@ fn unset_workspace_sticky_valid_ref_returns_ok() {
 
     assert_eq!(
         result,
-        Ok(()),
-        "UnsetWorkspaceStickyByRef with a valid workspace ref must return Ok(())",
+        Ok(DoActionOutcome::Handled),
+        "UnsetWorkspaceStickyByRef with a valid workspace ref must return Ok(Handled)",
     );
 }
 

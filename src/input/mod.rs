@@ -9,7 +9,7 @@ use niri_config::{
     Action, Bind, Binds, Config, Key, ModKey, Modifiers, MruDirection, SwitchBinds, Trigger,
     WorkspaceReference,
 };
-use niri_ipc::{ActivityReferenceArg, LayoutSwitchTarget};
+use niri_ipc::{ActivityReferenceArg, LayoutSwitchTarget, NoOpReason};
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
     GestureBeginEvent, GestureEndEvent, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
@@ -48,7 +48,7 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
-use crate::layout::{ActivateWindow, DoActionError, LayoutElement as _};
+use crate::layout::{ActivateWindow, DoActionError, DoActionOutcome, LayoutElement};
 use crate::niri::{CastTarget, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
@@ -686,18 +686,26 @@ impl State {
     /// keypress is discarded, not queued, and no error is surfaced to the
     /// user. Callers that can surface the `Err` to a client (e.g., the IPC
     /// `Request::Action` dispatch) call `do_action_inner` directly.
+    ///
+    /// The successful [`DoActionOutcome`] payload (`Handled` and `NoOp(reason)`
+    /// alike) is also dropped here. A `NoOp(...)` breadcrumb produced via a
+    /// keybinding-triggered path is not observable to any IPC consumer; the
+    /// user already sees the on-screen effect (or lack thereof) directly. Only
+    /// callers that go through the IPC dispatch site benefit from the typed
+    /// reply.
     pub fn do_action(&mut self, action: Action, allow_when_locked: bool) {
         let _ = self.do_action_inner(action, allow_when_locked);
     }
 
-    #[must_use = "dispatch Err must be surfaced to IPC callers or explicitly dropped"]
+    #[must_use = "IPC dispatch sites must surface this via the bounded channel; \
+                  keybinding-path callers must discard explicitly via `let _ =` (see `do_action`)"]
     pub(crate) fn do_action_inner(
         &mut self,
         action: Action,
         allow_when_locked: bool,
-    ) -> Result<(), DoActionError> {
+    ) -> Result<DoActionOutcome, DoActionError> {
         if self.niri.is_locked() && !(allow_when_locked || allowed_when_locked(&action)) {
-            return Ok(());
+            return Ok(DoActionOutcome::Handled);
         }
 
         if let Some(touch) = self.niri.seat.get_touch() {
@@ -708,7 +716,7 @@ impl State {
             Action::Quit(skip_confirmation) => {
                 if !skip_confirmation && self.niri.exit_confirm_dialog.show() {
                     self.niri.queue_redraw_all();
-                    return Ok(());
+                    return Ok(DoActionOutcome::Handled);
                 }
 
                 info!("quitting as requested");
@@ -775,7 +783,7 @@ impl State {
             }
             Action::CancelScreenshot => {
                 if !self.niri.screenshot_ui.is_open() {
-                    return Ok(());
+                    return Ok(DoActionOutcome::Handled);
                 }
 
                 self.niri.screenshot_ui.close();
@@ -975,7 +983,7 @@ impl State {
                     // means the window is mid-flight and not owned by any pool
                     // workspace.
                     debug!("focus_window: id={id} resolved via windows_all but not in pool (interactive-move window), no-op");
-                    return Ok(());
+                    return Ok(DoActionOutcome::Handled);
                 };
 
                 // Visibility fast-path: if `ws_id` appears in any of the
@@ -997,7 +1005,7 @@ impl State {
 
                 if is_visible {
                     self.focus_window(&window);
-                    return Ok(());
+                    return Ok(DoActionOutcome::Handled);
                 }
 
                 // Hidden workspace — pick the activity to switch into. The
@@ -1012,7 +1020,7 @@ impl State {
                     .pick_activity_for_hidden_window(ws_id, hint);
                 if target == self.niri.layout.active_activity_id() {
                     debug!("focus_window: id={id} — picker returned active_id (ws tagged only with active activity, contradicts is_visible==false), no-op");
-                    return Ok(());
+                    return Ok(DoActionOutcome::Handled);
                 }
 
                 // Hard-block gate — mirrors the SwitchActivity /
@@ -1476,6 +1484,35 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::MoveWindowToWorkspace(reference, focus) => {
+                // Move-to-self short-circuit. Resolve source (the active
+                // workspace, since this arm targets the active workspace's
+                // focused tile) and target ids; if they match, emit a typed
+                // `NoOp(AlreadyOnTarget)` on the wire rather than falling
+                // through to the layout-mutator's silent equality
+                // short-circuit. This check runs before
+                // `find_output_and_workspace_index` because `move_to_output`
+                // and `move_to_workspace` have different equality-short-circuit
+                // shapes: without the early gate the IPC outcome was
+                // non-deterministic across those branches for a move-to-self.
+                // The `None` cases (no active monitor; if the active workspace
+                // is empty there is no focused tile but `active_workspace()`
+                // still returns `Some` so the NoOp fires without a window being
+                // moved — this matches the pre-existing silent-drop path;
+                // reference doesn't resolve to a workspace in the active
+                // activity's view) fall through to the existing
+                // `find_output_and_workspace_index` no-op path so behavior is
+                // unchanged for any case where we wouldn't have moved.
+                let source_ws_id = self.niri.layout.active_workspace().map(|ws| ws.id().get());
+                let target_ws_id = self
+                    .niri
+                    .resolve_workspace_reference_to_id(reference.clone());
+                if let (Some(src), Some(tgt)) = (source_ws_id, target_ws_id) {
+                    if src == tgt {
+                        return Ok(DoActionOutcome::NoOp(NoOpReason::AlreadyOnTarget {
+                            workspace_id: src,
+                        }));
+                    }
+                }
                 if let Some((mut output, index)) =
                     self.niri.find_output_and_workspace_index(reference)
                 {
@@ -1519,60 +1556,95 @@ impl State {
                 reference,
                 focus,
             } => {
-                let window = self
+                // Fold the source-workspace lookup into the same
+                // `windows_all()` scan that already resolves the window
+                // handle, then check the move-to-self short-circuit before
+                // resolving the target. Unknown window id preserves the
+                // pre-existing silent exit-0 as `Ok(Handled)`: no source
+                // workspace id is known, so no `AlreadyOnTarget { workspace_id
+                // }` payload is constructible. Dormant-activity targets fall
+                // through to the existing silent-drop path via
+                // `find_output_and_workspace_index` returning `None`.
+                let resolved = self
                     .niri
                     .layout
                     .windows_all()
                     .find(|(_, m)| m.id().get() == id);
-                let window = window.map(|(_, m)| m.window.clone());
-                if let Some(window) = window {
-                    if let Some((output, index)) =
-                        self.niri.find_output_and_workspace_index(reference)
-                    {
-                        let target_was_active = self
-                            .niri
-                            .layout
-                            .active_output()
-                            .is_some_and(|active| output.as_ref() == Some(active));
+                let resolved = resolved.and_then(|(_, mapped)| {
+                    let win_id = LayoutElement::id(mapped);
+                    let ws_id = self
+                        .niri
+                        .layout
+                        .workspaces_all()
+                        .find(|(_, ws)| ws.has_window(win_id))?
+                        .1
+                        .id()
+                        .get();
+                    Some((mapped.window.clone(), ws_id))
+                });
+                let Some((window, source_ws_id)) = resolved else {
+                    debug!(
+                        window_id = id,
+                        "MoveWindowToWorkspaceById: window_id not found in pool; \
+                         preserving silent exit-0 (cross-activity move-by-id semantics not yet landed)"
+                    );
+                    return Ok(DoActionOutcome::Handled);
+                };
 
-                        let activate = if focus {
-                            ActivateWindow::Smart
-                        } else {
-                            ActivateWindow::No
-                        };
+                let target_ws_id = self
+                    .niri
+                    .resolve_workspace_reference_to_id(reference.clone());
+                if let Some(tgt) = target_ws_id {
+                    if source_ws_id == tgt {
+                        return Ok(DoActionOutcome::NoOp(NoOpReason::AlreadyOnTarget {
+                            workspace_id: source_ws_id,
+                        }));
+                    }
+                }
 
-                        if let Some(output) = output {
-                            self.niri.layout.move_to_output(
-                                Some(&window),
-                                &output,
-                                Some(index),
-                                activate,
-                            );
+                if let Some((output, index)) = self.niri.find_output_and_workspace_index(reference)
+                {
+                    let target_was_active = self
+                        .niri
+                        .layout
+                        .active_output()
+                        .is_some_and(|active| output.as_ref() == Some(active));
 
-                            // If the active output changed (window was moved and focused).
-                            #[allow(clippy::collapsible_if)]
-                            if !target_was_active
-                                && self.niri.layout.active_output() == Some(&output)
-                            {
-                                if !self.maybe_warp_cursor_to_focus_centered() {
-                                    self.move_cursor_to_output(&output);
-                                }
-                            }
-                        } else {
-                            self.niri
-                                .layout
-                                .move_to_workspace(Some(&window), index, activate);
+                    let activate = if focus {
+                        ActivateWindow::Smart
+                    } else {
+                        ActivateWindow::No
+                    };
 
-                            // If we focused the target window.
-                            let new_focus = self.niri.layout.focus();
-                            if new_focus.is_some_and(|win| win.window == window) {
-                                self.maybe_warp_cursor_to_focus();
+                    if let Some(output) = output {
+                        self.niri.layout.move_to_output(
+                            Some(&window),
+                            &output,
+                            Some(index),
+                            activate,
+                        );
+
+                        // If the active output changed (window was moved and focused).
+                        #[allow(clippy::collapsible_if)]
+                        if !target_was_active && self.niri.layout.active_output() == Some(&output) {
+                            if !self.maybe_warp_cursor_to_focus_centered() {
+                                self.move_cursor_to_output(&output);
                             }
                         }
+                    } else {
+                        self.niri
+                            .layout
+                            .move_to_workspace(Some(&window), index, activate);
 
-                        // FIXME: granular
-                        self.niri.queue_redraw_all();
+                        // If we focused the target window.
+                        let new_focus = self.niri.layout.focus();
+                        if new_focus.is_some_and(|win| win.window == window) {
+                            self.maybe_warp_cursor_to_focus();
+                        }
                     }
+
+                    // FIXME: granular
+                    self.niri.queue_redraw_all();
                 }
             }
             Action::MoveColumnToWorkspaceDown(focus) => {
@@ -2773,7 +2845,7 @@ impl State {
                         .find(|(_, m)| m.id().get() == id);
                     let window = window.map(|(_, m)| m.window.clone());
                     if window.is_none() {
-                        return Ok(());
+                        return Ok(DoActionOutcome::Handled);
                     }
                     window
                 } else {
@@ -2988,7 +3060,7 @@ impl State {
             }
         }
 
-        Ok(())
+        Ok(DoActionOutcome::Handled)
     }
 
     /// Dispatch handler for `Action::ToggleWorkspaceSticky` /

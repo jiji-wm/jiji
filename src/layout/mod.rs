@@ -607,6 +607,29 @@ impl From<ActivitySwitchBlock> for DoActionError {
     }
 }
 
+/// Successful outcome of [`crate::niri::State::do_action_inner`]. Mirrors the
+/// niri-ipc `Reply::Ok(...)` envelope: `Handled` is the default for actions
+/// that change state; `NoOp(reason)` is the typed signal that the action was
+/// considered and determined to leave compositor state unchanged.
+///
+/// The IPC dispatch sites at `src/ipc/server.rs` (`process` recv-site and
+/// `drain_blocked_action_waiters`) map each variant to a `Response`:
+/// `Handled` ⇒ `Response::Handled`, `NoOp(reason)` ⇒
+/// `Response::NoOp(reason)`. Only `Action::MoveWindowToWorkspace` /
+/// `Action::MoveWindowToWorkspaceById` currently produce `NoOp`; every other
+/// dispatch arm continues to return `Handled`.
+///
+/// Unlike [`DoActionError`], this enum is matched at a single recv-site in
+/// `process` (no parity-pair between dispatch sites to guard). A `_` wildcard
+/// would be safe wrt site-parity but would silently subsume future variants
+/// — the exhaustive match is therefore for classification surface, not
+/// cross-site consistency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DoActionOutcome {
+    Handled,
+    NoOp(niri_ipc::NoOpReason),
+}
+
 /// Outcome of [`Layout::toggle_workspace_sticky`]. Carries enough information
 /// for the dispatch layer to log the toggle direction and decide whether to
 /// fire the cursor-warp / redraw pair.

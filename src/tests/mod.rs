@@ -17,6 +17,7 @@ mod keyboard_shortcuts_inhibit_cross_activity;
 mod layer_shell;
 mod move_window_to_monitor_by_id_cross_activity;
 mod move_window_to_workspace_by_id_cross_activity;
+mod move_window_to_workspace_no_op_self;
 mod move_workspace_to_monitor_multi_activity_cross_activity;
 mod open_on_activity_destroyed_target_cross_activity;
 mod queued_activity_switch_cross_activity;
