@@ -455,14 +455,23 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
             }
 
             // Chain a second request to resolve activity ids → names for the
-            // row annotations. On failure, each arm emits a diagnostic and
-            // falls through with an empty map: annotations degrade to the bare
-            // numeric form `[activity 7]` and the active-activity header is
-            // omitted. The snapshot may also straddle an activity-switch tick
-            // — the printer renders whichever activity was current at the
-            // chained request, which is best-effort by construction.
+            // row annotations. The chained request opens a fresh connection
+            // rather than reusing `socket`, so older niri versions that close
+            // the socket after a single request degrade cleanly to the
+            // empty-map fallback instead of surfacing an IO error from a
+            // closed-after-Workspaces socket. The version-fetch path earlier
+            // in this function follows the same one-request-per-connection
+            // discipline for the same reason. Each failure arm emits a
+            // distinct diagnostic and falls through with an empty map (three
+            // separate arms rather than a single `_ =>` catch-all, so the
+            // failure mode is debuggable from stderr alone): annotations
+            // degrade to the bare numeric form `[activity 7]` and the
+            // active-activity header is omitted. The snapshot may also
+            // straddle an activity-switch tick — the printer renders
+            // whichever activity was current at the chained request, which
+            // is best-effort by construction.
             let (names, active_name): (HashMap<u64, String>, Option<String>) =
-                match socket.send(Request::Activities) {
+                match Socket::connect().and_then(|mut s| s.send(Request::Activities)) {
                     Ok(Ok(Response::Activities(acts))) => {
                         let actives: Vec<_> = acts.iter().filter(|a| a.is_active).collect();
                         debug_assert!(
@@ -490,7 +499,8 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                     Err(io_err) => {
                         eprintln!(
                             "niri msg workspaces: IO error on chained Activities request \
-                             ({io_err}); rendering bare numeric annotations"
+                             (failed to connect or send: {io_err}); rendering bare numeric \
+                             annotations"
                         );
                         (HashMap::new(), None)
                     }
