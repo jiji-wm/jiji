@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap};
 use std::io::ErrorKind;
 use std::iter::Peekable;
 use std::path::Path;
@@ -9,11 +10,75 @@ use niri_ipc::socket::Socket;
 use niri_ipc::{
     Action, Activity, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode,
     Output, OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
+    Workspace,
 };
 use serde_json::json;
 
 use crate::cli::Msg;
 use crate::utils::version;
+
+/// Render the activity annotation for a workspace row.
+///
+/// Returns ` [activity "X"]` (single) or ` [activities "X", "Y"]` (multi),
+/// with the leading space included so the caller can append it directly.
+///
+/// Activity labels are looked up in `names` (id → name); ids missing from
+/// the map fall back to bare numerics (`[activity 99]`). The label list is
+/// sorted ascending for determinism — the wire-side `activities` Vec is
+/// id-sorted but the displayed list is name-sorted so the human-readable
+/// output is stable across rename events.
+fn format_annotation(ws: &Workspace, names: &HashMap<u64, String>) -> String {
+    debug_assert!(
+        !ws.activities.is_empty(),
+        "workspace activities must be non-empty per niri-ipc Workspace contract"
+    );
+
+    let mut labels: Vec<String> = ws
+        .activities
+        .iter()
+        .map(|aid| match names.get(aid) {
+            Some(name) => format!("\"{name}\""),
+            None => format!("{aid}"),
+        })
+        .collect();
+    labels.sort();
+
+    let keyword = if ws.activities.len() == 1 {
+        "activity"
+    } else {
+        "activities"
+    };
+    format!(" [{keyword} {}]", labels.join(", "))
+}
+
+/// Render a single workspace row in the activity-aware human-readable shape.
+///
+/// Column layout:
+/// `<is_active 3ch><idx-or-dash 2ch right>  <id=N 6ch left>  <name 10ch left><annotation>`
+///
+/// Hidden workspaces (`!is_in_active_activity`) render `-` in the idx column
+/// rather than the sentinel `0` carried in `ws.idx` — the `idx` field is only
+/// meaningful when `is_in_active_activity` is true (see the `Workspace.idx`
+/// contract in `niri-ipc`).
+///
+/// Names wider than 10 characters push the annotation rightward without truncation —
+/// the column width is a left-pad minimum, not a cap.
+fn format_row(ws: &Workspace, names: &HashMap<u64, String>) -> String {
+    let is_active = if ws.is_active { " * " } else { "   " };
+    let idx_or_dash = if ws.is_in_active_activity {
+        format!("{}", ws.idx)
+    } else {
+        "-".to_owned()
+    };
+    let id_col = format!("id={}", ws.id);
+    let name_col = match ws.name.as_deref() {
+        Some(n) => format!("\"{n}\""),
+        None => String::new(),
+    };
+    let annotation = format_annotation(ws, names);
+
+    format!("{is_active}{idx_or_dash:>2}  {id_col:<6}  {name_col:<10}{annotation}")
+}
 
 pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
     // For actions taking paths, prepend the niri CLI's working directory.
@@ -373,7 +438,7 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
             }
         }
         Msg::Workspaces => {
-            let Response::Workspaces(mut response) = response else {
+            let Response::Workspaces(response) = response else {
                 bail!("unexpected response: expected Workspaces, got {response:?}");
             };
 
@@ -389,35 +454,108 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            response.sort_by_key(|ws| ws.idx);
-            response.sort_by(|a, b| a.output.cmp(&b.output));
-
-            let mut current_output = if let Some(output) = response[0].output.as_deref() {
-                println!("Output \"{output}\":");
-                Some(output)
-            } else {
-                println!("No output:");
-                None
-            };
-
-            for ws in &response {
-                if ws.output.as_deref() != current_output {
-                    let output = ws.output.as_deref().context(
-                        "invalid response: workspace with no output \
-                         following a workspace with an output",
-                    )?;
-                    current_output = Some(output);
-                    println!("\nOutput \"{output}\":");
-                }
-
-                let is_active = if ws.is_active { " * " } else { "   " };
-                let idx = ws.idx;
-                let name = if let Some(name) = ws.name.as_deref() {
-                    format!(" \"{name}\"")
-                } else {
-                    String::new()
+            // Chain a second request to resolve activity ids → names for the
+            // row annotations. On failure, each arm emits a diagnostic and
+            // falls through with an empty map: annotations degrade to the bare
+            // numeric form `[activity 7]` and the active-activity header is
+            // omitted. The snapshot may also straddle an activity-switch tick
+            // — the printer renders whichever activity was current at the
+            // chained request, which is best-effort by construction.
+            let (names, active_name): (HashMap<u64, String>, Option<String>) =
+                match socket.send(Request::Activities) {
+                    Ok(Ok(Response::Activities(acts))) => {
+                        let actives: Vec<_> = acts.iter().filter(|a| a.is_active).collect();
+                        debug_assert!(
+                            actives.len() <= 1,
+                            "niri-ipc Activities reported >1 active activity: {actives:?}"
+                        );
+                        let active_name = actives.first().map(|a| a.name.clone());
+                        let names = acts.into_iter().map(|a| (a.id, a.name)).collect();
+                        (names, active_name)
+                    }
+                    Ok(Ok(other)) => {
+                        eprintln!(
+                            "niri msg workspaces: unexpected response to Activities request \
+                             ({other:?}); rendering bare numeric annotations"
+                        );
+                        (HashMap::new(), None)
+                    }
+                    Ok(Err(reply_err)) => {
+                        eprintln!(
+                            "niri msg workspaces: compositor rejected Activities request \
+                             ({reply_err}); this niri version may not support activities"
+                        );
+                        (HashMap::new(), None)
+                    }
+                    Err(io_err) => {
+                        eprintln!(
+                            "niri msg workspaces: IO error on chained Activities request \
+                             ({io_err}); rendering bare numeric annotations"
+                        );
+                        (HashMap::new(), None)
+                    }
                 };
-                println!("{is_active}{idx}{name}");
+
+            if let Some(name) = &active_name {
+                println!("Active activity: \"{name}\"");
+                println!();
+            }
+
+            // Partition by output; rows with no output go into a separate
+            // Disconnected bucket printed last. BTreeMap gives stable
+            // ascending output-name ordering for the printed sections.
+            let mut by_output: BTreeMap<&str, Vec<&Workspace>> = BTreeMap::new();
+            let mut disconnected: Vec<&Workspace> = Vec::new();
+            for ws in &response {
+                match ws.output.as_deref() {
+                    Some(name) => by_output.entry(name).or_default().push(ws),
+                    None => disconnected.push(ws),
+                }
+            }
+
+            // Within an output: visible rows first (is_in_active_activity desc),
+            // then by idx asc, then id asc. The idx sort is only meaningful
+            // for the visible block — hidden rows all have `idx == 0` so they
+            // fall through to the id tiebreaker.
+            for bucket in by_output.values_mut() {
+                bucket.sort_by(|a, b| {
+                    b.is_in_active_activity
+                        .cmp(&a.is_in_active_activity)
+                        .then(a.idx.cmp(&b.idx))
+                        .then(a.id.cmp(&b.id))
+                });
+            }
+            disconnected.sort_by_key(|w| w.id);
+
+            let mut first_section = true;
+            for (output_name, workspaces) in &by_output {
+                if !first_section {
+                    println!();
+                }
+                first_section = false;
+                println!("Output \"{output_name}\":");
+                let mut prev_in_active: Option<bool> = None;
+                for ws in workspaces {
+                    if let Some(prev) = prev_in_active {
+                        if prev && !ws.is_in_active_activity {
+                            println!();
+                        }
+                    }
+                    println!("{}", format_row(ws, &names));
+                    prev_in_active = Some(ws.is_in_active_activity);
+                }
+            }
+
+            // Skip the Disconnected header entirely when the bucket is empty —
+            // a bare header with nothing under it is misleading noise.
+            if !disconnected.is_empty() {
+                if !first_section {
+                    println!();
+                }
+                println!("Disconnected:");
+                for ws in &disconnected {
+                    println!("{}", format_row(ws, &names));
+                }
             }
         }
         Msg::KeyboardLayouts => {
@@ -866,5 +1004,126 @@ mod tests {
         assert_snapshot!(fmt_rounded(2.004), @"2");
         assert_snapshot!(fmt_rounded(2.006), @"2.01");
         assert_snapshot!(fmt_rounded(2.1), @"2.10");
+    }
+
+    fn ws(
+        id: u64,
+        idx: u8,
+        name: Option<&str>,
+        output: Option<&str>,
+        activities: Vec<u64>,
+        is_in_active_activity: bool,
+        is_active: bool,
+    ) -> Workspace {
+        Workspace {
+            id,
+            idx,
+            name: name.map(str::to_owned),
+            output: output.map(str::to_owned),
+            is_urgent: false,
+            is_active,
+            is_focused: false,
+            active_window_id: None,
+            activities,
+            is_sticky: false,
+            is_in_active_activity,
+        }
+    }
+
+    #[test]
+    fn annotation_single_activity_visible() {
+        let w = ws(6, 1, None, Some("DP-3"), vec![1], true, true);
+        let names = HashMap::from([(1u64, "Default".to_owned())]);
+        assert_eq!(format_annotation(&w, &names), " [activity \"Default\"]");
+    }
+
+    #[test]
+    fn annotation_multi_activity_visible() {
+        let w = ws(15, 3, None, Some("DP-3"), vec![1, 4], true, false);
+        let names = HashMap::from([(1u64, "Default".to_owned()), (4u64, "work".to_owned())]);
+        assert_eq!(
+            format_annotation(&w, &names),
+            " [activities \"Default\", \"work\"]"
+        );
+    }
+
+    #[test]
+    fn annotation_single_activity_hidden() {
+        let w = ws(4, 0, None, Some("DP-3"), vec![2], false, false);
+        let names = HashMap::from([(2u64, "niri".to_owned())]);
+        assert_eq!(format_annotation(&w, &names), " [activity \"niri\"]");
+    }
+
+    #[test]
+    fn annotation_multi_activity_hidden() {
+        let w = ws(11, 0, Some("notes"), Some("DP-3"), vec![2, 3], false, false);
+        let names = HashMap::from([(2u64, "niri".to_owned()), (3u64, "research".to_owned())]);
+        assert_eq!(
+            format_annotation(&w, &names),
+            " [activities \"niri\", \"research\"]"
+        );
+    }
+
+    #[test]
+    fn annotation_unknown_activity_falls_back_to_id() {
+        let w = ws(4, 0, None, Some("DP-3"), vec![99], false, false);
+        let names = HashMap::new();
+        assert_eq!(format_annotation(&w, &names), " [activity 99]");
+    }
+
+    #[test]
+    fn annotation_sorts_activities_by_name_asc() {
+        // Wire order `[4, 1]`; expected annotation list `"Default", "work"`
+        // (ascending by quoted-name string). Pins independence from the
+        // wire-side activities Vec ordering.
+        let w = ws(15, 3, None, Some("DP-3"), vec![4, 1], true, false);
+        let names = HashMap::from([(1u64, "Default".to_owned()), (4u64, "work".to_owned())]);
+        assert_eq!(
+            format_annotation(&w, &names),
+            " [activities \"Default\", \"work\"]"
+        );
+    }
+
+    #[test]
+    fn format_row_visible_named() {
+        let w = ws(6, 1, Some("main"), Some("DP-3"), vec![1], true, true);
+        let names = HashMap::from([(1u64, "Default".to_owned())]);
+        assert_eq!(
+            format_row(&w, &names),
+            " *  1  id=6    \"main\"     [activity \"Default\"]"
+        );
+    }
+
+    #[test]
+    fn format_row_visible_unnamed() {
+        let w = ws(8, 2, None, Some("DP-3"), vec![1], true, false);
+        let names = HashMap::from([(1u64, "Default".to_owned())]);
+        assert_eq!(
+            format_row(&w, &names),
+            "    2  id=8               [activity \"Default\"]"
+        );
+    }
+
+    #[test]
+    fn format_row_hidden_unnamed_renders_dash() {
+        // Load-bearing: pins the hidden-row `-` rendering rule. The
+        // `(idx=0, !is_in_active_activity)` sentinel must never surface
+        // as a literal `0` in human-readable output.
+        let w = ws(4, 0, None, Some("DP-3"), vec![2], false, false);
+        let names = HashMap::from([(2u64, "niri".to_owned())]);
+        assert_eq!(
+            format_row(&w, &names),
+            "    -  id=4               [activity \"niri\"]"
+        );
+    }
+
+    #[test]
+    fn format_row_hidden_named_multi_activity() {
+        let w = ws(11, 0, Some("notes"), Some("DP-3"), vec![2, 3], false, false);
+        let names = HashMap::from([(2u64, "niri".to_owned()), (3u64, "research".to_owned())]);
+        assert_eq!(
+            format_row(&w, &names),
+            "    -  id=11   \"notes\"    [activities \"niri\", \"research\"]"
+        );
     }
 }
