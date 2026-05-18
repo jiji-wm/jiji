@@ -143,6 +143,18 @@ pub type Reply = Result<Response, String>;
 pub enum Response {
     /// A request that does not need a response was handled successfully.
     Handled,
+    /// The action was accepted, considered, and determined to be a no-op for the stated reason; no
+    /// compositor state changed. The reply is distinguishable from [`Response::Handled`] so
+    /// clients can surface a clear breadcrumb when the requested operation already matched the
+    /// current state.
+    ///
+    /// An action that changes state replies [`Response::Handled`]. An action whose preconditions
+    /// fail (e.g. unknown window or workspace reference) replies `Reply::Err`. `NoOp` is reserved
+    /// for the case where preconditions are satisfied but no state change is required.
+    ///
+    /// Used for requests where "the right thing to do is nothing" is a legitimate, durable outcome
+    /// (not an error and not the same as a successful state-changing action).
+    NoOp(NoOpReason),
     /// The version string for the running niri instance.
     Version(String),
     /// Information about connected outputs.
@@ -177,6 +189,29 @@ pub enum Response {
     OverviewState(Overview),
     /// Information about screencasts.
     Casts(Vec<Cast>),
+}
+
+/// Reason a compositor action was a no-op.
+///
+/// `#[non_exhaustive]` so future durable no-op cases can be added without a breaking change.
+/// Variants here are stable classifications — a transient no-op (e.g. the compositor is currently
+/// animating and might later queue-and-retry) would not appear here.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub enum NoOpReason {
+    /// The action's target already matches the current state. The action was a no-op because
+    /// moving the window to the stated target would not change anything.
+    AlreadyOnTarget {
+        /// Workspace id that was both source and target for the action.
+        ///
+        /// For [`Action::MoveWindowToWorkspace`] / [`Action::MoveWindowToWorkspaceById`], this is
+        /// the workspace the targeted window already lives on — the unwrapped value of
+        /// [`Window::workspace_id`] for the targeted window before the request was processed. The
+        /// `None` case of [`Window::workspace_id`] is ruled out: this variant is only emitted when
+        /// the window currently lives on a workspace.
+        workspace_id: u64,
+    },
 }
 
 /// Overview information.
