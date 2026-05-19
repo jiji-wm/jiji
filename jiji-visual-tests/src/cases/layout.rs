@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use jiji::animation::Clock;
+use jiji::layout::{ActivateWindow, AddWindowTarget, LayoutElement as _, Options, SizingMode};
+use jiji::render_helpers::{RenderCtx, RenderTarget};
 use jiji_config::{Color, OutputName, PresetSize};
-use niri::animation::Clock;
-use niri::layout::{ActivateWindow, AddWindowTarget, LayoutElement as _, Options, SizingMode};
-use niri::render_helpers::{RenderCtx, RenderTarget};
 use smithay::backend::renderer::element::RenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::desktop::layer_map_for_output;
@@ -20,7 +20,7 @@ pub struct Layout {
     output: Output,
     windows: Vec<TestWindow>,
     clock: Clock,
-    layout: niri::layout::Layout<TestWindow>,
+    layout: jiji::layout::Layout<TestWindow>,
     start_time: Duration,
     steps: HashMap<Duration, DynStepFn>,
 }
@@ -71,7 +71,7 @@ impl Layout {
             },
             ..Default::default()
         };
-        let mut layout = niri::layout::Layout::with_options(clock.clone(), options);
+        let mut layout = jiji::layout::Layout::with_options(clock.clone(), options);
         layout.add_output(output.clone(), None);
 
         let start_time = clock.now_unadjusted();

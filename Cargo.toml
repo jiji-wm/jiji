@@ -38,7 +38,7 @@ rev = "ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef"
 # path = "../smithay/smithay-drm-extras"
 
 [package]
-name = "niri"
+name = "jiji"
 version.workspace = true
 description.workspace = true
 authors.workspace = true
@@ -171,7 +171,7 @@ similar.opt-level = 3
 [package.metadata.generate-rpm]
 version = "26.04"
 assets = [
-    { source = "target/release/niri", dest = "/usr/bin/", mode = "755" },
+    { source = "target/release/jiji", dest = "/usr/bin/", mode = "755" },
     { source = "resources/niri-session", dest = "/usr/bin/", mode = "755" },
     { source = "resources/niri.desktop", dest = "/usr/share/wayland-sessions/", mode = "644" },
     { source = "resources/niri-portals.conf", dest = "/usr/share/xdg-desktop-portal/", mode = "644" },
@@ -185,7 +185,7 @@ fuzzel = "*"
 [package.metadata.deb]
 depends = "alacritty, fuzzel"
 assets = [
-    ["target/release/niri", "usr/bin/", "755"],
+    ["target/release/jiji", "usr/bin/", "755"],
     ["resources/niri-session", "usr/bin/", "755"],
     ["resources/niri.desktop", "/usr/share/wayland-sessions/", "644"],
     ["resources/niri-portals.conf", "/usr/share/xdg-desktop-portal/", "644"],

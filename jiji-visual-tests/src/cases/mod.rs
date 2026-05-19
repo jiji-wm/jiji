@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use niri::animation::Clock;
+use jiji::animation::Clock;
 use smithay::backend::renderer::element::RenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Physical, Size};

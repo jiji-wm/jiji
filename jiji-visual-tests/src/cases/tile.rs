@@ -1,10 +1,10 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use jiji::layout::Options;
+use jiji::render_helpers::xray::XrayPos;
+use jiji::render_helpers::{RenderCtx, RenderTarget};
 use jiji_config::Color;
-use niri::layout::Options;
-use niri::render_helpers::xray::XrayPos;
-use niri::render_helpers::{RenderCtx, RenderTarget};
 use smithay::backend::renderer::element::RenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Physical, Point, Rectangle, Size};
@@ -14,7 +14,7 @@ use crate::test_window::TestWindow;
 
 pub struct Tile {
     window: TestWindow,
-    tile: niri::layout::tile::Tile<TestWindow>,
+    tile: jiji::layout::tile::Tile<TestWindow>,
 }
 
 impl Tile {
@@ -75,7 +75,7 @@ impl Tile {
             ..Default::default()
         };
 
-        let mut tile = niri::layout::tile::Tile::new(
+        let mut tile = jiji::layout::tile::Tile::new(
             window.clone(),
             size.to_f64(),
             1.,

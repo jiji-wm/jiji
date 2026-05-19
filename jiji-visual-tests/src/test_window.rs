@@ -2,16 +2,16 @@ use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::rc::Rc;
 
-use niri::layout::{
+use jiji::layout::{
     ConfigureIntent, InteractiveResizeData, LayoutElement, LayoutElementRenderElement,
     LayoutElementRenderSnapshot, SizingMode,
 };
-use niri::render_helpers::offscreen::OffscreenData;
-use niri::render_helpers::renderer::NiriRenderer;
-use niri::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
-use niri::render_helpers::RenderCtx;
-use niri::utils::transaction::Transaction;
-use niri::window::ResolvedWindowRules;
+use jiji::render_helpers::offscreen::OffscreenData;
+use jiji::render_helpers::renderer::NiriRenderer;
+use jiji::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
+use jiji::render_helpers::RenderCtx;
+use jiji::utils::transaction::Transaction;
+use jiji::window::ResolvedWindowRules;
 use smithay::backend::renderer::element::Kind;
 use smithay::output::{self, Output};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
