@@ -331,7 +331,7 @@ fn env_config_path() -> Option<PathBuf> {
 }
 
 fn default_config_path() -> Option<PathBuf> {
-    let Some(dirs) = ProjectDirs::from("", "", "niri") else {
+    let Some(dirs) = ProjectDirs::from("", "", "jiji") else {
         warn!("error retrieving home directory");
         return None;
     };
@@ -342,7 +342,7 @@ fn default_config_path() -> Option<PathBuf> {
 }
 
 fn system_config_path() -> PathBuf {
-    PathBuf::from("/etc/niri/config.kdl")
+    PathBuf::from("/etc/jiji/config.kdl")
 }
 
 fn config_path(cli_path: Option<PathBuf>) -> ConfigPath {
