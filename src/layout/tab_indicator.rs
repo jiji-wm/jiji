@@ -1,7 +1,7 @@
 use std::iter::zip;
 use std::mem;
 
-use niri_config::{CornerRadius, Gradient, GradientRelativeTo, TabIndicatorPosition};
+use jiji_config::{CornerRadius, Gradient, GradientRelativeTo, TabIndicatorPosition};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::tile::Tile;
@@ -19,7 +19,7 @@ pub struct TabIndicator {
     shader_locs: Vec<Point<f64, Logical>>,
     shaders: Vec<BorderRenderElement>,
     open_anim: Option<Animation>,
-    config: niri_config::TabIndicator,
+    config: jiji_config::TabIndicator,
 }
 
 #[derive(Debug)]
@@ -37,7 +37,7 @@ niri_render_elements! {
 }
 
 impl TabIndicator {
-    pub fn new(config: niri_config::TabIndicator) -> Self {
+    pub fn new(config: jiji_config::TabIndicator) -> Self {
         Self {
             shader_locs: Vec::new(),
             shaders: Vec::new(),
@@ -46,7 +46,7 @@ impl TabIndicator {
         }
     }
 
-    pub fn update_config(&mut self, config: niri_config::TabIndicator) {
+    pub fn update_config(&mut self, config: jiji_config::TabIndicator) {
         self.config = config;
     }
 
@@ -68,7 +68,7 @@ impl TabIndicator {
         self.open_anim.is_some()
     }
 
-    pub fn start_open_animation(&mut self, clock: Clock, config: niri_config::Animation) {
+    pub fn start_open_animation(&mut self, clock: Clock, config: jiji_config::Animation) {
         self.open_anim = Some(Animation::new(clock, 0., 1., 0., config));
     }
 
@@ -340,7 +340,7 @@ impl TabIndicator {
         }
     }
 
-    pub fn config(&self) -> niri_config::TabIndicator {
+    pub fn config(&self) -> jiji_config::TabIndicator {
         self.config
     }
 }
@@ -351,7 +351,7 @@ impl TabInfo {
         position: Point<f64, Logical>,
         is_active: bool,
         is_urgent: bool,
-        config: &niri_config::TabIndicator,
+        config: &jiji_config::TabIndicator,
     ) -> Self {
         let rules = tile.window().rules();
         let rule = rules.tab_indicator;

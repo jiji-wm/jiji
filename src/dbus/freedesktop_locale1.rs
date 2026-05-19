@@ -1,5 +1,5 @@
 use futures_util::StreamExt;
-use niri_config::Xkb;
+use jiji_config::Xkb;
 use zbus::names::InterfaceName;
 use zbus::{fdo, zvariant};
 

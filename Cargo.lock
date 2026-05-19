@@ -1797,6 +1797,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jiji-config"
+version = "26.4.0"
+dependencies = [
+ "bitflags 2.11.1",
+ "csscolorparser",
+ "diff",
+ "insta",
+ "jiji-ipc",
+ "knuffel",
+ "miette",
+ "pretty_assertions",
+ "regex",
+ "smithay",
+ "tracing",
+ "tracy-client",
+]
+
+[[package]]
 name = "jiji-ipc"
 version = "26.4.0"
 dependencies = [
@@ -2271,12 +2289,12 @@ dependencies = [
  "indexmap",
  "input",
  "insta",
+ "jiji-config",
  "jiji-ipc",
  "keyframe",
  "libc",
  "libdisplay-info",
  "log",
- "niri-config",
  "ordered-float",
  "pango",
  "pangocairo",
@@ -2305,32 +2323,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "niri-config"
-version = "26.4.0"
-dependencies = [
- "bitflags 2.11.1",
- "csscolorparser",
- "diff",
- "insta",
- "jiji-ipc",
- "knuffel",
- "miette",
- "pretty_assertions",
- "regex",
- "smithay",
- "tracing",
- "tracy-client",
-]
-
-[[package]]
 name = "niri-visual-tests"
 version = "26.4.0"
 dependencies = [
  "anyhow",
  "gtk4",
+ "jiji-config",
  "libadwaita",
  "niri",
- "niri-config",
  "smithay",
  "tracing",
  "tracing-subscriber",

@@ -13,8 +13,8 @@ use std::{env, mem, thread};
 use _server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as KdeDecorationsMode;
 use anyhow::{bail, ensure, Context};
 use calloop::futures::Scheduler;
-use niri_config::debug::PreviewRender;
-use niri_config::{
+use jiji_config::debug::PreviewRender;
+use jiji_config::{
     Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout, WarpMouseToFocusMode,
     WorkspaceReference, Xkb,
 };
@@ -199,7 +199,7 @@ pub struct Niri {
     /// This does not include transient output config changes done via IPC. It is only used when
     /// reloading the config from disk to determine if the output configuration should be reloaded
     /// (and transient changes dropped).
-    pub config_file_output_config: niri_config::Outputs,
+    pub config_file_output_config: jiji_config::Outputs,
 
     pub config_file_watcher: Option<Watcher>,
 
@@ -1887,7 +1887,7 @@ impl State {
 
     pub fn modify_output_config<F>(&mut self, name: &str, fun: F)
     where
-        F: FnOnce(&mut niri_config::Output),
+        F: FnOnce(&mut jiji_config::Output),
     {
         // Try hard to find the output config section corresponding to the output set by the
         // user. Since if we add a new section and some existing section also matches the
@@ -1917,7 +1917,7 @@ impl State {
         let config = if let Some(config) = config.outputs.find_mut(match_name) {
             config
         } else {
-            config.outputs.0.push(niri_config::Output {
+            config.outputs.0.push(jiji_config::Output {
                 // Save name as set by the user.
                 name: String::from(name),
                 ..Default::default()
@@ -1935,7 +1935,7 @@ impl State {
             jiji_ipc::OutputAction::Mode { mode } => {
                 config.mode = match mode {
                     jiji_ipc::ModeToSet::Automatic => None,
-                    jiji_ipc::ModeToSet::Specific(mode) => Some(niri_config::output::Mode {
+                    jiji_ipc::ModeToSet::Specific(mode) => Some(jiji_config::output::Mode {
                         custom: false,
                         mode,
                     }),
@@ -1943,7 +1943,7 @@ impl State {
                 config.modeline = None;
             }
             jiji_ipc::OutputAction::CustomMode { mode } => {
-                config.mode = Some(niri_config::output::Mode { custom: true, mode });
+                config.mode = Some(jiji_config::output::Mode { custom: true, mode });
                 config.modeline = None;
             }
             jiji_ipc::OutputAction::Modeline {
@@ -1960,7 +1960,7 @@ impl State {
                 vsync_polarity,
             } => {
                 // Do not reset config.mode to None since it's used as a fallback.
-                config.modeline = Some(niri_config::output::Modeline {
+                config.modeline = Some(jiji_config::output::Modeline {
                     clock,
                     hdisplay,
                     hsync_start,
@@ -1984,7 +1984,7 @@ impl State {
             jiji_ipc::OutputAction::Position { position } => {
                 config.position = match position {
                     jiji_ipc::PositionToSet::Automatic => None,
-                    jiji_ipc::PositionToSet::Specific(position) => Some(niri_config::Position {
+                    jiji_ipc::PositionToSet::Specific(position) => Some(jiji_config::Position {
                         x: position.x,
                         y: position.y,
                     }),
@@ -1992,7 +1992,7 @@ impl State {
             }
             jiji_ipc::OutputAction::Vrr { vrr } => {
                 config.variable_refresh_rate = if vrr.vrr {
-                    Some(niri_config::Vrr {
+                    Some(jiji_config::Vrr {
                         on_demand: vrr.on_demand,
                     })
                 } else {
@@ -2763,7 +2763,7 @@ impl Niri {
             output: Output,
             name: OutputName,
             position: Option<Point<i32, Logical>>,
-            config: Option<niri_config::Position>,
+            config: Option<jiji_config::Position>,
         }
 
         let config = self.config.borrow();

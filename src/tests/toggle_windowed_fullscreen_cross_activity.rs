@@ -11,7 +11,7 @@
 //! beta, and asserts `Action::ToggleWindowedFullscreenById` flips
 //! `is_pending_windowed_fullscreen` to `true` on the dormant window.
 
-use niri_config::Action;
+use jiji_config::Action;
 
 use super::client::ClientId;
 use super::fixture::{config_with_two_activities, Fixture};

@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::iter::zip;
 use std::rc::Rc;
 
-use niri_config::{Action, Bind, Config, Key, ModKey, Modifiers, Trigger};
+use jiji_config::{Action, Bind, Config, Key, ModKey, Modifiers, Trigger};
 use pangocairo::cairo::{self, ImageSurface};
 use pangocairo::pango::{AttrColor, AttrInt, AttrList, AttrString, FontDescription, Weight};
 use smithay::backend::renderer::element::Kind;

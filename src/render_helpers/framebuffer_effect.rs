@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 
 use glam::{Mat3, Vec2};
-use niri_config::CornerRadius;
+use jiji_config::CornerRadius;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::{Element, Id, RenderElement};
 use smithay::backend::renderer::gles::{

@@ -7,8 +7,8 @@ use std::rc::Rc;
 
 use anyhow::Context;
 use arrayvec::ArrayVec;
+use jiji_config::{Action, Config};
 use jiji_ipc::SizeChange;
-use niri_config::{Action, Config};
 use pango::{Alignment, FontDescription};
 use pangocairo::cairo::{self, ImageSurface};
 use smithay::backend::allocator::Fourcc;

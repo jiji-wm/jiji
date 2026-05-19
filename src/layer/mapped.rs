@@ -1,5 +1,5 @@
-use niri_config::utils::MergeWith as _;
-use niri_config::{Config, LayerRule};
+use jiji_config::utils::MergeWith as _;
+use jiji_config::{Config, LayerRule};
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::Kind;
 use smithay::desktop::{LayerSurface, PopupKind, PopupManager};
@@ -43,7 +43,7 @@ pub struct MappedLayer {
     shadow: Shadow,
 
     /// The blur config, passed for background effect rendering.
-    blur_config: niri_config::Blur,
+    blur_config: jiji_config::Blur,
 
     /// The view size for the layer surface's output.
     view_size: Size<f64, Logical>,
@@ -279,7 +279,7 @@ impl MappedLayer {
             let popup_rules = match popup {
                 PopupKind::Xdg(_) => self.rules.popups,
                 // IME popups aren't affected by rules for regular popups.
-                PopupKind::InputMethod(_) => niri_config::ResolvedPopupsRules::default(),
+                PopupKind::InputMethod(_) => jiji_config::ResolvedPopupsRules::default(),
             };
             let alpha = alpha * popup_rules.opacity.unwrap_or(1.).clamp(0., 1.);
 

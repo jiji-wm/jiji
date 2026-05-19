@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use glam::{Mat3, Vec2};
-use niri_config::{
+use jiji_config::{
     Color, CornerRadius, GradientColorSpace, GradientInterpolation, HueInterpolation,
 };
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, UnderlyingStorage};

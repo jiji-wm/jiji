@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use insta::assert_snapshot;
-use niri_config::animations::{Curve, EasingParams, Kind};
+use jiji_config::animations::{Curve, EasingParams, Kind};
 
 use super::*;
 
@@ -29,7 +29,7 @@ fn make_options() -> Options {
     });
 
     let mut options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             gaps: 0.0,
             ..Default::default()
         },

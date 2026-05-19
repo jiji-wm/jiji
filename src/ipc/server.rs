@@ -15,12 +15,12 @@ use directories::BaseDirs;
 use futures_util::io::{AsyncReadExt, BufReader};
 use futures_util::{select_biased, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, FutureExt as _};
 use indexmap::IndexMap;
+use jiji_config::OutputName;
 use jiji_ipc::state::{EventStreamState, EventStreamStatePart as _};
 use jiji_ipc::{
     Action, Event, KeyboardLayouts, OutputConfigChanged, Overview, Reply, Request, Response,
     Timestamp, WindowLayout, Workspace,
 };
-use niri_config::OutputName;
 use smithay::desktop::layer_map_for_output;
 use smithay::input::pointer::{
     CursorIcon, CursorImageStatus, Focus, GrabStartData as PointerGrabStartData,
@@ -72,7 +72,7 @@ impl IpcConnId {
 
 /// Entry in [`IpcServer::blocked_action_waiters`].
 ///
-/// Holds the owned [`niri_config::Action`] so the drain site can re-dispatch
+/// Holds the owned [`jiji_config::Action`] so the drain site can re-dispatch
 /// without cloning from caller state, plus the send half of the response
 /// channel the async `process` task is awaiting on. On drain:
 ///
@@ -84,7 +84,7 @@ impl IpcConnId {
 /// - Drop without sending on a closed receiver (client gone between enqueue and drain). `process`'s
 ///   `rx.recv().await` has already been dropped in that case.
 struct BlockedWaiter {
-    action: niri_config::Action,
+    action: jiji_config::Action,
     tx: async_channel::Sender<Result<DoActionOutcome, DoActionError>>,
 }
 
@@ -260,7 +260,7 @@ impl IpcServer {
     pub(crate) fn test_simulate_blocked_request(
         &self,
         conn_id: IpcConnId,
-        action: niri_config::Action,
+        action: jiji_config::Action,
     ) -> Result<async_channel::Receiver<Result<DoActionOutcome, DoActionError>>, &'static str> {
         // Mirror the contains-key admission gate at the live
         // [`jiji_ipc::Request::Action`] site. Read borrow dropped before the
@@ -767,7 +767,7 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
 
             let (tx, rx) = async_channel::bounded::<Result<DoActionOutcome, DoActionError>>(1);
 
-            let action = niri_config::Action::from(action);
+            let action = jiji_config::Action::from(action);
             let waiters = ctx.blocked_action_waiters.clone();
             let conn_id = ctx.conn_id;
             ctx.event_loop.insert_idle(move |state| {
@@ -1840,12 +1840,12 @@ mod tests {
     // depth-1 admission, closed-receiver prune, and re-block FIFO pin.
     // Full `State::refresh` drain wiring is unreachable from unit tests.
 
-    fn dummy_action() -> niri_config::Action {
+    fn dummy_action() -> jiji_config::Action {
         // `Spawn` is the cheapest `Action` variant to construct by hand and
         // has trivial equality semantics. The drain path only clones the
         // action; the specific variant is irrelevant to the registry
         // invariants these tests pin.
-        niri_config::Action::Spawn(vec![])
+        jiji_config::Action::Spawn(vec![])
     }
 
     fn make_waiter() -> (

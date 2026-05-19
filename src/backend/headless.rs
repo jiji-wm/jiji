@@ -7,7 +7,7 @@ use std::mem;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
-use niri_config::OutputName;
+use jiji_config::OutputName;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::egl::native::EGLSurfacelessDisplay;
 use smithay::backend::egl::{EGLContext, EGLDisplay};

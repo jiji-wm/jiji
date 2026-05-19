@@ -7,7 +7,7 @@ use accesskit::{
 };
 use accesskit_unix::Adapter;
 use calloop::LoopHandle;
-use niri_config::MruScope;
+use jiji_config::MruScope;
 
 use crate::layout::workspace::WorkspaceId;
 use crate::niri::{KeyboardFocus, Niri, State};

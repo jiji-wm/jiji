@@ -30,8 +30,8 @@
 
 use std::time::{Duration, Instant};
 
+use jiji_config::{Action, ActivityReference};
 use jiji_ipc::ActivityReferenceArg;
-use niri_config::{Action, ActivityReference};
 use smithay::utils::Point;
 
 use super::fixture::{config_with_two_activities, Fixture};
@@ -158,7 +158,7 @@ fn hard_blocked_switch_activity_queues_drains_on_unblock() {
     let rx = ipc(&mut f)
         .test_simulate_blocked_request(
             conn_id,
-            niri_config::Action::SwitchActivity(ActivityReference::Name("beta".into())),
+            jiji_config::Action::SwitchActivity(ActivityReference::Name("beta".into())),
         )
         .expect("first enqueue under a fresh conn_id must be admitted");
 
@@ -249,7 +249,7 @@ fn depth_one_admission_rejects_second_enqueue_per_connection() {
     let rx_a = ipc(&mut f)
         .test_simulate_blocked_request(
             conn_a,
-            niri_config::Action::SwitchActivity(ActivityReference::Name("beta".into())),
+            jiji_config::Action::SwitchActivity(ActivityReference::Name("beta".into())),
         )
         .expect("first enqueue under conn_a must be admitted");
 
@@ -260,7 +260,7 @@ fn depth_one_admission_rejects_second_enqueue_per_connection() {
     let dup_err = ipc(&mut f)
         .test_simulate_blocked_request(
             conn_a,
-            niri_config::Action::SwitchActivity(ActivityReference::Name("beta".into())),
+            jiji_config::Action::SwitchActivity(ActivityReference::Name("beta".into())),
         )
         .expect_err("second enqueue under the same conn_id must be rejected (depth-1 admission)");
     assert_eq!(
@@ -273,7 +273,7 @@ fn depth_one_admission_rejects_second_enqueue_per_connection() {
     let rx_b = ipc(&mut f)
         .test_simulate_blocked_request(
             conn_b,
-            niri_config::Action::SwitchActivity(ActivityReference::Name("beta".into())),
+            jiji_config::Action::SwitchActivity(ActivityReference::Name("beta".into())),
         )
         .expect("enqueue under a distinct conn_id must be admitted");
 

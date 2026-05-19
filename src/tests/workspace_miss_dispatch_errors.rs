@@ -14,7 +14,7 @@
 //! surface (the keybinding loop silently drops `Err` arms; only the IPC
 //! envelope path surfaces them).
 
-use niri_config::{Action, ActivityReference, WorkspaceReference};
+use jiji_config::{Action, ActivityReference, WorkspaceReference};
 
 use super::fixture::{config_with_two_activities, Fixture};
 use crate::layout::{

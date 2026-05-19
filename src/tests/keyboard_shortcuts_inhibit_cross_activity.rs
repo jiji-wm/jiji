@@ -17,7 +17,7 @@
 //!   synthesising a focus event that also triggers an activity switch, which needs cross-activity
 //!   window placement not yet available in the test fixture vocabulary. Deferred.
 
-use niri_config::{Action, ActivityReference};
+use jiji_config::{Action, ActivityReference};
 use smithay::reexports::wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1;
 use smithay::reexports::wayland_server::Resource as _;
 use wayland_client::protocol::wl_surface::WlSurface as ClientSurface;
@@ -75,7 +75,7 @@ fn create_inhibitor(
     (inhibitor, server_surface)
 }
 
-fn beta_id(f: &mut Fixture) -> niri_config::ActivityReference {
+fn beta_id(f: &mut Fixture) -> jiji_config::ActivityReference {
     let id = f
         .niri()
         .layout
@@ -87,7 +87,7 @@ fn beta_id(f: &mut Fixture) -> niri_config::ActivityReference {
     ActivityReference::Id(id.get())
 }
 
-fn alpha_id(f: &mut Fixture) -> niri_config::ActivityReference {
+fn alpha_id(f: &mut Fixture) -> jiji_config::ActivityReference {
     let id = f
         .niri()
         .layout

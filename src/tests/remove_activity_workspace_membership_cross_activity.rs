@@ -15,7 +15,7 @@
 //! coverage keeps each branch's discriminating assertion attributable to its
 //! own failure mode.
 
-use niri_config::{Action, ActivityReference, Config, WorkspaceReference};
+use jiji_config::{Action, ActivityReference, Config, WorkspaceReference};
 
 use super::client::ClientId;
 use super::fixture::Fixture;

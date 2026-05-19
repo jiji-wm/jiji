@@ -37,12 +37,12 @@ use std::rc::Rc;
 use std::time::Duration;
 use std::{fmt, mem};
 
-use jiji_ipc::{ActivityReferenceArg, ColumnDisplay, PositionChange, SizeChange, WindowLayout};
-use monitor::{InsertHint, InsertPosition, InsertWorkspace, MonitorAddWindowTarget};
-use niri_config::utils::MergeWith as _;
-use niri_config::{
+use jiji_config::utils::MergeWith as _;
+use jiji_config::{
     Config, CornerRadius, LayoutPart, PresetSize, Workspace as WorkspaceConfig, WorkspaceReference,
 };
+use jiji_ipc::{ActivityReferenceArg, ColumnDisplay, PositionChange, SizeChange, WindowLayout};
+use monitor::{InsertHint, InsertPosition, InsertWorkspace, MonitorAddWindowTarget};
 use scrolling::{Column, ColumnWidth};
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
@@ -202,7 +202,7 @@ pub trait LayoutElement {
     fn id(&self) -> &Self::Id;
 
     /// Updates the config for the element.
-    fn update_config(&mut self, blur_config: niri_config::Blur) {
+    fn update_config(&mut self, blur_config: jiji_config::Blur) {
         let _ = blur_config;
     }
 
@@ -462,11 +462,11 @@ pub struct Layout<W: LayoutElement> {
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Options {
-    pub layout: niri_config::Layout,
-    pub animations: niri_config::Animations,
-    pub gestures: niri_config::Gestures,
-    pub overview: niri_config::Overview,
-    pub blur: niri_config::Blur,
+    pub layout: jiji_config::Layout,
+    pub animations: jiji_config::Animations,
+    pub gestures: jiji_config::Gestures,
+    pub overview: jiji_config::Overview,
+    pub blur: jiji_config::Blur,
     // Debug flags.
     pub disable_resize_throttling: bool,
     pub disable_transactions: bool,
@@ -745,13 +745,13 @@ struct InteractiveMoveData<W: LayoutElement> {
     /// Config overrides for the output where the window is currently located.
     ///
     /// Cached here to be accessible while an output is removed.
-    pub(self) output_config: Option<niri_config::LayoutPart>,
+    pub(self) output_config: Option<jiji_config::LayoutPart>,
     /// Config overrides for the workspace where the window is currently located.
     ///
     /// To avoid sudden window changes when starting an interactive move, it will remember the
     /// config overrides for the workspace where the move originated from. As soon as the window
     /// moves over some different workspace though, this override will reset.
-    pub(self) workspace_config: Option<(WorkspaceId, niri_config::LayoutPart)>,
+    pub(self) workspace_config: Option<(WorkspaceId, jiji_config::LayoutPart)>,
 }
 
 #[derive(Debug)]
@@ -967,7 +967,7 @@ impl Options {
         }
     }
 
-    fn with_merged_layout(mut self, part: Option<&niri_config::LayoutPart>) -> Self {
+    fn with_merged_layout(mut self, part: Option<&jiji_config::LayoutPart>) -> Self {
         if let Some(part) = part {
             self.layout.merge_with(part);
         }
@@ -6888,7 +6888,7 @@ impl<W: LayoutElement> Layout<W> {
     /// callers need not re-check.
     pub(crate) fn reconcile_activities_on_reload_remove(
         &mut self,
-        config_activities: &[niri_config::ActivityDecl],
+        config_activities: &[jiji_config::ActivityDecl],
     ) -> Result<(), ReloadActivityRemovalError> {
         // Validation phase: read-only, no `self` mutation until every error
         // class has been ruled out. Mirrors the atomicity contract of
@@ -7286,8 +7286,8 @@ impl<W: LayoutElement> Layout<W> {
     /// callers need not re-check.
     pub(crate) fn reconcile_activities_on_reload_add(
         &mut self,
-        config_activities: &[niri_config::ActivityDecl],
-        config_workspaces: &[niri_config::Workspace],
+        config_activities: &[jiji_config::ActivityDecl],
+        config_workspaces: &[jiji_config::Workspace],
     ) {
         // Precondition: every named non-sticky workspace's name must appear in
         // config_workspaces. The caller (State::reload_config) must have run

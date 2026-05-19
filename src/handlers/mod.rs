@@ -615,7 +615,7 @@ impl ExtWorkspaceHandler for State {
     }
 
     fn activate_workspace(&mut self, id: WorkspaceId) {
-        let reference = niri_config::WorkspaceReference::Id(id.get());
+        let reference = jiji_config::WorkspaceReference::Id(id.get());
         if let Some((mut output, index)) = self.niri.find_output_and_workspace_index(reference) {
             if let Some(active) = self.niri.layout.active_output() {
                 if output.as_ref() == Some(active) {
@@ -635,7 +635,7 @@ impl ExtWorkspaceHandler for State {
     }
 
     fn assign_workspace(&mut self, ws_id: WorkspaceId, output: Output) {
-        let reference = niri_config::WorkspaceReference::Id(ws_id.get());
+        let reference = jiji_config::WorkspaceReference::Id(ws_id.get());
         if let Some((old_output, old_idx)) = self.niri.find_output_and_workspace_index(reference) {
             self.niri
                 .layout
@@ -862,7 +862,7 @@ impl OutputManagementHandler for State {
         &mut self.niri.output_management_state
     }
 
-    fn apply_output_config(&mut self, config: niri_config::Outputs) {
+    fn apply_output_config(&mut self, config: jiji_config::Outputs) {
         self.niri.config.borrow_mut().outputs = config;
         self.reload_output_config();
     }

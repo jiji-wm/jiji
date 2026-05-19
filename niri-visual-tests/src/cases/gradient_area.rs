@@ -1,9 +1,9 @@
 use std::f32::consts::{FRAC_PI_4, PI};
 use std::time::Duration;
 
+use jiji_config::{Color, CornerRadius, GradientInterpolation};
 use niri::layout::focus_ring::FocusRing;
 use niri::render_helpers::border::BorderRenderElement;
-use niri_config::{Color, CornerRadius, GradientInterpolation};
 use smithay::backend::renderer::element::RenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Physical, Point, Rectangle, Size};
@@ -18,7 +18,7 @@ pub struct GradientArea {
 
 impl GradientArea {
     pub fn new(_args: Args) -> Self {
-        let border = FocusRing::new(niri_config::FocusRing {
+        let border = FocusRing::new(jiji_config::FocusRing {
             off: false,
             width: 1.,
             active_color: Color::from_rgba8_unpremul(255, 255, 255, 128),

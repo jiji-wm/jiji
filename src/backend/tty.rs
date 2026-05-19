@@ -13,10 +13,10 @@ use std::{io, mem};
 use anyhow::{anyhow, bail, ensure, Context};
 use bytemuck::cast_slice_mut;
 use drm_ffi::drm_mode_modeinfo;
+use jiji_config::output::Modeline;
+use jiji_config::{Config, OutputName};
 use jiji_ipc::{HSyncPolarity, VSyncPolarity};
 use libc::dev_t;
-use niri_config::output::Modeline;
-use niri_config::{Config, OutputName};
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
@@ -3138,7 +3138,7 @@ fn modeinfo_name_slice_from_string(mode_name: &str) -> [core::ffi::c_char; 32] {
 
 fn pick_mode(
     connector: &connector::Info,
-    target: Option<niri_config::output::Mode>,
+    target: Option<jiji_config::output::Mode>,
 ) -> Option<(control::Mode, bool)> {
     let mut mode = None;
     let mut fallback = false;
@@ -3432,8 +3432,8 @@ unsafe fn init_libinput_plugin_system(libinput: &Libinput) {
 #[cfg(test)]
 mod tests {
     use insta::assert_debug_snapshot;
+    use jiji_config::output::Modeline;
     use jiji_ipc::{HSyncPolarity, VSyncPolarity};
-    use niri_config::output::Modeline;
 
     use crate::backend::tty::{calculate_drm_mode_from_modeline, calculate_mode_cvt};
 

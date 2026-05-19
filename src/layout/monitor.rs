@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::time::Duration;
 
-use niri_config::{CornerRadius, LayoutPart};
+use jiji_config::{CornerRadius, LayoutPart};
 use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
@@ -83,7 +83,7 @@ pub struct Monitor<W: LayoutElement> {
     /// Configurable properties of the layout.
     pub(super) options: Rc<Options>,
     /// Layout config overrides for this monitor.
-    layout_config: Option<niri_config::LayoutPart>,
+    layout_config: Option<jiji_config::LayoutPart>,
 }
 
 #[derive(Debug)]
@@ -243,7 +243,7 @@ impl WorkspaceSwitchGesture {
         }
     }
 
-    fn animate_from(&mut self, from: f64, clock: Clock, config: niri_config::Animation) {
+    fn animate_from(&mut self, from: f64, clock: Clock, config: jiji_config::Animation) {
         let current = self.animation.as_ref().map_or(0., Animation::value);
         self.animation = Some(Animation::new(clock, from + current, 0., 0., config));
     }
@@ -508,7 +508,7 @@ impl<W: LayoutElement> Monitor<W> {
         &mut self,
         view: &mut WorkspaceView,
         idx: usize,
-        config: Option<niri_config::Animation>,
+        config: Option<jiji_config::Animation>,
     ) {
         // FIXME: also compute and use current velocity.
         let current_idx = self.workspace_render_idx(view);
@@ -888,7 +888,7 @@ impl<W: LayoutElement> Monitor<W> {
         &mut self,
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         view: &mut WorkspaceView,
-        layout_config: Option<niri_config::LayoutPart>,
+        layout_config: Option<jiji_config::LayoutPart>,
         seed_activity: ActivityId,
     ) -> bool {
         if self.layout_config == layout_config {
@@ -1679,7 +1679,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.working_area
     }
 
-    pub fn layout_config(&self) -> Option<&niri_config::LayoutPart> {
+    pub fn layout_config(&self) -> Option<&jiji_config::LayoutPart> {
         self.layout_config.as_ref()
     }
 

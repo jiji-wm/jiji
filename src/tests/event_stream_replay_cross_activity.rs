@@ -17,9 +17,9 @@
 //!    These encode the structure-before-state contract documented on `Event::ActivityCreated` /
 //!    `Event::ActivitiesChanged`.
 
+use jiji_config::{Action, ActivityReference, Config, WorkspaceReference};
 use jiji_ipc::state::{EventStreamState, EventStreamStatePart as _};
 use jiji_ipc::Event;
-use niri_config::{Action, ActivityReference, Config, WorkspaceReference};
 
 use super::client::ClientId;
 use super::fixture::Fixture;

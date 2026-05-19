@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use niri_config::Config;
+use jiji_config::Config;
 use ordered_float::NotNan;
 use pangocairo::cairo::{self, ImageSurface};
 use pangocairo::pango::FontDescription;

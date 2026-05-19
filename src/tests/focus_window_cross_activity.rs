@@ -17,7 +17,7 @@
 //! `FocusWindow { id }` resolve to the current active (tier 1 always
 //! firing), defeating the hint semantics.
 
-use niri_config::Action;
+use jiji_config::Action;
 
 use super::client::ClientId;
 use super::fixture::{config_with_two_activities, Fixture};

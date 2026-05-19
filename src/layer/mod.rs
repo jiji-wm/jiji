@@ -1,6 +1,6 @@
-use niri_config::layer_rule::{LayerRule, Match};
-use niri_config::utils::MergeWith as _;
-use niri_config::{BackgroundEffect, BlockOutFrom, CornerRadius, ResolvedPopupsRules, ShadowRule};
+use jiji_config::layer_rule::{LayerRule, Match};
+use jiji_config::utils::MergeWith as _;
+use jiji_config::{BackgroundEffect, BlockOutFrom, CornerRadius, ResolvedPopupsRules, ShadowRule};
 use smithay::desktop::LayerSurface;
 use smithay::wayland::shell::wlr_layer::Layer;
 

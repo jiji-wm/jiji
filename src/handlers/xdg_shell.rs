@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use calloop::Interest;
-use niri_config::PresetSize;
+use jiji_config::PresetSize;
 use smithay::desktop::{
     find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, utils, LayerSurface,
     PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Window,

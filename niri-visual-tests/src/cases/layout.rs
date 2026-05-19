@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use jiji_config::{Color, OutputName, PresetSize};
 use niri::animation::Clock;
 use niri::layout::{ActivateWindow, AddWindowTarget, LayoutElement as _, Options, SizingMode};
 use niri::render_helpers::{RenderCtx, RenderTarget};
-use niri_config::{Color, OutputName, PresetSize};
 use smithay::backend::renderer::element::RenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::desktop::layer_map_for_output;
@@ -52,12 +52,12 @@ impl Layout {
         });
 
         let options = Options {
-            layout: niri_config::Layout {
-                focus_ring: niri_config::FocusRing {
+            layout: jiji_config::Layout {
+                focus_ring: jiji_config::FocusRing {
                     off: true,
                     ..Default::default()
                 },
-                border: niri_config::Border {
+                border: jiji_config::Border {
                     off: false,
                     width: 4.,
                     active_color: Color::from_rgba8_unpremul(255, 163, 72, 255),

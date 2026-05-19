@@ -7,8 +7,8 @@ use std::sync::RwLock;
 use std::{io, thread};
 
 use atomic::Atomic;
+use jiji_config::Environment;
 use libc::{getrlimit, rlim_t, rlimit, setrlimit, RLIMIT_NOFILE};
-use niri_config::Environment;
 use smithay::wayland::xdg_activation::XdgActivationToken;
 
 use crate::utils::expand_home;

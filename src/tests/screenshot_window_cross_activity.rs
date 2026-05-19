@@ -18,7 +18,7 @@
 //! the precedent set by `focus_window_cross_activity.rs` — buffer-equality
 //! lives in manual or visual-tests coverage, not here.
 
-use niri_config::Action;
+use jiji_config::Action;
 
 use super::client::ClientId;
 use super::fixture::{config_with_two_activities, Fixture};

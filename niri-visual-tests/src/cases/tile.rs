@@ -1,10 +1,10 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use jiji_config::Color;
 use niri::layout::Options;
 use niri::render_helpers::xray::XrayPos;
 use niri::render_helpers::{RenderCtx, RenderTarget};
-use niri_config::Color;
 use smithay::backend::renderer::element::RenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Physical, Point, Rectangle, Size};
@@ -59,12 +59,12 @@ impl Tile {
         let Args { size, clock } = args;
 
         let options = Options {
-            layout: niri_config::Layout {
-                focus_ring: niri_config::FocusRing {
+            layout: jiji_config::Layout {
+                focus_ring: jiji_config::FocusRing {
                     off: true,
                     ..Default::default()
                 },
-                border: niri_config::Border {
+                border: jiji_config::Border {
                     off: false,
                     width: 32.,
                     active_color: Color::from_rgba8_unpremul(255, 163, 72, 255),

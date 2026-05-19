@@ -12,7 +12,7 @@
 //! Discrete `#[test]` cases mirror the precedent in
 //! `find_window_cross_activity.rs`.
 
-use niri_config::Config;
+use jiji_config::Config;
 
 use super::client::ClientId;
 use super::fixture::Fixture;

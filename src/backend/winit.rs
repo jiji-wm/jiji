@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
-use niri_config::{Config, OutputName};
+use jiji_config::{Config, OutputName};
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::egl::EGLDevice;
 use smithay::backend::renderer::damage::OutputDamageTracker;

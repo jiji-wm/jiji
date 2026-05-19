@@ -14,7 +14,7 @@
 //! `WorkspaceId` from the alpha workspace on `headless-1`). With a
 //! single output the assertion would be trivially satisfied.
 
-use niri_config::Action;
+use jiji_config::Action;
 
 use super::client::ClientId;
 use super::fixture::{config_with_two_activities, Fixture};

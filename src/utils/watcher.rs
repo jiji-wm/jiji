@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 use std::{io, thread};
 
-use niri_config::{Config, ConfigParseResult, ConfigPath};
+use jiji_config::{Config, ConfigParseResult, ConfigPath};
 use smithay::reexports::calloop::channel::SyncSender;
 
 use crate::niri::State;

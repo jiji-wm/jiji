@@ -21,7 +21,7 @@
 //! ws_shared" would be vacuously true if warm-up never materialized beta's view of out1
 //! and the test would discriminate nothing.
 
-use niri_config::Config;
+use jiji_config::Config;
 
 use super::fixture::Fixture;
 use crate::layout::workspace::OutputId;

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use calloop::generic::Generic;
 use calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction};
-use niri_config::Config;
+use jiji_config::Config;
 use smithay::output::Output;
 
 use super::client::{Client, ClientId};

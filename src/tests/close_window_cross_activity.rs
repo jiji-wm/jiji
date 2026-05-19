@@ -1,5 +1,5 @@
 //! Pins the mechanical pool-wide widen of
-//! [`Action::CloseWindowById`](niri_config::Action::CloseWindowById)'s
+//! [`Action::CloseWindowById`](jiji_config::Action::CloseWindowById)'s
 //! id lookup against a regression back to the
 //! active-activity-only `Layout::windows` iterator.
 //!
@@ -17,7 +17,7 @@
 //! `monitors × active view.ids` would miss the window entirely under
 //! beta-active and send nothing.
 
-use niri_config::Action;
+use jiji_config::Action;
 use wayland_client::protocol::wl_surface::WlSurface as ClientWlSurface;
 
 use super::client::ClientId;

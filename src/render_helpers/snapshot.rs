@@ -1,6 +1,6 @@
 use std::cell::OnceCell;
 
-use niri_config::BlockOutFrom;
+use jiji_config::BlockOutFrom;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::{Kind, RenderElement};
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};

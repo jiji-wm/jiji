@@ -5,13 +5,13 @@ use std::path::Path;
 use std::{env, slice};
 
 use anyhow::{anyhow, bail, Context};
+use jiji_config::OutputName;
 use jiji_ipc::socket::Socket;
 use jiji_ipc::{
     Action, Activity, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode,
     Output, OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
     Workspace,
 };
-use niri_config::OutputName;
 use serde_json::json;
 
 use crate::cli::Msg;

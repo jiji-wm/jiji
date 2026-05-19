@@ -31,7 +31,7 @@
 //!     reason (no race occurred). The oracle pins "destruction occurred between configure and map,"
 //!     NOT "the race-resolution chain was actually exercised."
 
-use niri_config::{Action, ActivityReference, Config};
+use jiji_config::{Action, ActivityReference, Config};
 use wayland_client::protocol::wl_surface::WlSurface;
 
 use super::client::ClientId;

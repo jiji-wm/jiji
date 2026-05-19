@@ -84,7 +84,7 @@ fn wiki_docs_parses() {
         must_fail,
     } in code_blocks
     {
-        if let Err(error) = niri_config::Config::parse(Path::new(&filename), &code).config {
+        if let Err(error) = jiji_config::Config::parse(Path::new(&filename), &code).config {
             if !must_fail {
                 errors.push(format!(
                     "Error parsing wiki KDL code block at {}:{}: {:?}",

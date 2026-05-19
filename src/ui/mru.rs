@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::ensure;
-use niri_config::{
+use jiji_config::{
     Action, Bind, Color, Config, CornerRadius, GradientInterpolation, Key, Modifiers, MruDirection,
     MruFilter, MruScope, Trigger,
 };
@@ -221,7 +221,7 @@ struct Thumbnail {
     size: Size<i32, Logical>,
 
     clock: Clock,
-    config: niri_config::MruPreviews,
+    config: jiji_config::MruPreviews,
     open_animation: Option<Animation>,
     move_animation: Option<MoveAnimation>,
     title_texture: RefCell<TitleTexture>,
@@ -230,16 +230,16 @@ struct Thumbnail {
 }
 
 impl Thumbnail {
-    fn from_mapped(mapped: &Mapped, clock: Clock, config: niri_config::MruPreviews) -> Self {
+    fn from_mapped(mapped: &Mapped, clock: Clock, config: jiji_config::MruPreviews) -> Self {
         let app_id = with_toplevel_role(mapped.toplevel(), |role| role.app_id.clone());
 
-        let background = FocusRing::new(niri_config::FocusRing {
+        let background = FocusRing::new(jiji_config::FocusRing {
             off: false,
             width: 0.,
             active_gradient: None,
             ..Default::default()
         });
-        let border = FocusRing::new(niri_config::FocusRing {
+        let border = FocusRing::new(jiji_config::FocusRing {
             off: false,
             active_gradient: None,
             ..Default::default()
@@ -272,7 +272,7 @@ impl Thumbnail {
     }
 
     /// Animate thumbnail motion from given location.
-    fn animate_move_from_with_config(&mut self, from: f64, config: niri_config::Animation) {
+    fn animate_move_from_with_config(&mut self, from: f64, config: jiji_config::Animation) {
         let current_offset = self.render_offset();
 
         // Preserve the previous config if ongoing.
@@ -287,7 +287,7 @@ impl Thumbnail {
         });
     }
 
-    fn animate_open_with_config(&mut self, config: niri_config::Animation) {
+    fn animate_open_with_config(&mut self, config: jiji_config::Animation) {
         self.open_animation = Some(Animation::new(self.clock.clone(), 0., 1., 0., config));
     }
 
@@ -339,7 +339,7 @@ impl Thumbnail {
     fn render<R: NiriRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
-        config: &niri_config::RecentWindows,
+        config: &jiji_config::RecentWindows,
         mapped: &Mapped,
         preview_geo: Rectangle<f64, Logical>,
         scale: f64,
@@ -878,7 +878,7 @@ impl ViewPos {
     fn animate_from_with_config(
         &mut self,
         from: f64,
-        config: niri_config::Animation,
+        config: jiji_config::Animation,
         clock: Clock,
     ) {
         // FIXME: also compute and use current velocity.

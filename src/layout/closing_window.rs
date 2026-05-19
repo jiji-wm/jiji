@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use anyhow::Context as _;
 use glam::{Mat3, Vec2};
-use niri_config::BlockOutFrom;
+use jiji_config::BlockOutFrom;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::utils::{
     Relocate, RelocateRenderElement, RescaleRenderElement,

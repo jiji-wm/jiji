@@ -741,7 +741,7 @@ impl Activities {
     /// are flagged `is_config_declared`. After construction, `active_id()`
     /// equals the id of the `Activity` minted from the first config entry, and
     /// `previous_id() == None`.
-    pub fn from_config_or_default(config_activities: &[niri_config::ActivityDecl]) -> Self {
+    pub fn from_config_or_default(config_activities: &[jiji_config::ActivityDecl]) -> Self {
         if config_activities.is_empty() {
             return Self::new(Activity::new_runtime("Default".to_owned()));
         }
@@ -785,7 +785,7 @@ impl Activities {
     /// - Any existing activity's name equals `name` case-insensitively (via
     ///   `str::eq_ignore_ascii_case`) → [`CreateActivityError::DuplicateName`]. Mirrors the
     ///   collision policy in [`Self::resolve_config_names`] and
-    ///   `niri_config::ActivityName::raw_decode`.
+    ///   `jiji_config::ActivityName::raw_decode`.
     ///
     /// On success, delegates insertion to [`Self::insert`]; the new activity is
     /// `is_config_declared == false` and carries an empty `views` map. The pool's
@@ -882,7 +882,7 @@ impl Activities {
     /// (`str::eq_ignore_ascii_case`), in declaration order.
     ///
     /// Mirrors the matching rule used by [`Self::resolve_config_names`] and
-    /// the `niri_config::ActivityName` duplicate detector. Returns `None` if
+    /// the `jiji_config::ActivityName` duplicate detector. Returns `None` if
     /// no activity carries the requested name; callers (e.g. the
     /// `open-on-activity` window-rule resolver in `send_initial_configure`)
     /// own the silent-fallback to the active activity (liberal-accept,
@@ -920,7 +920,7 @@ impl Activities {
     /// Resolve a list of config-declared activity names against this pool.
     ///
     /// Matching is case-insensitive (`str::eq_ignore_ascii_case`), mirroring
-    /// the duplicate-detection rule in `niri_config::ActivityName::raw_decode`.
+    /// the duplicate-detection rule in `jiji_config::ActivityName::raw_decode`.
     /// Duplicate names in `names` collapse into the returned `HashSet`.
     ///
     /// Returns `(resolved_ids, unknown_names)`: resolved ids for entries that
@@ -1534,11 +1534,11 @@ mod tests {
     #[test]
     fn resolve_config_names_case_insensitive_match() {
         let cfg = vec![
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Work".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Work".to_owned()),
             },
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Personal".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Personal".to_owned()),
             },
         ];
         let acts = Activities::from_config_or_default(&cfg);
@@ -1554,11 +1554,11 @@ mod tests {
     #[test]
     fn resolve_config_names_unknown_returns_in_unknowns_list() {
         let cfg = vec![
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Work".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Work".to_owned()),
             },
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Personal".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Personal".to_owned()),
             },
         ];
         let acts = Activities::from_config_or_default(&cfg);
@@ -1573,11 +1573,11 @@ mod tests {
     #[test]
     fn activities_from_config_or_default_multiple_preserves_order_and_first_active() {
         let cfg = vec![
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Work".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Work".to_owned()),
             },
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Personal".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Personal".to_owned()),
             },
         ];
         let acts = Activities::from_config_or_default(&cfg);

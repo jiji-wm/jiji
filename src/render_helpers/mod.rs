@@ -1,7 +1,7 @@
 use std::ptr;
 
 use anyhow::{ensure, Context as _};
-use niri_config::BlockOutFrom;
+use jiji_config::BlockOutFrom;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::{Buffer, Fourcc};
 use smithay::backend::renderer::damage::OutputDamageTracker;

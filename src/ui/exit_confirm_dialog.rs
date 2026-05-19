@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Mutex;
 
-use niri_config::Config;
+use jiji_config::Config;
 use ordered_float::NotNan;
 use pangocairo::cairo::{self, ImageSurface};
 use pangocairo::pango::{Alignment, FontDescription};

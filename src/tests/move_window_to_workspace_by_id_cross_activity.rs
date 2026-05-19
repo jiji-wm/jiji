@@ -16,7 +16,7 @@
 //! deferred) is caught by the "same workspace before/after" invariant
 //! below.
 
-use niri_config::{Action, WorkspaceReference};
+use jiji_config::{Action, WorkspaceReference};
 
 use super::client::ClientId;
 use super::fixture::{config_with_two_activities, Fixture};

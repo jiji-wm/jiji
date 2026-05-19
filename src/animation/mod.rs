@@ -55,7 +55,7 @@ impl Animation {
         from: f64,
         to: f64,
         initial_velocity: f64,
-        config: niri_config::Animation,
+        config: jiji_config::Animation,
     ) -> Self {
         // Scale the velocity by rate to keep the touchpad gestures feeling right.
         let initial_velocity = initial_velocity / clock.rate().max(0.001);
@@ -70,7 +70,7 @@ impl Animation {
         rv
     }
 
-    pub fn replace_config(&mut self, config: niri_config::Animation) {
+    pub fn replace_config(&mut self, config: jiji_config::Animation) {
         self.is_off = config.off;
         if config.off {
             self.duration = Duration::ZERO;
@@ -81,7 +81,7 @@ impl Animation {
         let start_time = self.start_time;
 
         match config.kind {
-            niri_config::animations::Kind::Spring(p) => {
+            jiji_config::animations::Kind::Spring(p) => {
                 let params = SpringParams::new(p.damping_ratio, f64::from(p.stiffness), p.epsilon);
 
                 let spring = Spring {
@@ -92,7 +92,7 @@ impl Animation {
                 };
                 *self = Self::spring(self.clock.clone(), spring);
             }
-            niri_config::animations::Kind::Easing(p) => {
+            jiji_config::animations::Kind::Easing(p) => {
                 *self = Self::ease(
                     self.clock.clone(),
                     self.from,
@@ -351,14 +351,14 @@ impl Curve {
     }
 }
 
-impl From<niri_config::animations::Curve> for Curve {
-    fn from(value: niri_config::animations::Curve) -> Self {
+impl From<jiji_config::animations::Curve> for Curve {
+    fn from(value: jiji_config::animations::Curve) -> Self {
         match value {
-            niri_config::animations::Curve::Linear => Curve::Linear,
-            niri_config::animations::Curve::EaseOutQuad => Curve::EaseOutQuad,
-            niri_config::animations::Curve::EaseOutCubic => Curve::EaseOutCubic,
-            niri_config::animations::Curve::EaseOutExpo => Curve::EaseOutExpo,
-            niri_config::animations::Curve::CubicBezier(x1, y1, x2, y2) => {
+            jiji_config::animations::Curve::Linear => Curve::Linear,
+            jiji_config::animations::Curve::EaseOutQuad => Curve::EaseOutQuad,
+            jiji_config::animations::Curve::EaseOutCubic => Curve::EaseOutCubic,
+            jiji_config::animations::Curve::EaseOutExpo => Curve::EaseOutExpo,
+            jiji_config::animations::Curve::CubicBezier(x1, y1, x2, y2) => {
                 Curve::CubicBezier(CubicBezier::new(x1, y1, x2, y2))
             }
         }

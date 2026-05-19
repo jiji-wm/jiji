@@ -1,5 +1,5 @@
+use jiji_config::{Color, CornerRadius, GradientColorSpace, GradientInterpolation};
 use niri::render_helpers::border::BorderRenderElement;
-use niri_config::{Color, CornerRadius, GradientColorSpace, GradientInterpolation};
 use smithay::backend::renderer::element::RenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Physical, Point, Rectangle, Size};

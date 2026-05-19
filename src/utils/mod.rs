@@ -13,7 +13,7 @@ use anyhow::{ensure, Context};
 use bitflags::bitflags;
 use directories::UserDirs;
 use git_version::git_version;
-use niri_config::{Config, OutputName};
+use jiji_config::{Config, OutputName};
 use smithay::backend::renderer::utils::{
     with_renderer_surface_state, RendererSurfaceStateUserData,
 };

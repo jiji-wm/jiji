@@ -1,9 +1,9 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 
-use niri_config::utils::{Flag, MergeWith as _};
-use niri_config::workspace::WorkspaceName;
-use niri_config::{
+use jiji_config::utils::{Flag, MergeWith as _};
+use jiji_config::workspace::WorkspaceName;
+use jiji_config::{
     CenterFocusedColumn, FloatOrInt, OutputName, Struts, TabIndicatorLength, TabIndicatorPosition,
     WorkspaceReference,
 };
@@ -449,7 +449,7 @@ enum Op {
         #[proptest(strategy = "arbitrary_scale()")]
         scale: f64,
         #[proptest(strategy = "prop::option::of(arbitrary_layout_part().prop_map(Box::new))")]
-        layout_config: Option<Box<niri_config::LayoutPart>>,
+        layout_config: Option<Box<jiji_config::LayoutPart>>,
     },
     RemoveOutput(#[proptest(strategy = "1..=5usize")] usize),
     FocusOutput(#[proptest(strategy = "1..=5usize")] usize),
@@ -457,7 +457,7 @@ enum Op {
         #[proptest(strategy = "1..=5usize")]
         id: usize,
         #[proptest(strategy = "prop::option::of(arbitrary_layout_part().prop_map(Box::new))")]
-        layout_config: Option<Box<niri_config::LayoutPart>>,
+        layout_config: Option<Box<jiji_config::LayoutPart>>,
     },
     AddNamedWorkspace {
         #[proptest(strategy = "1..=5usize")]
@@ -465,7 +465,7 @@ enum Op {
         #[proptest(strategy = "prop::option::of(1..=5usize)")]
         output_name: Option<usize>,
         #[proptest(strategy = "prop::option::of(arbitrary_layout_part().prop_map(Box::new))")]
-        layout_config: Option<Box<niri_config::LayoutPart>>,
+        layout_config: Option<Box<jiji_config::LayoutPart>>,
     },
     UnnameWorkspace {
         #[proptest(strategy = "1..=5usize")]
@@ -475,7 +475,7 @@ enum Op {
         #[proptest(strategy = "1..=5usize")]
         ws_name: usize,
         #[proptest(strategy = "prop::option::of(arbitrary_layout_part().prop_map(Box::new))")]
-        layout_config: Option<Box<niri_config::LayoutPart>>,
+        layout_config: Option<Box<jiji_config::LayoutPart>>,
     },
     AddWindow {
         params: TestWindowParams,
@@ -787,7 +787,7 @@ enum Op {
     ToggleOverview,
     UpdateConfig {
         #[proptest(strategy = "arbitrary_layout_part().prop_map(Box::new)")]
-        layout_config: Box<niri_config::LayoutPart>,
+        layout_config: Box<jiji_config::LayoutPart>,
     },
 }
 
@@ -906,7 +906,7 @@ impl Op {
                 layout.ensure_named_workspace(&WorkspaceConfig {
                     name: WorkspaceName(format!("ws{ws_name}")),
                     open_on_output: output_name.map(|name| format!("output{name}")),
-                    layout: layout_config.map(|x| niri_config::WorkspaceLayoutPart(*x)),
+                    layout: layout_config.map(|x| jiji_config::WorkspaceLayoutPart(*x)),
                     activities: Vec::new(),
                     sticky: None,
                 });
@@ -1698,7 +1698,7 @@ impl Op {
             }
             Op::UpdateConfig { layout_config } => {
                 let options = Options {
-                    layout: niri_config::Layout::from_part(&layout_config),
+                    layout: jiji_config::Layout::from_part(&layout_config),
                     ..Default::default()
                 };
 
@@ -2499,7 +2499,7 @@ fn open_right_of_on_different_workspace_ewaf() {
     ];
 
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -2689,8 +2689,8 @@ fn fixed_height_takes_max_non_auto_into_account() {
     ];
 
     let options = Options {
-        layout: niri_config::Layout {
-            border: niri_config::Border {
+        layout: jiji_config::Layout {
+            border: jiji_config::Border {
                 off: false,
                 width: 4.,
                 ..Default::default()
@@ -2776,7 +2776,7 @@ fn interactive_move_onto_empty_output_ewaf() {
     ];
 
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -2840,7 +2840,7 @@ fn interactive_move_onto_first_empty_workspace() {
         Op::InteractiveMoveEnd { window: 1 },
     ];
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -2920,7 +2920,7 @@ fn named_workspace_to_output_ewaf() {
         Op::AddOutput(2),
     ];
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -2942,7 +2942,7 @@ fn move_window_to_empty_workspace_above_first() {
         Op::MoveWorkspaceDown,
     ];
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -2962,7 +2962,7 @@ fn move_window_to_different_output() {
         Op::MoveWorkspaceToOutput(2),
     ];
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -2981,7 +2981,7 @@ fn close_window_empty_ws_above_first() {
         Op::CloseWindow(1),
     ];
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -3001,7 +3001,7 @@ fn add_and_remove_output() {
         Op::RemoveOutput(2),
     ];
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -3037,7 +3037,7 @@ fn move_workspace_to_idx_active_at_top_empty_under_ewaf() {
         },
     ];
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -3088,7 +3088,7 @@ fn add_output_consolidation_preserves_ewaf_pin() {
         Op::AddOutput(2),
     ];
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -3111,7 +3111,7 @@ fn switch_ewaf_on() {
 
     let mut layout = check_ops(ops);
     layout.update_options(Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -3131,7 +3131,7 @@ fn switch_ewaf_off() {
     ];
 
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -3240,8 +3240,8 @@ fn interactive_move_from_workspace_with_layout_config() {
         Op::AddNamedWorkspace {
             ws_name: 1,
             output_name: Some(2),
-            layout_config: Some(Box::new(niri_config::LayoutPart {
-                border: Some(niri_config::BorderRule {
+            layout_config: Some(Box::new(jiji_config::LayoutPart {
+                border: Some(jiji_config::BorderRule {
                     on: true,
                     ..Default::default()
                 }),
@@ -3316,7 +3316,7 @@ fn add_window_to_named_workspace_with_distinct_layout_config() {
         Op::AddNamedWorkspace {
             ws_name: 1,
             output_name: Some(1),
-            layout_config: Some(Box::new(niri_config::LayoutPart {
+            layout_config: Some(Box::new(jiji_config::LayoutPart {
                 default_column_display: Some(ColumnDisplay::Tabbed),
                 ..Default::default()
             })),
@@ -3574,7 +3574,7 @@ fn set_first_workspace_name_ewaf() {
     ];
 
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -3668,7 +3668,7 @@ fn preset_column_width_fixed_correct_with_border() {
     ];
 
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             preset_column_widths: vec![PresetSize::Fixed(500)],
             ..Default::default()
         },
@@ -3681,9 +3681,9 @@ fn preset_column_width_fixed_correct_with_border() {
 
     // Add border.
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             preset_column_widths: vec![PresetSize::Fixed(500)],
-            border: niri_config::Border {
+            border: jiji_config::Border {
                 off: false,
                 width: 5.,
                 ..Default::default()
@@ -3720,7 +3720,7 @@ fn preset_column_width_reset_after_set_width() {
     ];
 
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             preset_column_widths: vec![PresetSize::Fixed(500), PresetSize::Fixed(1000)],
             ..Default::default()
         },
@@ -3953,7 +3953,7 @@ fn tabs_with_different_border() {
         Op::AddWindow {
             params: TestWindowParams {
                 rules: Some(ResolvedWindowRules {
-                    border: niri_config::BorderRule {
+                    border: jiji_config::BorderRule {
                         on: true,
                         ..Default::default()
                     },
@@ -3971,7 +3971,7 @@ fn tabs_with_different_border() {
     ];
 
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             struts: Struts {
                 left: FloatOrInt(0.),
                 right: FloatOrInt(0.),
@@ -4132,8 +4132,8 @@ prop_compose! {
     fn arbitrary_focus_ring()(
         off in any::<bool>(),
         width in prop::option::of(arbitrary_spacing().prop_map(FloatOrInt)),
-    ) -> niri_config::BorderRule {
-        niri_config::BorderRule {
+    ) -> jiji_config::BorderRule {
+        jiji_config::BorderRule {
             off,
             on: !off,
             width,
@@ -4146,8 +4146,8 @@ prop_compose! {
     fn arbitrary_border()(
         off in any::<bool>(),
         width in prop::option::of(arbitrary_spacing().prop_map(FloatOrInt)),
-    ) -> niri_config::BorderRule {
-        niri_config::BorderRule {
+    ) -> jiji_config::BorderRule {
+        jiji_config::BorderRule {
             off,
             on: !off,
             width,
@@ -4160,8 +4160,8 @@ prop_compose! {
     fn arbitrary_shadow()(
         off in any::<bool>(),
         softness in prop::option::of(arbitrary_spacing().prop_map(FloatOrInt)),
-    ) -> niri_config::ShadowRule {
-        niri_config::ShadowRule {
+    ) -> jiji_config::ShadowRule {
+        jiji_config::ShadowRule {
             off,
             on: !off,
             softness,
@@ -4180,8 +4180,8 @@ prop_compose! {
         length in prop::option::of((0f64..2f64)
             .prop_map(|x| TabIndicatorLength { total_proportion: Some(x) })),
         position in prop::option::of(arbitrary_tab_indicator_position()),
-    ) -> niri_config::TabIndicatorPart {
-        niri_config::TabIndicatorPart {
+    ) -> jiji_config::TabIndicatorPart {
+        jiji_config::TabIndicatorPart {
             off,
             on: !off,
             hide_when_single_tab,
@@ -4206,8 +4206,8 @@ prop_compose! {
         center_focused_column in prop::option::of(arbitrary_center_focused_column()),
         always_center_single_column in prop::option::of(any::<bool>().prop_map(Flag)),
         empty_workspace_above_first in prop::option::of(any::<bool>().prop_map(Flag)),
-    ) -> niri_config::LayoutPart {
-        niri_config::LayoutPart {
+    ) -> jiji_config::LayoutPart {
+        jiji_config::LayoutPart {
             gaps,
             struts,
             center_focused_column,
@@ -4240,7 +4240,7 @@ proptest! {
     ) {
         // eprintln!("{ops:?}");
         let options = Options {
-            layout: niri_config::Layout::from_part(&layout_config),
+            layout: jiji_config::Layout::from_part(&layout_config),
             ..Default::default()
         };
 
@@ -4409,11 +4409,11 @@ fn layout_seed_stamps_workspace_with_declared_activities() {
     // on both because neither config block sets it.
     let config = Config {
         activities: vec![
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Work".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Work".to_owned()),
             },
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Personal".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Personal".to_owned()),
             },
         ],
         workspaces: vec![
@@ -4478,11 +4478,11 @@ fn layout_seed_sticky_stamps_all_activity_ids() {
     // must be auto-tagged with every activity id in the pool.
     let config = Config {
         activities: vec![
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Work".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Work".to_owned()),
             },
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Personal".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Personal".to_owned()),
             },
         ],
         workspaces: vec![WorkspaceConfig {
@@ -4529,11 +4529,11 @@ fn layout_seed_unknown_activity_name_falls_back_to_default() {
     // preserved.
     let config = Config {
         activities: vec![
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Work".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Work".to_owned()),
             },
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Personal".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Personal".to_owned()),
             },
         ],
         workspaces: vec![WorkspaceConfig {
@@ -5264,7 +5264,7 @@ fn switch_activity_lift_branch_named_tagged_with_ewaf_adds_top_and_bottom_empty(
     // remains selected after switching — landing on the top-empty would be a silent
     // focus regression.
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -5340,7 +5340,7 @@ fn switch_activity_lift_branch_reads_ewaf_from_monitor_not_layout() {
     // `self.options.layout.empty_workspace_above_first`. If it reads the global, the
     // view comes back as `[named_pick, bottom_empty]` (len=2) and trips
     // monitor.rs:1746-1751 "1 or 3+" the moment `verify_invariants` runs.
-    let layout_part = niri_config::LayoutPart {
+    let layout_part = jiji_config::LayoutPart {
         empty_workspace_above_first: Some(Flag(true)),
         ..Default::default()
     };
@@ -5420,7 +5420,7 @@ fn switch_activity_lift_branch_per_monitor_ewaf_two_monitors_mixed() {
     // first monitor's value for all monitors, the second monitor's view is built with the
     // wrong bookend discipline — either over-bookending (3 for out2 when 2 is correct) or
     // under-bookending (2 for out1 when 3 is correct, tripping monitor.rs:1746 "1 or 3+").
-    let layout_part = niri_config::LayoutPart {
+    let layout_part = jiji_config::LayoutPart {
         empty_workspace_above_first: Some(Flag(true)),
         ..Default::default()
     };
@@ -7418,11 +7418,11 @@ fn rename_activity_config_declared_errs() {
     // Config-declared activities cannot be renamed at runtime (mirrors the
     // remove policy — edit config + reload instead).
     let cfg = vec![
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Work".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Work".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Personal".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Personal".to_owned()),
         },
     ];
     #[allow(clippy::field_reassign_with_default)]
@@ -7649,8 +7649,8 @@ fn remove_activity_config_declared_errs() {
     // A config-declared activity cannot be removed at runtime (
     // bullet 1). Seed a config-declared "Alpha" as the first activity, create
     // a runtime "Beta", then attempt to remove Alpha → ConfigDeclared.
-    let cfg = vec![niri_config::ActivityDecl {
-        name: niri_config::ActivityName("Alpha".to_owned()),
+    let cfg = vec![jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Alpha".to_owned()),
     }];
     // Swap in a config-declared seed pool after the default construction.
     // `Layout` has no public builder that takes a pool; this is a test-only
@@ -8534,7 +8534,7 @@ fn clean_up_workspaces_on_returns_pruned_ids_empty_above_first() {
     // a second empty (bottom) and move active onto it. Then the special-case
     // past the main loop prunes position 1.
     let options = Options {
-        layout: niri_config::Layout {
+        layout: jiji_config::Layout {
             empty_workspace_above_first: true,
             ..Default::default()
         },
@@ -10569,11 +10569,11 @@ fn reload_adds_new_config_activity_appends_and_promotes_runtime_name_match() {
     );
 
     let cfg = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Work".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Work".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg, &[]);
@@ -10682,8 +10682,8 @@ fn reload_adds_new_config_activity_preserves_views_and_assignments_on_promotion(
     // reconcile_activities_on_reload_add enforces this precondition.
     layout.unname_workspace("ws1");
 
-    let cfg = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("Work".to_owned()),
+    let cfg = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Work".to_owned()),
     }];
     layout.reconcile_activities_on_reload_add(&cfg, &[]);
 
@@ -10740,14 +10740,14 @@ fn reload_reorders_to_match_config_declaration_order() {
     let previous_before = layout.activities.previous_id();
 
     let cfg = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("C".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("C".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("B".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("B".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("A".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("A".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg, &[]);
@@ -10795,14 +10795,14 @@ fn reload_preserves_active_and_previous_cursors_across_reorder() {
     assert_eq!(layout.activities.previous_id(), Some(a_id));
 
     let cfg = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("C".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("C".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("B".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("B".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("A".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("A".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg, &[]);
@@ -10857,8 +10857,8 @@ fn reload_sticky_workspace_reexpands_activities_set_to_all_current() {
         sticky_id
     };
 
-    let cfg = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("Work".to_owned()),
+    let cfg = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Work".to_owned()),
     }];
     layout.reconcile_activities_on_reload_add(&cfg, &[]);
 
@@ -10920,11 +10920,11 @@ fn reload_config_workspace_activities_reset_to_declared_values() {
     layout.workspaces.get_mut(&home_id).unwrap().activities = HashSet::from([default_id, work_id]);
 
     let cfg_activities = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Work".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Work".to_owned()),
         },
     ];
     let cfg_workspaces = [WorkspaceConfig {
@@ -10978,14 +10978,14 @@ fn reload_dynamic_workspace_keeps_runtime_activity_assignments() {
         .clone();
 
     let cfg_activities = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Work".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Work".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Personal".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Personal".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg_activities, &[]);
@@ -11006,11 +11006,11 @@ fn reload_no_change_is_semantically_noop_on_activities_and_workspaces() {
     // workspace state must be unchanged, and invariants must hold.
     let config = Config {
         activities: vec![
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Work".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Work".to_owned()),
             },
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("Personal".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("Personal".to_owned()),
             },
         ],
         workspaces: vec![
@@ -11106,8 +11106,8 @@ fn reload_promotion_preserves_runtime_name_casing() {
     );
 
     // Reload declares "WORK" (all-caps) — case-insensitively matches "work".
-    let cfg = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("WORK".to_owned()),
+    let cfg = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("WORK".to_owned()),
     }];
     layout.reconcile_activities_on_reload_add(&cfg, &[]);
 
@@ -11145,8 +11145,8 @@ fn reconcile_remove_no_op_when_config_retains_all_activities() {
     let mut layout = Layout::<TestWindow>::default();
     let default_id = layout.active_activity_id();
 
-    let cfg = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("Default".to_owned()),
+    let cfg = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Default".to_owned()),
     }];
     layout.reconcile_activities_on_reload_add(&cfg, &[]);
     assert!(
@@ -11185,11 +11185,11 @@ fn reconcile_remove_drops_config_activity_with_no_exclusive_workspaces() {
     let seed_id = layout.active_activity_id();
 
     let cfg_init = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Beta".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Beta".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
@@ -11203,8 +11203,8 @@ fn reconcile_remove_drops_config_activity_with_no_exclusive_workspaces() {
     let pool_before = layout.activities.len();
     let ws_before = layout.workspaces.len();
 
-    let cfg_reload = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("Default".to_owned()),
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Default".to_owned()),
     }];
     layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
@@ -11236,11 +11236,11 @@ fn reconcile_remove_destroys_empty_unnamed_exclusive_workspace() {
 
     // Seed config-declared [Default, Beta].
     let cfg_init = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Beta".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Beta".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
@@ -11266,8 +11266,8 @@ fn reconcile_remove_destroys_empty_unnamed_exclusive_workspace() {
     );
     let ws_baseline = layout.workspaces.len();
 
-    let cfg_reload = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("Default".to_owned()),
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Default".to_owned()),
     }];
     layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
@@ -11326,8 +11326,8 @@ fn reconcile_remove_destroys_empty_named_exclusive_workspace() {
         .expect("live pool key")
         .activities = std::iter::once(beta_id).collect();
 
-    let cfg_reload = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("Default".to_owned()),
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Default".to_owned()),
     }];
     layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
@@ -11350,11 +11350,11 @@ fn reconcile_remove_prunes_shared_workspaces() {
     let mut layout = check_ops(ops);
 
     let cfg_init = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Beta".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Beta".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
@@ -11386,8 +11386,8 @@ fn reconcile_remove_prunes_shared_workspaces() {
 
     let ws_before = layout.workspaces.len();
 
-    let cfg_reload = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("Default".to_owned()),
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Default".to_owned()),
     }];
     layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
@@ -11427,11 +11427,11 @@ fn reconcile_remove_rejects_on_exclusive_workspace_has_windows() {
     let mut layout = check_ops(ops);
 
     let cfg_init = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Beta".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Beta".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
@@ -11459,8 +11459,8 @@ fn reconcile_remove_rejects_on_exclusive_workspace_has_windows() {
     let active_before = layout.active_activity_id();
     let previous_before = layout.activities.previous_id();
 
-    let cfg_reload = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("Default".to_owned()),
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Default".to_owned()),
     }];
     let err = layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
@@ -11504,8 +11504,8 @@ fn reconcile_remove_rejects_would_empty_pool() {
     // in the seed config makes the pool `[Solo (config-declared)]`. Reload
     // declares zero activities. Expected: Err(WouldEmptyPool), no mutation.
     let config = Config {
-        activities: vec![niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Solo".to_owned()),
+        activities: vec![jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Solo".to_owned()),
         }],
         ..Config::default()
     };
@@ -11525,7 +11525,7 @@ fn reconcile_remove_rejects_would_empty_pool() {
     let ws_before = layout.workspaces.len();
     let active_before = layout.active_activity_id();
 
-    let cfg_reload: [niri_config::ActivityDecl; 0] = [];
+    let cfg_reload: [jiji_config::ActivityDecl; 0] = [];
     let err = layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
         .expect_err("would-empty-pool must err");
@@ -11551,11 +11551,11 @@ fn reconcile_remove_cascades_active_cursor_to_previous() {
     // removed.
     let mut layout = Layout::<TestWindow>::default();
     let cfg_init = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Beta".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Beta".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
@@ -11576,8 +11576,8 @@ fn reconcile_remove_cascades_active_cursor_to_previous() {
     assert_eq!(layout.active_activity_id(), beta_id);
     assert_eq!(layout.activities.previous_id(), Some(default_id));
 
-    let cfg_reload = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("Default".to_owned()),
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Default".to_owned()),
     }];
     layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
@@ -11605,14 +11605,14 @@ fn reconcile_remove_cascades_active_cursor_to_first_when_previous_also_in_remove
     // (first declaration-order id not in remove_set).
     let mut layout = Layout::<TestWindow>::default();
     let cfg_init = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Beta".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Beta".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Gamma".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Gamma".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
@@ -11640,8 +11640,8 @@ fn reconcile_remove_cascades_active_cursor_to_first_when_previous_also_in_remove
     assert_eq!(layout.active_activity_id(), gamma_id);
     assert_eq!(layout.activities.previous_id(), Some(beta_id));
 
-    let cfg_reload = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("Default".to_owned()),
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Default".to_owned()),
     }];
     layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
@@ -11681,14 +11681,14 @@ fn reconcile_remove_rebinds_orphan_workspace_into_cascade_target_view() {
     let mut layout = check_ops(ops);
 
     let cfg_init = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("alpha".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("alpha".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("beta".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("beta".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
@@ -11724,8 +11724,8 @@ fn reconcile_remove_rebinds_orphan_workspace_into_cascade_target_view() {
     // reproduces from — a config-named workspace tagged to a non-active
     // activity, lifted by `Monitor::new` into the seed-active activity's
     // view at first-monitor-attach.
-    let orphan_cfg = niri_config::Workspace {
-        name: niri_config::workspace::WorkspaceName("ws_b".to_owned()),
+    let orphan_cfg = jiji_config::Workspace {
+        name: jiji_config::workspace::WorkspaceName("ws_b".to_owned()),
         open_on_output: None,
         layout: None,
         activities: vec!["beta".to_owned()],
@@ -11765,8 +11765,8 @@ fn reconcile_remove_rebinds_orphan_workspace_into_cascade_target_view() {
     // Reload: keep only beta — drops Default and alpha. Both active and
     // previous are in remove_set, so the cascade falls through to the
     // first-declaration-order non-remove-set survivor (beta).
-    let cfg_reload = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("beta".to_owned()),
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("beta".to_owned()),
     }];
     layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
@@ -11856,14 +11856,14 @@ fn reconcile_remove_predicate_skips_workspace_already_anchored_by_surviving_view
     let mut layout = check_ops(ops);
 
     let cfg_init = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("alpha".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("alpha".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("beta".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("beta".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
@@ -11891,8 +11891,8 @@ fn reconcile_remove_predicate_skips_workspace_already_anchored_by_surviving_view
     let mon_out = layout.monitors[0].output_id();
 
     // Named for the same Monitor-invariant reason as the rebind test.
-    let orphan_cfg = niri_config::Workspace {
-        name: niri_config::workspace::WorkspaceName("ws_b".to_owned()),
+    let orphan_cfg = jiji_config::Workspace {
+        name: jiji_config::workspace::WorkspaceName("ws_b".to_owned()),
         open_on_output: None,
         layout: None,
         activities: vec!["beta".to_owned()],
@@ -11966,8 +11966,8 @@ fn reconcile_remove_predicate_skips_workspace_already_anchored_by_surviving_view
          so that the orphan is in `surviving_anchored` and Pass 2 skips it",
     );
 
-    let cfg_reload = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("beta".to_owned()),
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("beta".to_owned()),
     }];
     layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
@@ -12025,14 +12025,14 @@ fn reconcile_remove_rebinds_orphan_when_workspace_tagged_to_both_removed_and_sur
     let mut layout = check_ops(ops);
 
     let cfg_init = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("alpha".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("alpha".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("gamma".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("gamma".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
@@ -12056,8 +12056,8 @@ fn reconcile_remove_rebinds_orphan_when_workspace_tagged_to_both_removed_and_sur
     let mon_out = layout.monitors[0].output_id();
 
     // Mint orphan tagged to BOTH alpha and gamma — the mixed-tag case.
-    let orphan_cfg = niri_config::Workspace {
-        name: niri_config::workspace::WorkspaceName("ws_shared".to_owned()),
+    let orphan_cfg = jiji_config::Workspace {
+        name: jiji_config::workspace::WorkspaceName("ws_shared".to_owned()),
         open_on_output: None,
         layout: None,
         activities: vec!["alpha".to_owned(), "gamma".to_owned()],
@@ -12101,8 +12101,8 @@ fn reconcile_remove_rebinds_orphan_when_workspace_tagged_to_both_removed_and_sur
     // Reload: keep only gamma — drops Default and alpha.
     // Cascade target: alpha was active, previous = Default (in remove_set) →
     // falls through to first-declaration-order non-remove-set survivor (gamma).
-    let cfg_reload = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("gamma".to_owned()),
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("gamma".to_owned()),
     }];
     layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
@@ -12177,11 +12177,11 @@ fn reconcile_remove_rejects_on_hard_block_when_cascade_required() {
     let mut layout = check_ops(ops);
 
     let cfg_init = [
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Default".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
         },
-        niri_config::ActivityDecl {
-            name: niri_config::ActivityName("Beta".to_owned()),
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Beta".to_owned()),
         },
     ];
     layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
@@ -12218,8 +12218,8 @@ fn reconcile_remove_rejects_on_hard_block_when_cascade_required() {
     let active_before = layout.active_activity_id();
     let previous_before = layout.activities.previous_id();
 
-    let cfg_reload = [niri_config::ActivityDecl {
-        name: niri_config::ActivityName("Default".to_owned()),
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Default".to_owned()),
     }];
     let err = layout
         .reconcile_activities_on_reload_remove(&cfg_reload)
@@ -14828,7 +14828,7 @@ fn toggle_workspace_sticky_no_op_when_workspace_not_found() {
 fn cross_activity_config(
     alpha_ws: &[(&str, Option<&str>)],
     beta_ws: &[(&str, Option<&str>)],
-) -> niri_config::Config {
+) -> jiji_config::Config {
     let mut workspaces = Vec::new();
     for (name, output) in alpha_ws {
         workspaces.push(WorkspaceConfig {
@@ -14848,17 +14848,17 @@ fn cross_activity_config(
             sticky: None,
         });
     }
-    niri_config::Config {
+    jiji_config::Config {
         activities: vec![
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("alpha".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("alpha".to_owned()),
             },
-            niri_config::ActivityDecl {
-                name: niri_config::ActivityName("beta".to_owned()),
+            jiji_config::ActivityDecl {
+                name: jiji_config::ActivityName("beta".to_owned()),
             },
         ],
         workspaces,
-        ..niri_config::Config::default()
+        ..jiji_config::Config::default()
     }
 }
 
