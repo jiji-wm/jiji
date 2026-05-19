@@ -246,7 +246,7 @@ impl DisplayConfig {
             return Ok(());
         }
         if let Err(err) = self.to_niri.send(new_conf) {
-            warn!("error sending message to niri: {err:?}");
+            warn!("error sending message to jiji: {err:?}");
             return Err(fdo::Error::Failed("internal error".to_owned()));
         }
         Ok(())

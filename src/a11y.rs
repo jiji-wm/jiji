@@ -320,7 +320,7 @@ impl Niri {
 
         let tree = Tree {
             root: ID_ROOT,
-            toolkit_name: Some(String::from("niri")),
+            toolkit_name: Some(String::from("jiji")),
             toolkit_version: None,
         };
 

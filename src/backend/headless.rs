@@ -60,7 +60,7 @@ impl Headless {
 
     pub fn add_output(&mut self, niri: &mut Niri, n: u8, size: (u16, u16)) {
         let connector = format!("headless-{n}");
-        let make = "niri".to_string();
+        let make = "jiji".to_string();
         let model = "headless".to_string();
         let serial = n.to_string();
 

@@ -2237,8 +2237,8 @@ impl State {
         windows.insert(
             self.niri.casting.dynamic_cast_id_for_portal.get(),
             gnome_shell_introspect::WindowProperties {
-                title: String::from("niri Dynamic Cast Target"),
-                app_id: String::from("rs.bxt.niri.desktop"),
+                title: String::from("jiji Dynamic Cast Target"),
+                app_id: String::from("rs.bxt.jiji.desktop"),
             },
         );
 
@@ -2285,7 +2285,7 @@ impl State {
         {
             let config = self.niri.config.borrow();
             if config.input.keyboard.xkb != Xkb::default() {
-                trace!("ignoring locale1 xkb change because niri config has xkb settings");
+                trace!("ignoring locale1 xkb change because jiji config has xkb settings");
                 return;
             }
         }
@@ -2739,7 +2739,7 @@ impl Niri {
             "/org/freedesktop/login1",
             Some("org.freedesktop.login1.Manager"),
             "Inhibit",
-            &("handle-power-key", "niri", "Power key handling", "block"),
+            &("handle-power-key", "jiji", "Power key handling", "block"),
         )?;
 
         let fd: zbus::zvariant::OwnedFd = message.body().deserialize()?;

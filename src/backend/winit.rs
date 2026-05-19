@@ -46,8 +46,8 @@ impl Winit {
         let builder = Window::default_attributes()
             .with_inner_size(LogicalSize::new(1280.0, 800.0))
             // .with_resizable(false)
-            .with_title("niri")
-            .with_name("niri", "");
+            .with_title("jiji")
+            .with_name("jiji", "");
         let (backend, winit) = winit::init_from_attributes(builder)?;
 
         let output = Output::new(

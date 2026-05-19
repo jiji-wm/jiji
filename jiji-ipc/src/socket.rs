@@ -28,7 +28,7 @@ impl Socket {
         let socket_path = env::var_os(SOCKET_PATH_ENV).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("{SOCKET_PATH_ENV} is not set, are you running this within niri?"),
+                format!("{SOCKET_PATH_ENV} is not set, are you running this within jiji?"),
             )
         })?;
         Self::connect_to(socket_path)

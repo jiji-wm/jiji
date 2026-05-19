@@ -34,7 +34,7 @@ impl Screenshot {
             .to_niri
             .send(ScreenshotToNiri::TakeScreenshot { include_cursor })
         {
-            warn!("error sending message to niri: {err:?}");
+            warn!("error sending message to jiji: {err:?}");
             return Err(fdo::Error::Failed("internal error".to_owned()));
         }
 
@@ -44,7 +44,7 @@ impl Screenshot {
                 return Err(fdo::Error::Failed("internal error".to_owned()));
             }
             Err(err) => {
-                warn!("error receiving message from niri: {err:?}");
+                warn!("error receiving message from jiji: {err:?}");
                 return Err(fdo::Error::Failed("internal error".to_owned()));
             }
         };
@@ -55,7 +55,7 @@ impl Screenshot {
     async fn pick_color(&self) -> fdo::Result<HashMap<String, OwnedValue>> {
         let (tx, rx) = async_channel::bounded(1);
         if let Err(err) = self.to_niri.send(ScreenshotToNiri::PickColor(tx)) {
-            warn!("error sending pick color message to niri: {err:?}");
+            warn!("error sending pick color message to jiji: {err:?}");
             return Err(fdo::Error::Failed("internal error".to_owned()));
         }
 
@@ -65,7 +65,7 @@ impl Screenshot {
                 return Err(fdo::Error::Failed("no color picked".to_owned()));
             }
             Err(err) => {
-                warn!("error receiving message from niri: {err:?}");
+                warn!("error receiving message from jiji: {err:?}");
                 return Err(fdo::Error::Failed("internal error".to_owned()));
             }
         };

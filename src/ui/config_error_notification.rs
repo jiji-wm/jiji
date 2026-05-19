@@ -249,9 +249,9 @@ fn render(
 
 pub fn error_text(markup: bool) -> String {
     let command = if markup {
-        "<span face='monospace' bgcolor='#000000'>niri validate</span>"
+        "<span face='monospace' bgcolor='#000000'>jiji validate</span>"
     } else {
-        "niri validate"
+        "jiji validate"
     };
 
     format!("Failed to parse the config file. Please run {command} to see the errors.")

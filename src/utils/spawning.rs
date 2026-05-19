@@ -424,7 +424,7 @@ mod systemd {
         // Extract the basename.
         let name = Path::new(name).file_name().unwrap_or(name);
 
-        let mut scope_name = String::from("app-niri-");
+        let mut scope_name = String::from("app-jiji-");
 
         // Escape for systemd similarly to libgnome-desktop, which says it had adapted this from
         // systemd source.

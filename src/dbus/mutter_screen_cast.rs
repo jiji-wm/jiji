@@ -171,7 +171,7 @@ impl Session {
         if let Err(err) = self.to_niri.send(ScreenCastToNiri::StopCast {
             session_id: self.id,
         }) {
-            warn!("error sending StopCast to niri: {err:?}");
+            warn!("error sending StopCast to jiji: {err:?}");
         }
 
         let streams = mem::take(&mut *self.streams.lock().unwrap());
@@ -389,7 +389,7 @@ impl Stream {
         };
 
         if let Err(err) = self.to_niri.send(msg) {
-            warn!("error sending StartCast to niri: {err:?}");
+            warn!("error sending StartCast to jiji: {err:?}");
         }
     }
 }

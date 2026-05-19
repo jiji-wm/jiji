@@ -30,7 +30,7 @@ use crate::utils::version;
 fn format_annotation(ws: &Workspace, names: &HashMap<u64, String>) -> String {
     debug_assert!(
         !ws.activities.is_empty(),
-        "workspace activities must be non-empty per niri-ipc Workspace contract"
+        "workspace activities must be non-empty per jiji-ipc Workspace contract"
     );
 
     let mut labels: Vec<String> = ws
@@ -59,7 +59,7 @@ fn format_annotation(ws: &Workspace, names: &HashMap<u64, String>) -> String {
 /// Hidden workspaces (`!is_in_active_activity`) render `-` in the idx column
 /// rather than the sentinel `0` carried in `ws.idx` — the `idx` field is only
 /// meaningful when `is_in_active_activity` is true (see the `Workspace.idx`
-/// contract in `niri-ipc`).
+/// contract in `jiji-ipc`).
 ///
 /// Names wider than 10 characters push the annotation rightward without truncation —
 /// the column width is a left-pad minimum, not a cap.
@@ -81,7 +81,7 @@ fn format_row(ws: &Workspace, names: &HashMap<u64, String>) -> String {
 }
 
 pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
-    // For actions taking paths, prepend the niri CLI's working directory.
+    // For actions taking paths, prepend the jiji CLI's working directory.
     if let Msg::Action {
         action:
             Action::Screenshot { path, .. }
@@ -118,12 +118,12 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::Casts => Request::Casts,
     };
 
-    let mut socket = Socket::connect().context("error connecting to the niri socket")?;
+    let mut socket = Socket::connect().context("error connecting to the jiji socket")?;
 
     let result = socket.send(request);
 
-    // For errors that can be caused by a version mismatch between the running niri instance and
-    // the niri msg CLI, we will try to fetch and compare the versions.
+    // For errors that can be caused by a version mismatch between the running jiji instance and
+    // the jiji msg CLI, we will try to fetch and compare the versions.
     let check_compositor_version = match &result {
         Err(err) => {
             // Response JSON parsing errors.
@@ -132,13 +132,13 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                 ErrorKind::InvalidData | ErrorKind::UnexpectedEof
             )
         }
-        // Error returned from niri.
+        // Error returned from jiji.
         Ok(Err(_)) => true,
         _ => false,
     };
 
     let compositor_version = if check_compositor_version && !matches!(msg, Msg::Version) {
-        // Reconnect to support older niri versions with one request per connection.
+        // Reconnect to support older jiji versions with one request per connection.
         Socket::connect()
             .and_then(|mut socket| socket.send(Request::Version))
             .ok()
@@ -156,16 +156,16 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Some(Ok(Response::Version(compositor_version))) => {
             let cli_version = version();
             if cli_version != compositor_version {
-                eprintln!("Running niri compositor has a different version from the niri CLI:");
+                eprintln!("Running jiji compositor has a different version from the jiji CLI:");
                 eprintln!("Compositor version: {compositor_version}");
                 eprintln!("CLI version:        {cli_version}");
-                eprintln!("Did you forget to restart niri after an update?");
+                eprintln!("Did you forget to restart jiji after an update?");
                 eprintln!();
             }
         }
         Some(_) => {
-            eprintln!("Unable to get the running niri compositor version.");
-            eprintln!("Did you forget to restart niri after an update?");
+            eprintln!("Unable to get the running jiji compositor version.");
+            eprintln!("Did you forget to restart jiji after an update?");
             eprintln!();
         }
         None => {
@@ -174,8 +174,8 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         }
     }
 
-    let reply = result.context("error communicating with niri")?;
-    let response = reply.map_err(|err_msg| anyhow!(err_msg).context("niri returned an error"))?;
+    let reply = result.context("error communicating with jiji")?;
+    let response = reply.map_err(|err_msg| anyhow!(err_msg).context("jiji returned an error"))?;
 
     match msg {
         Msg::RequestError => {
@@ -200,8 +200,8 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
             }
 
             if cli_version != compositor_version {
-                eprintln!("Running niri compositor has a different version from the niri CLI.");
-                eprintln!("Did you forget to restart niri after an update?");
+                eprintln!("Running jiji compositor has a different version from the jiji CLI.");
+                eprintln!("Did you forget to restart jiji after an update?");
                 eprintln!();
             }
 
@@ -456,7 +456,7 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
 
             // Chain a second request to resolve activity ids → names for the
             // row annotations. The chained request opens a fresh connection
-            // rather than reusing `socket`, so older niri versions that close
+            // rather than reusing `socket`, so older jiji versions that close
             // the socket after a single request degrade cleanly to the
             // empty-map fallback instead of surfacing an IO error from a
             // closed-after-Workspaces socket. The version-fetch path earlier
@@ -476,7 +476,7 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                         let actives: Vec<_> = acts.iter().filter(|a| a.is_active).collect();
                         debug_assert!(
                             actives.len() <= 1,
-                            "niri-ipc Activities reported >1 active activity: {actives:?}"
+                            "jiji-ipc Activities reported >1 active activity: {actives:?}"
                         );
                         let active_name = actives.first().map(|a| a.name.clone());
                         let names = acts.into_iter().map(|a| (a.id, a.name)).collect();
@@ -484,21 +484,21 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                     }
                     Ok(Ok(other)) => {
                         eprintln!(
-                            "niri msg workspaces: unexpected response to Activities request \
+                            "jiji msg workspaces: unexpected response to Activities request \
                              ({other:?}); rendering bare numeric annotations"
                         );
                         (HashMap::new(), None)
                     }
                     Ok(Err(reply_err)) => {
                         eprintln!(
-                            "niri msg workspaces: compositor rejected Activities request \
-                             ({reply_err}); this niri version may not support activities"
+                            "jiji msg workspaces: compositor rejected Activities request \
+                             ({reply_err}); this jiji version may not support activities"
                         );
                         (HashMap::new(), None)
                     }
                     Err(io_err) => {
                         eprintln!(
-                            "niri msg workspaces: IO error on chained Activities request \
+                            "jiji msg workspaces: IO error on chained Activities request \
                              (failed to connect or send: {io_err}); rendering bare numeric \
                              annotations"
                         );
@@ -600,7 +600,7 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
 
             let mut read_event = socket.read_events();
             loop {
-                let event = read_event().context("error reading event from niri")?;
+                let event = read_event().context("error reading event from jiji")?;
 
                 if json {
                     let event = serde_json::to_string(&event).context("error formatting event")?;

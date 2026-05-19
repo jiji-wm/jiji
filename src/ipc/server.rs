@@ -153,7 +153,7 @@ impl IpcServer {
 
         let socket_path = if let Some(wayland_socket_name) = wayland_socket_name {
             let wayland_socket_name = wayland_socket_name.to_string_lossy();
-            let socket_name = format!("niri.{wayland_socket_name}.{}.sock", process::id());
+            let socket_name = format!("jiji.{wayland_socket_name}.{}.sock", process::id());
             let mut socket_path = socket_dir();
             socket_path.push(socket_name);
 

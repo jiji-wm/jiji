@@ -141,7 +141,7 @@ impl ResizeEdge {
 }
 
 pub fn version() -> String {
-    if let Some(v) = option_env!("NIRI_BUILD_VERSION_STRING") {
+    if let Some(v) = option_env!("JIJI_BUILD_VERSION_STRING") {
         return String::from(v);
     }
 
@@ -150,7 +150,7 @@ pub fn version() -> String {
     const PATCH: &str = env!("CARGO_PKG_VERSION_PATCH");
 
     let commit =
-        option_env!("NIRI_BUILD_COMMIT").unwrap_or(git_version!(fallback = "unknown commit"));
+        option_env!("JIJI_BUILD_COMMIT").unwrap_or(git_version!(fallback = "unknown commit"));
 
     if PATCH == "0" {
         format!("{MAJOR}.{MINOR:0>2} ({commit})")
@@ -575,7 +575,7 @@ pub fn show_screenshot_notification(image_path: Option<&Path>) -> anyhow::Result
         Some("org.freedesktop.Notifications"),
         "Notify",
         &(
-            "niri",
+            "jiji",
             0u32,
             image_url.as_ref().map(|url| url.as_str()).unwrap_or(""),
             "Screenshot captured",

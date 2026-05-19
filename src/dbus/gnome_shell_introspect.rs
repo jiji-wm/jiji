@@ -38,14 +38,14 @@ pub struct WindowProperties {
 impl Introspect {
     async fn get_windows(&self) -> fdo::Result<HashMap<u64, WindowProperties>> {
         if let Err(err) = self.to_niri.send(IntrospectToNiri::GetWindows) {
-            warn!("error sending message to niri: {err:?}");
+            warn!("error sending message to jiji: {err:?}");
             return Err(fdo::Error::Failed("internal error".to_owned()));
         }
 
         match self.from_niri.recv().await {
             Ok(NiriToIntrospect::Windows(windows)) => Ok(windows),
             Err(err) => {
-                warn!("error receiving message from niri: {err:?}");
+                warn!("error receiving message from jiji: {err:?}");
                 Err(fdo::Error::Failed("internal error".to_owned()))
             }
         }
