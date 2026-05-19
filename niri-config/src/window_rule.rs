@@ -1,4 +1,4 @@
-use niri_ipc::ColumnDisplay;
+use jiji_ipc::ColumnDisplay;
 
 use crate::appearance::{
     BackgroundEffect, BackgroundEffectRule, BlockOutFrom, BorderRule, CornerRadius, ShadowRule,

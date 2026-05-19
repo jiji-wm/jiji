@@ -5,13 +5,13 @@ use std::path::Path;
 use std::{env, slice};
 
 use anyhow::{anyhow, bail, Context};
-use niri_config::OutputName;
-use niri_ipc::socket::Socket;
-use niri_ipc::{
+use jiji_ipc::socket::Socket;
+use jiji_ipc::{
     Action, Activity, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode,
     Output, OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
     Workspace,
 };
+use niri_config::OutputName;
 use serde_json::json;
 
 use crate::cli::Msg;
@@ -285,19 +285,19 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
             });
             let mut iter = layers.iter().peekable();
 
-            let print = |surface: &niri_ipc::LayerSurface| {
+            let print = |surface: &jiji_ipc::LayerSurface| {
                 println!("    Surface:");
                 println!("      Namespace: \"{}\"", &surface.namespace);
 
                 let interactivity = match surface.keyboard_interactivity {
-                    niri_ipc::LayerSurfaceKeyboardInteractivity::None => "none",
-                    niri_ipc::LayerSurfaceKeyboardInteractivity::Exclusive => "exclusive",
-                    niri_ipc::LayerSurfaceKeyboardInteractivity::OnDemand => "on-demand",
+                    jiji_ipc::LayerSurfaceKeyboardInteractivity::None => "none",
+                    jiji_ipc::LayerSurfaceKeyboardInteractivity::Exclusive => "exclusive",
+                    jiji_ipc::LayerSurfaceKeyboardInteractivity::OnDemand => "on-demand",
                 };
                 println!("      Keyboard interactivity: {interactivity}");
             };
 
-            let print_layer = |iter: &mut Peekable<slice::Iter<niri_ipc::LayerSurface>>,
+            let print_layer = |iter: &mut Peekable<slice::Iter<jiji_ipc::LayerSurface>>,
                                output: &str,
                                layer| {
                 let mut empty = true;
@@ -318,16 +318,16 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                 println!("Output \"{output}\":");
 
                 print!("  Background layer:");
-                print_layer(&mut iter, output, niri_ipc::Layer::Background);
+                print_layer(&mut iter, output, jiji_ipc::Layer::Background);
 
                 print!("  Bottom layer:");
-                print_layer(&mut iter, output, niri_ipc::Layer::Bottom);
+                print_layer(&mut iter, output, jiji_ipc::Layer::Bottom);
 
                 print!("  Top layer:");
-                print_layer(&mut iter, output, niri_ipc::Layer::Top);
+                print_layer(&mut iter, output, jiji_ipc::Layer::Top);
 
                 print!("  Overlay layer:");
-                print_layer(&mut iter, output, niri_ipc::Layer::Overlay);
+                print_layer(&mut iter, output, jiji_ipc::Layer::Overlay);
             }
         }
         Msg::FocusedOutput => {

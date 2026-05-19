@@ -34,5 +34,5 @@ pub struct Match {
     #[knuffel(property)]
     pub at_startup: Option<bool>,
     #[knuffel(property, str)]
-    pub layer: Option<niri_ipc::Layer>,
+    pub layer: Option<jiji_ipc::Layer>,
 }

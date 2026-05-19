@@ -205,20 +205,20 @@ pub fn output_size(output: &Output) -> Size<f64, Logical> {
     output_transform.transform_size(logical_size)
 }
 
-pub fn logical_output(output: &Output) -> niri_ipc::LogicalOutput {
+pub fn logical_output(output: &Output) -> jiji_ipc::LogicalOutput {
     let loc = output.current_location();
     let size = output_size(output);
     let transform = match output.current_transform() {
-        Transform::Normal => niri_ipc::Transform::Normal,
-        Transform::_90 => niri_ipc::Transform::_90,
-        Transform::_180 => niri_ipc::Transform::_180,
-        Transform::_270 => niri_ipc::Transform::_270,
-        Transform::Flipped => niri_ipc::Transform::Flipped,
-        Transform::Flipped90 => niri_ipc::Transform::Flipped90,
-        Transform::Flipped180 => niri_ipc::Transform::Flipped180,
-        Transform::Flipped270 => niri_ipc::Transform::Flipped270,
+        Transform::Normal => jiji_ipc::Transform::Normal,
+        Transform::_90 => jiji_ipc::Transform::_90,
+        Transform::_180 => jiji_ipc::Transform::_180,
+        Transform::_270 => jiji_ipc::Transform::_270,
+        Transform::Flipped => jiji_ipc::Transform::Flipped,
+        Transform::Flipped90 => jiji_ipc::Transform::Flipped90,
+        Transform::Flipped180 => jiji_ipc::Transform::Flipped180,
+        Transform::Flipped270 => jiji_ipc::Transform::Flipped270,
     };
-    niri_ipc::LogicalOutput {
+    jiji_ipc::LogicalOutput {
         x: loc.x,
         y: loc.y,
         width: size.w as u32,
@@ -237,16 +237,16 @@ pub fn panel_orientation(output: &Output) -> Transform {
         .unwrap_or(Transform::Normal)
 }
 
-pub fn ipc_transform_to_smithay(transform: niri_ipc::Transform) -> Transform {
+pub fn ipc_transform_to_smithay(transform: jiji_ipc::Transform) -> Transform {
     match transform {
-        niri_ipc::Transform::Normal => Transform::Normal,
-        niri_ipc::Transform::_90 => Transform::_90,
-        niri_ipc::Transform::_180 => Transform::_180,
-        niri_ipc::Transform::_270 => Transform::_270,
-        niri_ipc::Transform::Flipped => Transform::Flipped,
-        niri_ipc::Transform::Flipped90 => Transform::Flipped90,
-        niri_ipc::Transform::Flipped180 => Transform::Flipped180,
-        niri_ipc::Transform::Flipped270 => Transform::Flipped270,
+        jiji_ipc::Transform::Normal => Transform::Normal,
+        jiji_ipc::Transform::_90 => Transform::_90,
+        jiji_ipc::Transform::_180 => Transform::_180,
+        jiji_ipc::Transform::_270 => Transform::_270,
+        jiji_ipc::Transform::Flipped => Transform::Flipped,
+        jiji_ipc::Transform::Flipped90 => Transform::Flipped90,
+        jiji_ipc::Transform::Flipped180 => Transform::Flipped180,
+        jiji_ipc::Transform::Flipped270 => Transform::Flipped270,
     }
 }
 

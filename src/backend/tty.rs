@@ -13,10 +13,10 @@ use std::{io, mem};
 use anyhow::{anyhow, bail, ensure, Context};
 use bytemuck::cast_slice_mut;
 use drm_ffi::drm_mode_modeinfo;
+use jiji_ipc::{HSyncPolarity, VSyncPolarity};
 use libc::dev_t;
 use niri_config::output::Modeline;
 use niri_config::{Config, OutputName};
-use niri_ipc::{HSyncPolarity, VSyncPolarity};
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
@@ -2123,7 +2123,7 @@ impl Tty {
                 let mut current_mode = None;
                 let mut is_custom_mode = false;
 
-                let mut modes: Vec<niri_ipc::Mode> = connector
+                let mut modes: Vec<jiji_ipc::Mode> = connector
                     .modes()
                     .iter()
                     .filter(|m| !m.flags().contains(ModeFlags::INTERLACE))
@@ -2133,7 +2133,7 @@ impl Tty {
                             current_mode = Some(idx);
                         }
 
-                        niri_ipc::Mode {
+                        jiji_ipc::Mode {
                             width: m.size().0,
                             height: m.size().1,
                             refresh_rate: Mode::from(*m).refresh as u32,
@@ -2147,7 +2147,7 @@ impl Tty {
                     if crtc_mode.mode_type().contains(ModeTypeFlags::USERDEF) {
                         modes.insert(
                             0,
-                            niri_ipc::Mode {
+                            jiji_ipc::Mode {
                                 width: crtc_mode.size().0,
                                 height: crtc_mode.size().1,
                                 refresh_rate: Mode::from(crtc_mode).refresh as u32,
@@ -2194,7 +2194,7 @@ impl Tty {
                     OutputId::next()
                 });
 
-                let ipc_output = niri_ipc::Output {
+                let ipc_output = jiji_ipc::Output {
                     name: connector_name,
                     make: output_name.make.unwrap_or_else(|| "Unknown".into()),
                     model: output_name.model.unwrap_or_else(|| "Unknown".into()),
@@ -3432,8 +3432,8 @@ unsafe fn init_libinput_plugin_system(libinput: &Libinput) {
 #[cfg(test)]
 mod tests {
     use insta::assert_debug_snapshot;
+    use jiji_ipc::{HSyncPolarity, VSyncPolarity};
     use niri_config::output::Modeline;
-    use niri_ipc::{HSyncPolarity, VSyncPolarity};
 
     use crate::backend::tty::{calculate_drm_mode_from_modeline, calculate_mode_cvt};
 

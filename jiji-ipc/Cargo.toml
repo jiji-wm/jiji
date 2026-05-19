@@ -1,5 +1,5 @@
 [package]
-name = "niri-ipc"
+name = "jiji-ipc"
 version.workspace = true
 authors.workspace = true
 license.workspace = true

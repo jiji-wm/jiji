@@ -9594,7 +9594,7 @@ fn windows_all_disconnected_pool_yields_stale_output_id() {
 /// hold after a full `ipc_refresh_layout` tick against `layout`.
 fn activities_state_snapshot_from_layout<W: LayoutElement>(
     layout: &Layout<W>,
-) -> HashMap<u64, niri_ipc::Activity> {
+) -> HashMap<u64, jiji_ipc::Activity> {
     crate::ipc::server::build_activities_ipc(layout)
         .into_iter()
         .map(|a| (a.id, a))
@@ -9622,7 +9622,7 @@ fn create_activity_refresh_emits_activity_created() {
 
     let events = crate::ipc::server::test_diff_activities_against_state(&layout, &seed);
     assert_eq!(events.len(), 1, "got {events:?}");
-    let niri_ipc::Event::ActivityCreated { activity } = &events[0] else {
+    let jiji_ipc::Event::ActivityCreated { activity } = &events[0] else {
         panic!("expected ActivityCreated, got {:?}", events[0]);
     };
     assert_eq!(activity.id, new_id.get());
@@ -9663,7 +9663,7 @@ fn create_activity_refresh_emits_activity_created() {
     let created: Vec<_> = events2
         .iter()
         .filter_map(|e| match e {
-            niri_ipc::Event::ActivityCreated { activity } => Some(activity),
+            jiji_ipc::Event::ActivityCreated { activity } => Some(activity),
             _ => None,
         })
         .collect();
@@ -9700,7 +9700,7 @@ fn remove_activity_refresh_emits_activity_removed() {
     assert_eq!(events.len(), 1, "got {events:?}");
     assert!(matches!(
         events[0],
-        niri_ipc::Event::ActivityRemoved { id } if id == work_id.get(),
+        jiji_ipc::Event::ActivityRemoved { id } if id == work_id.get(),
     ));
 }
 
@@ -9724,7 +9724,7 @@ fn rename_activity_refresh_emits_activity_renamed() {
 
     let events = crate::ipc::server::test_diff_activities_against_state(&layout, &seed);
     assert_eq!(events.len(), 1);
-    let niri_ipc::Event::ActivityRenamed { id, name } = &events[0] else {
+    let jiji_ipc::Event::ActivityRenamed { id, name } = &events[0] else {
         panic!("expected ActivityRenamed, got {:?}", events[0]);
     };
     assert_eq!(*id, work_id.get());
@@ -9766,13 +9766,13 @@ fn refresh_first_tick_seeds_silently_then_live_activities_emit_created_with_corr
     );
 
     // First-tick previous snapshot is empty.
-    let previous: HashMap<u64, niri_ipc::Activity> = HashMap::new();
+    let previous: HashMap<u64, jiji_ipc::Activity> = HashMap::new();
     let events = crate::ipc::server::test_diff_activities_against_state(&layout, &previous);
 
     // No ActivitySwitched on the first tick.
     for event in &events {
         assert!(
-            !matches!(event, niri_ipc::Event::ActivitySwitched { .. }),
+            !matches!(event, jiji_ipc::Event::ActivitySwitched { .. }),
             "no ActivitySwitched must be emitted on the first (seeding) tick, got {event:?}",
         );
     }
@@ -9781,7 +9781,7 @@ fn refresh_first_tick_seeds_silently_then_live_activities_emit_created_with_corr
     let created: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            niri_ipc::Event::ActivityCreated { activity } => Some(activity),
+            jiji_ipc::Event::ActivityCreated { activity } => Some(activity),
             _ => None,
         })
         .collect();
@@ -9843,11 +9843,11 @@ fn remove_active_activity_cascade_refresh_emits_removed_before_switch() {
     let all_events = crate::ipc::server::test_diff_activities_against_state(&layout, &seed);
     assert_eq!(all_events.len(), 2, "got {all_events:?}");
     assert!(
-        matches!(&all_events[0], niri_ipc::Event::ActivityRemoved { id } if *id == beta.get()),
+        matches!(&all_events[0], jiji_ipc::Event::ActivityRemoved { id } if *id == beta.get()),
         "first event must be ActivityRemoved for beta, got {:?}",
         all_events[0],
     );
-    let niri_ipc::Event::ActivitySwitched { id, previous_id } = &all_events[1] else {
+    let jiji_ipc::Event::ActivitySwitched { id, previous_id } = &all_events[1] else {
         panic!(
             "second event must be ActivitySwitched, got {:?}",
             all_events[1]
@@ -9900,10 +9900,10 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
     // within-bucket ascending-id sort, catching any regression that drops the sort calls.
     let fake_epsilon_id: u64 = 500;
     let fake_zeta_id: u64 = 999;
-    let mut previous: HashMap<u64, niri_ipc::Activity> = HashMap::new();
+    let mut previous: HashMap<u64, jiji_ipc::Activity> = HashMap::new();
     previous.insert(
         alpha.get(),
-        niri_ipc::Activity {
+        jiji_ipc::Activity {
             id: alpha.get(),
             name: layout
                 .activities()
@@ -9919,7 +9919,7 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
     );
     previous.insert(
         gamma.get(),
-        niri_ipc::Activity {
+        jiji_ipc::Activity {
             id: gamma.get(),
             name: "Gamma".to_owned(), // stale name — triggers Renamed
             is_active: false,
@@ -9929,7 +9929,7 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
     );
     previous.insert(
         fake_epsilon_id,
-        niri_ipc::Activity {
+        jiji_ipc::Activity {
             id: fake_epsilon_id,
             name: "Epsilon".to_owned(), // not in layout — triggers Removed
             is_active: false,
@@ -9939,7 +9939,7 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
     );
     previous.insert(
         fake_zeta_id,
-        niri_ipc::Activity {
+        jiji_ipc::Activity {
             id: fake_zeta_id,
             name: "Zeta".to_owned(), // not in layout — triggers Removed
             is_active: false,
@@ -9954,21 +9954,21 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
     let removed: Vec<u64> = events
         .iter()
         .filter_map(|e| match e {
-            niri_ipc::Event::ActivityRemoved { id } => Some(*id),
+            jiji_ipc::Event::ActivityRemoved { id } => Some(*id),
             _ => None,
         })
         .collect();
     let renamed: Vec<(u64, &str)> = events
         .iter()
         .filter_map(|e| match e {
-            niri_ipc::Event::ActivityRenamed { id, name } => Some((*id, name.as_str())),
+            jiji_ipc::Event::ActivityRenamed { id, name } => Some((*id, name.as_str())),
             _ => None,
         })
         .collect();
     let created: Vec<u64> = events
         .iter()
         .filter_map(|e| match e {
-            niri_ipc::Event::ActivityCreated { activity } => Some(activity.id),
+            jiji_ipc::Event::ActivityCreated { activity } => Some(activity.id),
             _ => None,
         })
         .collect();
@@ -9977,17 +9977,17 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
     let removed_positions: Vec<usize> = events
         .iter()
         .enumerate()
-        .filter_map(|(i, e)| matches!(e, niri_ipc::Event::ActivityRemoved { .. }).then_some(i))
+        .filter_map(|(i, e)| matches!(e, jiji_ipc::Event::ActivityRemoved { .. }).then_some(i))
         .collect();
     let renamed_positions: Vec<usize> = events
         .iter()
         .enumerate()
-        .filter_map(|(i, e)| matches!(e, niri_ipc::Event::ActivityRenamed { .. }).then_some(i))
+        .filter_map(|(i, e)| matches!(e, jiji_ipc::Event::ActivityRenamed { .. }).then_some(i))
         .collect();
     let created_positions: Vec<usize> = events
         .iter()
         .enumerate()
-        .filter_map(|(i, e)| matches!(e, niri_ipc::Event::ActivityCreated { .. }).then_some(i))
+        .filter_map(|(i, e)| matches!(e, jiji_ipc::Event::ActivityCreated { .. }).then_some(i))
         .collect();
 
     assert!(
@@ -10046,10 +10046,10 @@ fn diff_activity_lifecycle_newcomer_routes_to_created_not_renamed() {
     // Snapshot contains a *different* id (old_work_id) also named "Work" —
     // simulates a prior activity with the same name that was replaced.
     let old_work_id: u64 = 999; // not present in the live layout
-    let mut previous: HashMap<u64, niri_ipc::Activity> = HashMap::new();
+    let mut previous: HashMap<u64, jiji_ipc::Activity> = HashMap::new();
     previous.insert(
         alpha.get(),
-        niri_ipc::Activity {
+        jiji_ipc::Activity {
             id: alpha.get(),
             name: layout
                 .activities()
@@ -10065,7 +10065,7 @@ fn diff_activity_lifecycle_newcomer_routes_to_created_not_renamed() {
     );
     previous.insert(
         old_work_id,
-        niri_ipc::Activity {
+        jiji_ipc::Activity {
             id: old_work_id,
             name: "Work".to_owned(), // same name as the new activity, different id
             is_active: false,
@@ -10081,13 +10081,13 @@ fn diff_activity_lifecycle_newcomer_routes_to_created_not_renamed() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, niri_ipc::Event::ActivityRemoved { id } if *id == old_work_id)),
+            .any(|e| matches!(e, jiji_ipc::Event::ActivityRemoved { id } if *id == old_work_id)),
         "expected ActivityRemoved for old id {old_work_id}, got {events:?}",
     );
     assert!(
         events.iter().any(|e| matches!(
             e,
-            niri_ipc::Event::ActivityCreated { activity } if activity.id == new_work_id.get()
+            jiji_ipc::Event::ActivityCreated { activity } if activity.id == new_work_id.get()
         )),
         "expected ActivityCreated for new id {}, got {events:?}",
         new_work_id.get(),
@@ -10095,7 +10095,7 @@ fn diff_activity_lifecycle_newcomer_routes_to_created_not_renamed() {
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e, niri_ipc::Event::ActivityRenamed { .. })),
+            .any(|e| matches!(e, jiji_ipc::Event::ActivityRenamed { .. })),
         "must NOT emit ActivityRenamed when id-presence drives routing, got {events:?}",
     );
 }

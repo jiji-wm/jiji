@@ -1,4 +1,4 @@
-use niri_ipc::PickedColor;
+use jiji_ipc::PickedColor;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::ButtonState;
 use smithay::backend::renderer::element::utils::{Relocate, RelocateRenderElement};

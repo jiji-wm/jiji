@@ -30,8 +30,8 @@
 
 use std::time::{Duration, Instant};
 
+use jiji_ipc::ActivityReferenceArg;
 use niri_config::{Action, ActivityReference};
-use niri_ipc::ActivityReferenceArg;
 use smithay::utils::Point;
 
 use super::fixture::{config_with_two_activities, Fixture};
@@ -151,7 +151,7 @@ fn hard_blocked_switch_activity_queues_drains_on_unblock() {
     );
 
     // Enqueue a waiter via the registry-insert helper. This mirrors the
-    // [`niri_ipc::Request::Action`] arm's blocked-path bookkeeping (depth-1
+    // [`jiji_ipc::Request::Action`] arm's blocked-path bookkeeping (depth-1
     // admission, bounded(1) channel, BlockedWaiter insert) without needing a
     // real process() task.
     let conn_id = IpcConnId::specific(101);

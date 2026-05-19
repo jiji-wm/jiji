@@ -1,5 +1,5 @@
+use jiji_ipc::{ColumnDisplay, SizeChange};
 use knuffel::errors::DecodeError;
-use niri_ipc::{ColumnDisplay, SizeChange};
 
 use crate::appearance::{
     Border, FocusRing, InsertHint, Shadow, TabIndicator, DEFAULT_BACKGROUND_COLOR,

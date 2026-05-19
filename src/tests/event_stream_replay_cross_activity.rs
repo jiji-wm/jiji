@@ -17,9 +17,9 @@
 //!    These encode the structure-before-state contract documented on `Event::ActivityCreated` /
 //!    `Event::ActivitiesChanged`.
 
+use jiji_ipc::state::{EventStreamState, EventStreamStatePart as _};
+use jiji_ipc::Event;
 use niri_config::{Action, ActivityReference, Config, WorkspaceReference};
-use niri_ipc::state::{EventStreamState, EventStreamStatePart as _};
-use niri_ipc::Event;
 
 use super::client::ClientId;
 use super::fixture::Fixture;
@@ -187,7 +187,7 @@ fn event_stream_replay_round_trip_matches_live_state() {
         "Layer 1: captured deltas must transform pre-flow replicate into the \
          post-flow workspaces map (replicate-fidelity broken)",
     );
-    // `niri_ipc::Window` does not implement `PartialEq`, so compare keysets
+    // `jiji_ipc::Window` does not implement `PartialEq`, so compare keysets
     // here at Layer 1 — Layer 2 cross-checks the keyset against the live
     // layout, which is the stronger property anyway.
     let x_win_ids: std::collections::HashSet<u64> =
@@ -198,7 +198,7 @@ fn event_stream_replay_round_trip_matches_live_state() {
         x_win_ids, y_win_ids,
         "Layer 1: captured deltas must transform pre-flow replicate into the \
          post-flow windows keyset (replicate-fidelity broken; keyset proxy \
-         since niri_ipc::Window: !PartialEq)",
+         since jiji_ipc::Window: !PartialEq)",
     );
 
     // === Layer 2: independent oracle ===

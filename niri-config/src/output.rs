@@ -1,11 +1,11 @@
 use std::str::FromStr;
 
+use jiji_ipc::{ConfiguredMode, HSyncPolarity, Transform, VSyncPolarity};
 use knuffel::ast::SpannedNode;
 use knuffel::decode::Context;
 use knuffel::errors::DecodeError;
 use knuffel::traits::ErrorSpan;
 use knuffel::Decode;
-use niri_ipc::{ConfiguredMode, HSyncPolarity, Transform, VSyncPolarity};
 
 use crate::gestures::HotCorners;
 use crate::{Color, FloatOrInt, LayoutPart};
@@ -42,9 +42,9 @@ pub struct Modeline {
     /// Total vertical number of pixels before resetting the vertical drawing position to zero.
     pub vtotal: u16,
     /// Horizontal sync polarity: "+hsync" or "-hsync".
-    pub hsync_polarity: niri_ipc::HSyncPolarity,
+    pub hsync_polarity: jiji_ipc::HSyncPolarity,
     /// Vertical sync polarity: "+vsync" or "-vsync".
-    pub vsync_polarity: niri_ipc::VSyncPolarity,
+    pub vsync_polarity: jiji_ipc::VSyncPolarity,
 }
 
 #[derive(knuffel::Decode, Debug, Clone, PartialEq)]
@@ -151,7 +151,7 @@ impl Outputs {
 }
 
 impl OutputName {
-    pub fn from_ipc_output(output: &niri_ipc::Output) -> Self {
+    pub fn from_ipc_output(output: &jiji_ipc::Output) -> Self {
         Self {
             connector: output.name.clone(),
             make: (output.make != "Unknown").then(|| output.make.clone()),

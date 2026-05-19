@@ -15,6 +15,7 @@ use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
 use clap_complete_nushell::Nushell;
 use directories::ProjectDirs;
+use jiji_ipc::socket::SOCKET_PATH_ENV;
 use niri::cli::{Cli, CompletionShell, Sub};
 #[cfg(feature = "dbus")]
 use niri::dbus;
@@ -26,7 +27,6 @@ use niri::utils::spawning::{
 };
 use niri::utils::{cause_panic, version, watcher, xwayland, IS_SYSTEMD_SERVICE};
 use niri_config::{Config, ConfigPath};
-use niri_ipc::socket::SOCKET_PATH_ENV;
 use sd_notify::NotifyState;
 use smithay::reexports::wayland_server::Display;
 use tracing_subscriber::EnvFilter;

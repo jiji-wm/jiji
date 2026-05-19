@@ -2,9 +2,9 @@ use std::cmp::max;
 use std::iter::zip;
 use std::rc::Rc;
 
+use jiji_ipc::{PositionChange, SizeChange, WindowLayout};
 use niri_config::utils::MergeWith as _;
 use niri_config::{PresetSize, RelativeTo};
-use niri_ipc::{PositionChange, SizeChange, WindowLayout};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size};
 

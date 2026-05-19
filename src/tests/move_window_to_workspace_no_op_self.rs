@@ -13,8 +13,8 @@
 //! that emits `NoOp` for a real cross-workspace move (over-aggressive
 //! short-circuit) fails test 3.
 
+use jiji_ipc::NoOpReason;
 use niri_config::{Action, Config, WorkspaceReference};
-use niri_ipc::NoOpReason;
 
 use super::client::ClientId;
 use super::fixture::Fixture;

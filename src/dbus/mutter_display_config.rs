@@ -93,7 +93,7 @@ impl DisplayConfig {
                 .modes
                 .iter()
                 .map(|m| {
-                    let niri_ipc::Mode {
+                    let jiji_ipc::Mode {
                         width,
                         height,
                         refresh_rate,
@@ -135,14 +135,14 @@ impl DisplayConfig {
 
             if let Some(logical) = output.logical.as_ref() {
                 let transform = match logical.transform {
-                    niri_ipc::Transform::Normal => 0,
-                    niri_ipc::Transform::_90 => 1,
-                    niri_ipc::Transform::_180 => 2,
-                    niri_ipc::Transform::_270 => 3,
-                    niri_ipc::Transform::Flipped => 4,
-                    niri_ipc::Transform::Flipped90 => 5,
-                    niri_ipc::Transform::Flipped180 => 6,
-                    niri_ipc::Transform::Flipped270 => 7,
+                    jiji_ipc::Transform::Normal => 0,
+                    jiji_ipc::Transform::_90 => 1,
+                    jiji_ipc::Transform::_180 => 2,
+                    jiji_ipc::Transform::_270 => 3,
+                    jiji_ipc::Transform::Flipped => 4,
+                    jiji_ipc::Transform::Flipped90 => 5,
+                    jiji_ipc::Transform::Flipped180 => 6,
+                    jiji_ipc::Transform::Flipped270 => 7,
                 };
 
                 logical_monitors.push(LogicalMonitor {
@@ -199,14 +199,14 @@ impl DisplayConfig {
                         name: connector,
                         scale: Some(niri_config::FloatOrInt(requested_config.scale)),
                         transform: match requested_config.transform {
-                            0 => niri_ipc::Transform::Normal,
-                            1 => niri_ipc::Transform::_90,
-                            2 => niri_ipc::Transform::_180,
-                            3 => niri_ipc::Transform::_270,
-                            4 => niri_ipc::Transform::Flipped,
-                            5 => niri_ipc::Transform::Flipped90,
-                            6 => niri_ipc::Transform::Flipped180,
-                            7 => niri_ipc::Transform::Flipped270,
+                            0 => jiji_ipc::Transform::Normal,
+                            1 => jiji_ipc::Transform::_90,
+                            2 => jiji_ipc::Transform::_180,
+                            3 => jiji_ipc::Transform::_270,
+                            4 => jiji_ipc::Transform::Flipped,
+                            5 => jiji_ipc::Transform::Flipped90,
+                            6 => jiji_ipc::Transform::Flipped180,
+                            7 => jiji_ipc::Transform::Flipped270,
                             x => {
                                 return Err(zbus::fdo::Error::Failed(format!(
                                     "Unknown transform {x}",
@@ -219,7 +219,7 @@ impl DisplayConfig {
                         }),
                         mode: Some(niri_config::output::Mode {
                             custom: false,
-                            mode: niri_ipc::ConfiguredMode::from_str(&mode).map_err(|e| {
+                            mode: jiji_ipc::ConfiguredMode::from_str(&mode).map_err(|e| {
                                 zbus::fdo::Error::Failed(format!(
                                     "Could not parse mode '{mode}': {e}"
                                 ))
@@ -309,7 +309,7 @@ impl Start for DisplayConfig {
 }
 
 // Adapted from Mutter.
-fn make_display_name(output: &niri_ipc::Output, is_laptop_panel: bool) -> String {
+fn make_display_name(output: &jiji_ipc::Output, is_laptop_panel: bool) -> String {
     if is_laptop_panel {
         return String::from("Built-in display");
     }

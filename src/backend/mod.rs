@@ -37,7 +37,7 @@ pub enum RenderResult {
     Skipped,
 }
 
-pub type IpcOutputMap = HashMap<OutputId, niri_ipc::Output>;
+pub type IpcOutputMap = HashMap<OutputId, jiji_ipc::Output>;
 
 static OUTPUT_ID_COUNTER: IdCounter = IdCounter::new();
 

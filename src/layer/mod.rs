@@ -98,10 +98,10 @@ fn surface_matches(surface: &LayerSurface, m: &Match) -> bool {
 
     if let Some(layer) = m.layer {
         let surface_layer = match surface.layer() {
-            Layer::Background => niri_ipc::Layer::Background,
-            Layer::Bottom => niri_ipc::Layer::Bottom,
-            Layer::Top => niri_ipc::Layer::Top,
-            Layer::Overlay => niri_ipc::Layer::Overlay,
+            Layer::Background => jiji_ipc::Layer::Background,
+            Layer::Bottom => jiji_ipc::Layer::Bottom,
+            Layer::Top => jiji_ipc::Layer::Top,
+            Layer::Overlay => jiji_ipc::Layer::Overlay,
         };
         if layer != surface_layer {
             return false;

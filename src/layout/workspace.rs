@@ -3,11 +3,11 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
+use jiji_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 use niri_config::utils::MergeWith as _;
 use niri_config::{
     CenterFocusedColumn, CornerRadius, OutputName, PresetSize, Workspace as WorkspaceConfig,
 };
-use niri_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::desktop::{layer_map_for_output, Window};

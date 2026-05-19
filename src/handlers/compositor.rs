@@ -1,6 +1,6 @@
 use std::collections::hash_map::Entry;
 
-use niri_ipc::PositionChange;
+use jiji_ipc::PositionChange;
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData};
 use smithay::reexports::calloop::Interest;

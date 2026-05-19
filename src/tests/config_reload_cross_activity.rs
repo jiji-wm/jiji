@@ -23,9 +23,9 @@
 //!    ...find...)` branch, distinct from the `previous.filter(...)` branch covered by the
 //!    layout-suite cluster.
 
+use jiji_ipc::state::{EventStreamState, EventStreamStatePart as _};
+use jiji_ipc::Event;
 use niri_config::Config;
-use niri_ipc::state::{EventStreamState, EventStreamStatePart as _};
-use niri_ipc::Event;
 
 use super::fixture::Fixture;
 use crate::layout::workspace::OutputId;

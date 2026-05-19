@@ -169,7 +169,7 @@ impl Fixture {
 
     /// Drain the events captured since the most recent `install_event_tap`
     /// (or since the last `drain_events`). Order is emission order.
-    pub fn drain_events(&mut self) -> Vec<niri_ipc::Event> {
+    pub fn drain_events(&mut self) -> Vec<jiji_ipc::Event> {
         self.niri()
             .ipc_server
             .as_ref()
@@ -191,7 +191,7 @@ impl Fixture {
     /// Snapshot the server's current event-stream state as a replay burst
     /// (the same sequence a freshly-connected client would receive before
     /// any flow deltas). Forwards to `IpcServer::replicate_event_stream_state`.
-    pub fn replicate_event_stream_state(&mut self) -> Vec<niri_ipc::Event> {
+    pub fn replicate_event_stream_state(&mut self) -> Vec<jiji_ipc::Event> {
         self.niri()
             .ipc_server
             .as_ref()

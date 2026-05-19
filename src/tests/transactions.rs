@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use insta::assert_snapshot;
-use niri_ipc::SizeChange;
+use jiji_ipc::SizeChange;
 use wayland_client::protocol::wl_surface::WlSurface;
 
 use super::client::ClientId;

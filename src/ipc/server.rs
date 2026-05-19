@@ -15,12 +15,12 @@ use directories::BaseDirs;
 use futures_util::io::{AsyncReadExt, BufReader};
 use futures_util::{select_biased, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, FutureExt as _};
 use indexmap::IndexMap;
-use niri_config::OutputName;
-use niri_ipc::state::{EventStreamState, EventStreamStatePart as _};
-use niri_ipc::{
+use jiji_ipc::state::{EventStreamState, EventStreamStatePart as _};
+use jiji_ipc::{
     Action, Event, KeyboardLayouts, OutputConfigChanged, Overview, Reply, Request, Response,
     Timestamp, WindowLayout, Workspace,
 };
+use niri_config::OutputName;
 use smithay::desktop::layer_map_for_output;
 use smithay::input::pointer::{
     CursorIcon, CursorImageStatus, Focus, GrabStartData as PointerGrabStartData,
@@ -263,7 +263,7 @@ impl IpcServer {
         action: niri_config::Action,
     ) -> Result<async_channel::Receiver<Result<DoActionOutcome, DoActionError>>, &'static str> {
         // Mirror the contains-key admission gate at the live
-        // [`niri_ipc::Request::Action`] site. Read borrow dropped before the
+        // [`jiji_ipc::Request::Action`] site. Read borrow dropped before the
         // bounded channel is allocated so the registry's RefCell is free for
         // the subsequent insert.
         if self.blocked_action_waiters.borrow().contains_key(&conn_id) {
@@ -648,25 +648,25 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                     let name = output.name();
                     for surface in layer_map_for_output(output).layers() {
                         let layer = match surface.layer() {
-                            Layer::Background => niri_ipc::Layer::Background,
-                            Layer::Bottom => niri_ipc::Layer::Bottom,
-                            Layer::Top => niri_ipc::Layer::Top,
-                            Layer::Overlay => niri_ipc::Layer::Overlay,
+                            Layer::Background => jiji_ipc::Layer::Background,
+                            Layer::Bottom => jiji_ipc::Layer::Bottom,
+                            Layer::Top => jiji_ipc::Layer::Top,
+                            Layer::Overlay => jiji_ipc::Layer::Overlay,
                         };
                         let keyboard_interactivity =
                             match surface.cached_state().keyboard_interactivity {
                                 KeyboardInteractivity::None => {
-                                    niri_ipc::LayerSurfaceKeyboardInteractivity::None
+                                    jiji_ipc::LayerSurfaceKeyboardInteractivity::None
                                 }
                                 KeyboardInteractivity::Exclusive => {
-                                    niri_ipc::LayerSurfaceKeyboardInteractivity::Exclusive
+                                    jiji_ipc::LayerSurfaceKeyboardInteractivity::Exclusive
                                 }
                                 KeyboardInteractivity::OnDemand => {
-                                    niri_ipc::LayerSurfaceKeyboardInteractivity::OnDemand
+                                    jiji_ipc::LayerSurfaceKeyboardInteractivity::OnDemand
                                 }
                             };
 
-                        layers.push(niri_ipc::LayerSurface {
+                        layers.push(jiji_ipc::LayerSurface {
                             namespace: surface.namespace().to_owned(),
                             output: name.clone(),
                             layer,
@@ -907,7 +907,7 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
 
 pub(crate) fn build_activities_ipc<W: LayoutElement>(
     layout: &Layout<W>,
-) -> Vec<niri_ipc::Activity> {
+) -> Vec<jiji_ipc::Activity> {
     let active_id = layout.active_activity_id();
     layout
         .activities()
@@ -918,7 +918,7 @@ pub(crate) fn build_activities_ipc<W: LayoutElement>(
 
 pub(crate) fn build_focused_activity_ipc<W: LayoutElement>(
     layout: &Layout<W>,
-) -> niri_ipc::Activity {
+) -> jiji_ipc::Activity {
     let active_id = layout.active_activity_id();
     to_ipc_activity(layout.activities().active(), active_id, layout)
 }
@@ -927,8 +927,8 @@ fn to_ipc_activity<W: LayoutElement>(
     a: &crate::layout::activity::Activity,
     active_id: ActivityId,
     layout: &Layout<W>,
-) -> niri_ipc::Activity {
-    niri_ipc::Activity {
+) -> jiji_ipc::Activity {
+    jiji_ipc::Activity {
         id: a.id().get(),
         name: a.name().to_owned(),
         is_config_declared: a.is_config_declared(),
@@ -993,8 +993,8 @@ fn make_ipc_window(
     mapped: &Mapped,
     workspace_id: Option<WorkspaceId>,
     layout: WindowLayout,
-) -> niri_ipc::Window {
-    with_toplevel_role(mapped.toplevel(), |role| niri_ipc::Window {
+) -> jiji_ipc::Window {
+    with_toplevel_role(mapped.toplevel(), |role| jiji_ipc::Window {
         id: mapped.id().get(),
         title: role.title.clone(),
         app_id: role.app_id.clone(),
@@ -1209,7 +1209,7 @@ impl State {
 
         let layout = &self.niri.layout;
         // Build the live IPC snapshot from `Layout` first. Collecting to an
-        // owned `Vec` (with each `niri_ipc::Activity` already carrying the
+        // owned `Vec` (with each `jiji_ipc::Activity` already carrying the
         // correct derived fields via `to_ipc_activity`) releases the shared
         // layout borrow before we acquire the refcell.
         let current = build_activities_ipc(layout);
@@ -1232,7 +1232,7 @@ impl State {
         // `ipc_refresh_active_activity` and `ipc_refresh_activity_urgency`
         // called later on the same tick see the snapshot settled and emit
         // nothing spurious.
-        let mut created: Vec<niri_ipc::Activity> = Vec::new();
+        let mut created: Vec<jiji_ipc::Activity> = Vec::new();
         let mut renamed: Vec<(u64, String)> = Vec::new();
         for activity in &current {
             match state.activities.get(&activity.id) {
@@ -1441,11 +1441,11 @@ impl State {
                 // Pending dynamic casts don't change any properties, so we only need to check if
                 // it's missing from the state.
                 if !state.casts.contains_key(&stream_id) {
-                    let cast = niri_ipc::Cast {
+                    let cast = jiji_ipc::Cast {
                         session_id: pending.session_id.get(),
                         stream_id,
-                        kind: niri_ipc::CastKind::PipeWire,
-                        target: niri_ipc::CastTarget::Nothing {},
+                        kind: jiji_ipc::CastKind::PipeWire,
+                        target: jiji_ipc::CastTarget::Nothing {},
                         is_dynamic_target: true,
                         is_active: false,
                         pid: None,
@@ -1467,10 +1467,10 @@ impl State {
                         || !cast.target.matches(&existing.target)
                         || existing.pw_node_id != pw_node_id
                 }) {
-                    let cast = niri_ipc::Cast {
+                    let cast = jiji_ipc::Cast {
                         session_id: cast.session_id.get(),
                         stream_id,
-                        kind: niri_ipc::CastKind::PipeWire,
+                        kind: jiji_ipc::CastKind::PipeWire,
                         target: cast.target.make_ipc(),
                         is_dynamic_target: cast.dynamic_target,
                         is_active: cast.is_active(),
@@ -1496,15 +1496,15 @@ impl State {
                 if state.casts.get(&stream_id).is_none_or(|existing| {
                     // Only this property can change.
                     match &existing.target {
-                        niri_ipc::CastTarget::Output { name } => *name != cast_info.output_name,
+                        jiji_ipc::CastTarget::Output { name } => *name != cast_info.output_name,
                         _ => true,
                     }
                 }) {
-                    let cast = niri_ipc::Cast {
+                    let cast = jiji_ipc::Cast {
                         session_id: cast_info.session_id.get(),
                         stream_id,
-                        kind: niri_ipc::CastKind::WlrScreencopy,
-                        target: niri_ipc::CastTarget::Output {
+                        kind: jiji_ipc::CastKind::WlrScreencopy,
+                        target: jiji_ipc::CastTarget::Output {
                             name: cast_info.output_name.clone(),
                         },
                         is_dynamic_target: false,
@@ -1575,12 +1575,12 @@ impl State {
 #[cfg(test)]
 pub(crate) fn test_diff_activities_against_state<W: LayoutElement>(
     layout: &Layout<W>,
-    previous: &HashMap<u64, niri_ipc::Activity>,
+    previous: &HashMap<u64, jiji_ipc::Activity>,
 ) -> Vec<Event> {
     let current = build_activities_ipc(layout);
 
     // Lifecycle diff.
-    let mut created: Vec<niri_ipc::Activity> = Vec::new();
+    let mut created: Vec<jiji_ipc::Activity> = Vec::new();
     let mut renamed: Vec<(u64, String)> = Vec::new();
     for activity in &current {
         match previous.get(&activity.id) {

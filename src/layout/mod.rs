@@ -37,12 +37,12 @@ use std::rc::Rc;
 use std::time::Duration;
 use std::{fmt, mem};
 
+use jiji_ipc::{ActivityReferenceArg, ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 use monitor::{InsertHint, InsertPosition, InsertWorkspace, MonitorAddWindowTarget};
 use niri_config::utils::MergeWith as _;
 use niri_config::{
     Config, CornerRadius, LayoutPart, PresetSize, Workspace as WorkspaceConfig, WorkspaceReference,
 };
-use niri_ipc::{ActivityReferenceArg, ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 use scrolling::{Column, ColumnWidth};
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
@@ -627,7 +627,7 @@ impl From<ActivitySwitchBlock> for DoActionError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DoActionOutcome {
     Handled,
-    NoOp(niri_ipc::NoOpReason),
+    NoOp(jiji_ipc::NoOpReason),
 }
 
 /// Outcome of [`Layout::toggle_workspace_sticky`]. Carries enough information

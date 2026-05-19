@@ -92,13 +92,13 @@ impl Headless {
         let physical_properties = output.physical_properties();
         self.ipc_outputs.lock().unwrap().insert(
             OutputId::next(),
-            niri_ipc::Output {
+            jiji_ipc::Output {
                 name: output.name(),
                 make: physical_properties.make,
                 model: physical_properties.model,
                 serial: None,
                 physical_size: None,
-                modes: vec![niri_ipc::Mode {
+                modes: vec![jiji_ipc::Mode {
                     width: size.0,
                     height: size.1,
                     refresh_rate: 60_000,

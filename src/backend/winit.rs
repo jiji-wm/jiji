@@ -78,13 +78,13 @@ impl Winit {
         let physical_properties = output.physical_properties();
         let ipc_outputs = Arc::new(Mutex::new(HashMap::from([(
             OutputId::next(),
-            niri_ipc::Output {
+            jiji_ipc::Output {
                 name: output.name(),
                 make: physical_properties.make,
                 model: physical_properties.model,
                 serial: None,
                 physical_size: None,
-                modes: vec![niri_ipc::Mode {
+                modes: vec![jiji_ipc::Mode {
                     width: backend.window_size().w.clamp(0, u16::MAX as i32) as u16,
                     height: backend.window_size().h.clamp(0, u16::MAX as i32) as u16,
                     refresh_rate: 60_000,

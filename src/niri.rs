@@ -408,7 +408,7 @@ pub struct Niri {
     pub pending_mru_commit: Option<PendingMruCommit>,
 
     pub pick_window: Option<async_channel::Sender<Option<MappedId>>>,
-    pub pick_color: Option<async_channel::Sender<Option<niri_ipc::PickedColor>>>,
+    pub pick_color: Option<async_channel::Sender<Option<jiji_ipc::PickedColor>>>,
 
     pub debug_draw_opaque_regions: bool,
     pub debug_draw_damage: bool,
@@ -615,24 +615,24 @@ impl CastTarget {
         matches!(self, CastTarget::Output { output, .. } if output == weak)
     }
 
-    pub fn matches(&self, ipc: &niri_ipc::CastTarget) -> bool {
+    pub fn matches(&self, ipc: &jiji_ipc::CastTarget) -> bool {
         use CastTarget::*;
         match (self, ipc) {
-            (Nothing, niri_ipc::CastTarget::Nothing {}) => true,
-            (Output { name, .. }, niri_ipc::CastTarget::Output { name: ipc_name }) => {
+            (Nothing, jiji_ipc::CastTarget::Nothing {}) => true,
+            (Output { name, .. }, jiji_ipc::CastTarget::Output { name: ipc_name }) => {
                 name == ipc_name
             }
-            (Window { id }, niri_ipc::CastTarget::Window { id: ipc_id }) => id == ipc_id,
+            (Window { id }, jiji_ipc::CastTarget::Window { id: ipc_id }) => id == ipc_id,
             _ => false,
         }
     }
 
-    pub fn make_ipc(&self) -> niri_ipc::CastTarget {
+    pub fn make_ipc(&self) -> jiji_ipc::CastTarget {
         use CastTarget::*;
         match self {
-            Nothing => niri_ipc::CastTarget::Nothing {},
-            Output { name, .. } => niri_ipc::CastTarget::Output { name: name.clone() },
-            Window { id } => niri_ipc::CastTarget::Window { id: *id },
+            Nothing => jiji_ipc::CastTarget::Nothing {},
+            Output { name, .. } => jiji_ipc::CastTarget::Output { name: name.clone() },
+            Window { id } => jiji_ipc::CastTarget::Window { id: *id },
         }
     }
 }
@@ -1928,25 +1928,25 @@ impl State {
         fun(config);
     }
 
-    pub fn apply_transient_output_config(&mut self, name: &str, action: niri_ipc::OutputAction) {
+    pub fn apply_transient_output_config(&mut self, name: &str, action: jiji_ipc::OutputAction) {
         self.modify_output_config(name, move |config| match action {
-            niri_ipc::OutputAction::Off => config.off = true,
-            niri_ipc::OutputAction::On => config.off = false,
-            niri_ipc::OutputAction::Mode { mode } => {
+            jiji_ipc::OutputAction::Off => config.off = true,
+            jiji_ipc::OutputAction::On => config.off = false,
+            jiji_ipc::OutputAction::Mode { mode } => {
                 config.mode = match mode {
-                    niri_ipc::ModeToSet::Automatic => None,
-                    niri_ipc::ModeToSet::Specific(mode) => Some(niri_config::output::Mode {
+                    jiji_ipc::ModeToSet::Automatic => None,
+                    jiji_ipc::ModeToSet::Specific(mode) => Some(niri_config::output::Mode {
                         custom: false,
                         mode,
                     }),
                 };
                 config.modeline = None;
             }
-            niri_ipc::OutputAction::CustomMode { mode } => {
+            jiji_ipc::OutputAction::CustomMode { mode } => {
                 config.mode = Some(niri_config::output::Mode { custom: true, mode });
                 config.modeline = None;
             }
-            niri_ipc::OutputAction::Modeline {
+            jiji_ipc::OutputAction::Modeline {
                 clock,
                 hdisplay,
                 hsync_start,
@@ -1974,23 +1974,23 @@ impl State {
                     vsync_polarity,
                 })
             }
-            niri_ipc::OutputAction::Scale { scale } => {
+            jiji_ipc::OutputAction::Scale { scale } => {
                 config.scale = match scale {
-                    niri_ipc::ScaleToSet::Automatic => None,
-                    niri_ipc::ScaleToSet::Specific(scale) => Some(FloatOrInt(scale)),
+                    jiji_ipc::ScaleToSet::Automatic => None,
+                    jiji_ipc::ScaleToSet::Specific(scale) => Some(FloatOrInt(scale)),
                 }
             }
-            niri_ipc::OutputAction::Transform { transform } => config.transform = transform,
-            niri_ipc::OutputAction::Position { position } => {
+            jiji_ipc::OutputAction::Transform { transform } => config.transform = transform,
+            jiji_ipc::OutputAction::Position { position } => {
                 config.position = match position {
-                    niri_ipc::PositionToSet::Automatic => None,
-                    niri_ipc::PositionToSet::Specific(position) => Some(niri_config::Position {
+                    jiji_ipc::PositionToSet::Automatic => None,
+                    jiji_ipc::PositionToSet::Specific(position) => Some(niri_config::Position {
                         x: position.x,
                         y: position.y,
                     }),
                 }
             }
-            niri_ipc::OutputAction::Vrr { vrr } => {
+            jiji_ipc::OutputAction::Vrr { vrr } => {
                 config.variable_refresh_rate = if vrr.vrr {
                     Some(niri_config::Vrr {
                         on_demand: vrr.on_demand,
@@ -2073,7 +2073,7 @@ impl State {
         self.niri.queue_redraw_all();
     }
 
-    pub fn handle_pick_color(&mut self, tx: async_channel::Sender<Option<niri_ipc::PickedColor>>) {
+    pub fn handle_pick_color(&mut self, tx: async_channel::Sender<Option<jiji_ipc::PickedColor>>) {
         let pointer = self.niri.seat.get_pointer().unwrap();
         let start_data = PointerGrabStartData {
             focus: None,

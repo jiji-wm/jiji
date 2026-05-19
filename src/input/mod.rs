@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use calloop::timer::{TimeoutAction, Timer};
 use input::event::gesture::GestureEventCoordinates as _;
+use jiji_ipc::{ActivityReferenceArg, LayoutSwitchTarget, NoOpReason};
 use niri_config::{
     Action, Bind, Binds, Config, Key, ModKey, Modifiers, MruDirection, SwitchBinds, Trigger,
     WorkspaceReference,
 };
-use niri_ipc::{ActivityReferenceArg, LayoutSwitchTarget, NoOpReason};
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
     GestureBeginEvent, GestureEndEvent, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
