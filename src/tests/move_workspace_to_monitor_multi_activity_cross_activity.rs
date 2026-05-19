@@ -43,7 +43,7 @@ fn move_workspace_to_monitor_fans_out_to_dormant_activity_views() {
     // sentinel semantics is not yet fully addressed;
     // pinning the connector here gives ws_shared a `bind_output`-matching
     // `OutputId("headless-1")` that gets refreshed to canonical
-    // `OutputId("niri headless 1")` on first bind.
+    // `OutputId("jiji headless 1")` on first bind.
     let kdl = "\
         activity \"alpha\"\n\
         activity \"beta\"\n\

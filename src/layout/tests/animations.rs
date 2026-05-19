@@ -124,7 +124,7 @@ fn clientside_height_change_doesnt_animate() {
     ");
 
     let ops = [
-        // The top window shrinks by itself, without a niri-issued resize.
+        // The top window shrinks by itself, without a jiji-issued resize.
         Op::SetForcedSize {
             id: 1,
             size: Some(Size::new(100, 50)),

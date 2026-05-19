@@ -633,7 +633,7 @@ impl State {
             return;
         }
 
-        // niri keeps this set only while actively using a tablet, which means the cursor position
+        // jiji keeps this set only while actively using a tablet, which means the cursor position
         // is likely to change almost immediately, causing pointer_visibility to just flicker back
         // and forth.
         if self.niri.tablet_cursor_location.is_some() {
@@ -1789,8 +1789,8 @@ impl State {
                     debug!("switch_activity: hard-blocked by {block:?}, ignoring");
                     return Err(block.into());
                 }
-                // niri-config holds its own ActivityReference to keep config
-                // types independent of niri-ipc's wire enums; layout's API
+                // jiji-config holds its own ActivityReference to keep config
+                // types independent of jiji-ipc's wire enums; layout's API
                 // speaks the IPC type, so map variants at the boundary.
                 let arg: ActivityReferenceArg = reference.into();
                 match self.niri.layout.resolve_activity_ref(&arg) {
@@ -2061,7 +2061,7 @@ impl State {
                     );
                     return Err(block.into());
                 }
-                // niri-config holds its own ActivityReference; layout's API
+                // jiji-config holds its own ActivityReference; layout's API
                 // speaks the IPC type, so map at the boundary.
                 let arg_acts: Vec<ActivityReferenceArg> = activity_refs
                     .into_iter()

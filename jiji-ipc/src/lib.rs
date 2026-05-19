@@ -1,10 +1,10 @@
-//! Types for communicating with niri via IPC.
+//! Types for communicating with jiji via IPC.
 //!
-//! After connecting to the niri socket, you can send [`Request`]s. Niri will process them one by
+//! After connecting to the jiji socket, you can send [`Request`]s. Jiji will process them one by
 //! one, in order, and to each request it will respond with a single [`Reply`], which is a `Result`
 //! wrapping a [`Response`].
 //!
-//! If you send a [`Request::EventStream`], niri will *stop* reading subsequent [`Request`]s, and
+//! If you send a [`Request::EventStream`], jiji will *stop* reading subsequent [`Request`]s, and
 //! will start continuously writing compositor [`Event`]s to the socket. If you'd like to read an
 //! event stream and write more requests at the same time, you need to use two IPC sockets.
 //!
@@ -23,25 +23,25 @@
 //! it is a fairly simple helper, so if you need async, or if you're using a different language,
 //! you are encouraged to communicate with the socket manually.
 //!
-//! 1. Read the socket filesystem path from [`socket::SOCKET_PATH_ENV`] (`$NIRI_SOCKET`).
+//! 1. Read the socket filesystem path from [`socket::SOCKET_PATH_ENV`] (`$JIJI_SOCKET`).
 //! 2. Connect to the socket and write a JSON-formatted [`Request`] on a single line. You can follow
 //!    up with a line break and a flush, or just flush and shutdown the write end of the socket.
-//! 3. Niri will respond with a single line JSON-formatted [`Reply`].
+//! 3. Jiji will respond with a single line JSON-formatted [`Reply`].
 //! 4. You can keep writing [`Request`]s, each on a single line, and read [`Reply`]s, also each on a
 //!    separate line.
-//! 5. After you request an event stream, niri will keep responding with JSON-formatted [`Event`]s,
+//! 5. After you request an event stream, jiji will keep responding with JSON-formatted [`Event`]s,
 //!    on a single line each.
 //!
 //! ## Backwards compatibility
 //!
-//! This crate follows the niri version. It is **not** API-stable in terms of the Rust semver. In
+//! This crate follows the jiji version. It is **not** API-stable in terms of the Rust semver. In
 //! particular, expect new struct fields and enum variants to be added in patch version bumps.
 //!
 //! Use an exact version requirement to avoid breaking changes:
 //!
 //! ```toml
 //! [dependencies]
-//! niri-ipc = "=26.4.0"
+//! jiji-ipc = "=26.4.0"
 //! ```
 //!
 //! ## Features
@@ -49,7 +49,7 @@
 //! This crate defines the following features:
 //! - `json-schema`: derives the [schemars](https://lib.rs/crates/schemars) `JsonSchema` trait for
 //!   the types.
-//! - `clap`: derives the clap CLI parsing traits for some types. Used internally by niri itself.
+//! - `clap`: derives the clap CLI parsing traits for some types. Used internally by jiji itself.
 #![warn(missing_docs)]
 
 use std::collections::HashMap;
@@ -61,12 +61,12 @@ use serde::{Deserialize, Serialize};
 pub mod socket;
 pub mod state;
 
-/// Request from client to niri.
+/// Request from client to jiji.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub enum Request {
-    /// Request the version string for the running niri instance.
+    /// Request the version string for the running jiji instance.
     Version,
     /// Request information about connected outputs.
     Outputs,
@@ -126,7 +126,7 @@ pub enum Request {
     Casts,
 }
 
-/// Reply from niri to client.
+/// Reply from jiji to client.
 ///
 /// Every request gets one reply.
 ///
@@ -136,7 +136,7 @@ pub enum Request {
 /// * Otherwise, it will be `Reply::Ok(response)` with one of the other [`Response`] variants.
 pub type Reply = Result<Response, String>;
 
-/// Successful response from niri to client.
+/// Successful response from jiji to client.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -155,7 +155,7 @@ pub enum Response {
     /// Used for requests where "the right thing to do is nothing" is a legitimate, durable outcome
     /// (not an error and not the same as a successful state-changing action).
     NoOp(NoOpReason),
-    /// The version string for the running niri instance.
+    /// The version string for the running jiji instance.
     Version(String),
     /// Information about connected outputs.
     ///
@@ -230,9 +230,9 @@ pub struct PickedColor {
     pub rgb: [f64; 3],
 }
 
-/// Actions that niri can perform.
-// Variants in this enum should match the spelling of the ones in niri-config. Most, but not all,
-// variants from niri-config should be present here.
+/// Actions that jiji can perform.
+// Variants in this enum should match the spelling of the ones in jiji-config. Most, but not all,
+// variants from jiji-config should be present here.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "clap", derive(clap::Parser))]
 #[cfg_attr(feature = "clap", command(subcommand_value_name = "ACTION"))]
@@ -240,7 +240,7 @@ pub struct PickedColor {
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub enum Action {
-    /// Exit niri.
+    /// Exit jiji.
     Quit {
         /// Skip the "Press Enter to confirm" prompt.
         #[cfg_attr(feature = "clap", arg(short, long))]
@@ -983,7 +983,7 @@ pub enum Action {
     /// Reload the config file.
     ///
     /// Can be useful for scripts changing the config file, to avoid waiting the small duration for
-    /// niri's config file watcher to notice the changes.
+    /// jiji's config file watcher to notice the changes.
     LoadConfigFile {
         /// Path of a new config file to load.
         ///
@@ -1317,9 +1317,9 @@ pub enum ColumnDisplay {
     Tabbed,
 }
 
-/// Output actions that niri can perform.
-// Variants in this enum should match the spelling of the ones in niri-config. Most thigs from
-// niri-config should be present here.
+/// Output actions that jiji can perform.
+// Variants in this enum should match the spelling of the ones in jiji-config. Most thigs from
+// jiji-config should be present here.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "clap", derive(clap::Parser))]
 #[cfg_attr(feature = "clap", command(subcommand_value_name = "ACTION"))]
@@ -1334,7 +1334,7 @@ pub enum OutputAction {
     Mode {
         /// Mode to set, or "auto" for automatic selection.
         ///
-        /// Run `niri msg outputs` to see the available modes.
+        /// Run `jiji msg outputs` to see the available modes.
         #[cfg_attr(feature = "clap", arg())]
         mode: ModeToSet,
     },
@@ -1665,7 +1665,7 @@ pub struct Timestamp {
 /// Position- and size-related properties of a [`Window`].
 ///
 /// Optional properties will be unset for some windows, do not rely on them being present. Whether
-/// some optional properties are present or absent for certain window types may change across niri
+/// some optional properties are present or absent for certain window types may change across jiji
 /// releases.
 ///
 /// All sizes and positions are in *logical pixels* unless stated otherwise. Logical sizes may be
@@ -1698,14 +1698,14 @@ pub struct WindowLayout {
     pub tile_size: (f64, f64),
     /// Size of the window's visual geometry itself.
     ///
-    /// Does not include niri decorations like borders.
+    /// Does not include jiji decorations like borders.
     ///
     /// Currently, Wayland toplevel windows can only be integer-sized in logical pixels, even
     /// though it doesn't necessarily align to physical pixels.
     pub window_size: (i32, i32),
     /// Tile position within the current view of the workspace.
     ///
-    /// This is the same "workspace view" as in gradients' `relative-to` in the niri config.
+    /// This is the same "workspace view" as in gradients' `relative-to` in the jiji config.
     pub tile_pos_in_workspace_view: Option<(f64, f64)>,
     /// Location of the window's visual geometry within its tile.
     ///
@@ -1783,7 +1783,7 @@ pub struct Workspace {
     pub id: u64,
     /// Index of the workspace on its monitor.
     ///
-    /// This is the same index you can use for requests like `niri msg action focus-workspace`.
+    /// This is the same index you can use for requests like `jiji msg action focus-workspace`.
     ///
     /// This index *will change* as you move and re-order workspace. It is merely the workspace's
     /// current position on its monitor. Workspaces on different monitors can have the same index.
@@ -1809,7 +1809,7 @@ pub struct Workspace {
     /// Id of the active window on this workspace, if any.
     pub active_window_id: Option<u64>,
     /// Activity IDs this workspace belongs to, sorted ascending by ID. Non-empty for all
-    /// workspaces emitted by niri (every workspace belongs to at least one activity); an empty
+    /// workspaces emitted by jiji (every workspace belongs to at least one activity); an empty
     /// slice is only possible with hand-constructed or test values.
     pub activities: Vec<u64>,
     /// Whether this workspace is sticky (auto-tagged with all activities). The distinction between
@@ -2949,8 +2949,8 @@ mod tests {
         // "workspace switch gesture") are the observable IPC contract.
         // The tokens are pinned on the compositor side by
         // `activity_switch_block_display_matches_wire_contract` in
-        // `niri/src/layout/tests.rs`; the envelope format is assembled by
-        // `format_activity_switch_block_err` in `niri/src/layout/mod.rs` and
+        // `jiji/src/layout/tests.rs`; the envelope format is assembled by
+        // `format_activity_switch_block_err` in `jiji/src/layout/mod.rs` and
         // pinned by `activity_switch_block_err_envelope_matches_wire_contract`
         // there. Both `ipc/server.rs` and that test call the helper, so a
         // regression to the format string will fail the envelope test.
@@ -3121,7 +3121,7 @@ mod tests {
         // the observable IPC contract.
         //
         // Envelopes are assembled by `format_do_action_error` in
-        // `niri/src/layout/mod.rs` and pinned by
+        // `jiji/src/layout/mod.rs` and pinned by
         // `do_action_error_envelope_matches_wire_contract` there; `Display`
         // tokens are pinned by `do_action_error_display_matches_wire_contract`.
         for (msg, expected_json) in [
@@ -3158,7 +3158,7 @@ mod tests {
         // exact prefix "window not found: id=" is the observable IPC contract.
         //
         // The envelope is assembled by `format_do_action_error` in
-        // `niri/src/layout/mod.rs` and pinned by
+        // `jiji/src/layout/mod.rs` and pinned by
         // `do_action_error_envelope_matches_wire_contract` there; the
         // `Display` tokens are pinned by
         // `do_action_error_display_matches_wire_contract`. A regression to

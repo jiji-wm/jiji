@@ -12,7 +12,7 @@
 //! workspaces from disconnected outputs will move. Currently, the primary output has no other
 //! distinction from other outputs.
 //!
-//! Where possible, niri tries to follow these principles with regards to outputs:
+//! Where possible, jiji tries to follow these principles with regards to outputs:
 //!
 //! 1. Disconnecting and reconnecting the same output must not change the layout.
 //!    * This includes both secondary outputs and the primary output.
@@ -498,7 +498,7 @@ impl fmt::Display for ActivitySwitchBlock {
     /// [`format_activity_switch_block_err`] and pinned by
     /// `activity_switch_block_err_envelope_matches_wire_contract` there and by
     /// the serde roundtrip `reply_err_format_for_activity_switch_block` in
-    /// `niri-ipc`.
+    /// `jiji-ipc`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             Self::InteractiveMove => "interactive window move",
@@ -544,7 +544,7 @@ pub(crate) fn format_activity_switch_block_err(block: ActivitySwitchBlock) -> St
 /// - `do_action_error_envelope_matches_wire_contract` in `src/layout/tests.rs` — pins the full
 ///   envelope string assembled by [`format_do_action_error`], including byte-identity with the
 ///   existing `ActivitySwitchBlocked` envelopes.
-/// - `reply_err_format_for_window_not_found` in `niri-ipc` — roundtrips the wire envelope through
+/// - `reply_err_format_for_window_not_found` in `jiji-ipc` — roundtrips the wire envelope through
 ///   `Reply::Err` JSON.
 ///
 /// Any change to the token strings or the envelope wording must update all
@@ -608,7 +608,7 @@ impl From<ActivitySwitchBlock> for DoActionError {
 }
 
 /// Successful outcome of [`crate::niri::State::do_action_inner`]. Mirrors the
-/// niri-ipc `Reply::Ok(...)` envelope: `Handled` is the default for actions
+/// jiji-ipc `Reply::Ok(...)` envelope: `Handled` is the default for actions
 /// that change state; `NoOp(reason)` is the typed signal that the action was
 /// considered and determined to leave compositor state unchanged.
 ///
@@ -659,7 +659,7 @@ impl fmt::Display for DoActionError {
     /// pinned by `do_action_error_display_matches_wire_contract` in
     /// `src/layout/tests.rs` and the envelope is pinned by
     /// `do_action_error_envelope_matches_wire_contract` there and by the
-    /// serde roundtrip `reply_err_format_for_window_not_found` in `niri-ipc`.
+    /// serde roundtrip `reply_err_format_for_window_not_found` in `jiji-ipc`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ActivitySwitchBlocked(block) => write!(f, "{block}"),

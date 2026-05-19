@@ -5890,7 +5890,7 @@ fn activity_switch_block_display_matches_wire_contract() {
     // contract. The full envelope string is assembled by
     // `format_activity_switch_block_err` and pinned by
     // `activity_switch_block_err_envelope_matches_wire_contract` below and the
-    // serde roundtrip in `niri-ipc`. A change to either layer's strings without
+    // serde roundtrip in `jiji-ipc`. A change to either layer's strings without
     // updating the other will be caught by one of these tests.
     use super::ActivitySwitchBlock;
     assert_eq!(
@@ -5935,7 +5935,7 @@ fn do_action_error_display_matches_wire_contract() {
     // Pins the `Display` tokens for `DoActionError`. The full envelope is
     // assembled by `format_do_action_error` and pinned by
     // `do_action_error_envelope_matches_wire_contract` below; the serde
-    // roundtrip `reply_err_format_for_window_not_found` in `niri-ipc` pins
+    // roundtrip `reply_err_format_for_window_not_found` in `jiji-ipc` pins
     // the wire JSON. A change to any token without updating all three
     // layers will be caught here.
     use super::{ActivitySwitchBlock, DoActionError};
@@ -9586,7 +9586,7 @@ fn windows_all_disconnected_pool_yields_stale_output_id() {
 // which reproduces the combined lifecycle + active + urgency diff pass that
 // `ipc_refresh_layout` performs against `EventStreamState::activities` on a
 // single tick. Semantic coverage for single-snapshot apply-path cases lives
-// in `niri-ipc/src/state.rs`; this tier only pins the interaction between
+// in `jiji-ipc/src/state.rs`; this tier only pins the interaction between
 // `Layout` mutations and the refresh emission order.
 // -----------------------------------------------------------------------------
 

@@ -944,7 +944,7 @@ fn validate_action(action: &Action) -> Result<(), String> {
     | Action::LoadConfigFile { path } = action
     {
         if let Some(path) = path {
-            // Relative paths are resolved against the niri compositor's working directory, which
+            // Relative paths are resolved against the jiji compositor's working directory, which
             // is almost certainly not what you want.
             if !Path::new(path).is_absolute() {
                 return Err(format!("path must be absolute: {path}"));
@@ -1101,7 +1101,7 @@ impl State {
         // `is_in_active_activity` flipped this tick, so clients can update
         // their activity state before processing workspace visibility
         // changes. See the contract pinned on `Event::ActivitySwitched` in
-        // `niri-ipc/src/lib.rs`. Do not move `ipc_refresh_active_activity`
+        // `jiji-ipc/src/lib.rs`. Do not move `ipc_refresh_active_activity`
         // after `ipc_refresh_workspaces`.
         self.ipc_refresh_active_activity(previous_active_id);
         self.ipc_refresh_workspaces();
@@ -1110,7 +1110,7 @@ impl State {
         // `ipc_refresh_workspaces` above; `ActivityUrgencyChanged` is the
         // outermost layer and must fire after workspace urgency so clients
         // see workspace-level state settled before the activity aggregate
-        // arrives (niri-ipc `Event::ActivityUrgencyChanged` rustdoc). Do not
+        // arrives (jiji-ipc `Event::ActivityUrgencyChanged` rustdoc). Do not
         // move `ipc_refresh_activity_urgency` before `ipc_refresh_workspaces`.
         self.ipc_refresh_activity_urgency();
         self.ipc_refresh_windows();
@@ -1568,7 +1568,7 @@ impl State {
 /// `ActivityUrgencyChanged` events.
 ///
 /// Semantic coverage for the single-snapshot apply-path cases lives in
-/// `niri-ipc/src/state.rs` against `ActivitiesState::apply`; this helper
+/// `jiji-ipc/src/state.rs` against `ActivitiesState::apply`; this helper
 /// exists for the mutation-flow and cascade-ordering tests in
 /// `src/layout/tests.rs` that need a live `Layout` to exercise
 /// `create_activity` / `remove_activity` / `rename_activity`.

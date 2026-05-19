@@ -1,6 +1,6 @@
 //! ext-workspace protocol implementation.
 //!
-//! This is how we map the protocol concepts to the niri concepts:
+//! This is how we map the protocol concepts to the jiji concepts:
 //!
 //! - Workspace groups are outputs.
 //! - Workspace coordinates: X = 0, Y = workspace index. They need to be two-dimensional because 1D

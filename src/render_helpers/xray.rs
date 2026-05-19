@@ -140,7 +140,7 @@ impl Xray {
                 // covered.
                 //
                 // FIXME: also implement some way to check if the background elements are fully
-                // covered in opaque regions, and not just the niri background color is opaque
+                // covered in opaque regions, and not just the jiji background color is opaque
                 let crop = if bg_color.is_opaque() && ws_geo.contains_rect(geo_in_backdrop) {
                     skip_backdrop = true;
                     // No need to intersect, we know it's fully covered.

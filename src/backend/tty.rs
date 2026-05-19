@@ -244,7 +244,7 @@ impl OutputDevice {
         cleanup.extend(res_handles.crtcs());
 
         for (conn, info) in self.drm_scanner.connectors() {
-            // We only keep the connector if it has a CRTC and the output isn't off in niri.
+            // We only keep the connector if it has a CRTC and the output isn't off in jiji.
             if let Some(crtc) = self.drm_scanner.crtc_for_connector(conn) {
                 // Verify that the connector's current CRTC matches the CRTC we expect. If not,
                 // clear the CRTC and the connector so that all connectors can get the expected
@@ -438,7 +438,7 @@ impl Tty {
         }
         .map_err(|()| anyhow!("error assigning the seat to libinput"))?;
 
-        // If the session is not active at startup (e.g. niri was launched from a different TTY),
+        // If the session is not active at startup (e.g. jiji was launched from a different TTY),
         // suspend libinput now so that when ActivateSession fires, libinput.resume() performs a
         // full re-enumeration of input devices instead of being a no-op.
         if !session.is_active() {
@@ -513,7 +513,7 @@ impl Tty {
         // If the session is inactive, skip initialization because we won't be able to do much with
         // the devices anyway. We'll get ActivateSession and add the devices there instead.
         //
-        // This can happen when starting niri while having a different TTY active (e.g. via tmux).
+        // This can happen when starting jiji while having a different TTY active (e.g. via tmux).
         if !self.session.is_active() {
             return;
         }

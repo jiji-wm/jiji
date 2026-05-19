@@ -61,7 +61,7 @@ fn set_time(niri: &mut Niri, time: Duration) {
     niri.clock.set_unadjusted(time);
     let _ = niri.clock.now();
 
-    // Freeze the clock so that clear() inside the niri loop callback followed by some get()
+    // Freeze the clock so that clear() inside the jiji loop callback followed by some get()
     // doesn't replace it with the monotonic time.
     niri.clock.set_rate(0.0);
 }
@@ -174,7 +174,7 @@ fn egl_clientside_height_change_doesnt_animate() {
     200 × 200 at x:  0 y:100
     ");
 
-    // The top window shrinks by itself, without a niri-issued resize.
+    // The top window shrinks by itself, without a jiji-issued resize.
     let window = f.client(id).window(&surface1);
     window.set_size(100, 50);
     window.commit();

@@ -195,7 +195,7 @@ impl OutputName {
 
         // If no other fields are available, don't try to match by them.
         //
-        // This is used by niri msg output.
+        // This is used by jiji msg output.
         if self.make.is_none() && self.model.is_none() && self.serial.is_none() {
             return false;
         }

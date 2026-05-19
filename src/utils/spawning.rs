@@ -232,8 +232,8 @@ mod systemd {
         }
 
         // When running as a systemd session, we want to put children into their own transient
-        // scopes in order to separate them from the niri process. This is helpful for
-        // example to prevent the OOM killer from taking down niri together with a
+        // scopes in order to separate them from the jiji process. This is helpful for
+        // example to prevent the OOM killer from taking down jiji together with a
         // misbehaving client.
         //
         // Putting a child into a scope is done by calling systemd's StartTransientUnit D-Bus method
@@ -242,7 +242,7 @@ mod systemd {
         // linger around forever.
         //
         // To prevent this, we'll use our double-fork (done for a separate reason) to help. In our
-        // intermediate child we will send back the grandchild PID, and in niri we will create a
+        // intermediate child we will send back the grandchild PID, and in jiji we will create a
         // transient scope with both our intermediate child and the grandchild PIDs set. Only then
         // we will signal our intermediate child to exit. This way, even if the grandchild
         // exits quickly, a non-empty scope will be created (with just our intermediate

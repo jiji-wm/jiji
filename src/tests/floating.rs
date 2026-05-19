@@ -217,7 +217,7 @@ fn resize_to_same_size() {
     // server state matches the requested size.
     //
     // FIXME: However, currently it will request the size anyway because the code checks the
-    // current server state, and the last size niri requested of the window was 100×100 (even if
+    // current server state, and the last size jiji requested of the window was 100×100 (even if
     // the window already acked and committed in response).
     assert_snapshot!(
         f.client(id).window(&surface).format_recent_configures(),
@@ -713,7 +713,7 @@ fn interactive_move_restores_floating_size_when_set_to_floating() {
     f.niri().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size while we're floating and commit to make niri remember it.
+    // Change size while we're floating and commit to make jiji remember it.
     let window = f.client(id).window(&surface);
     window.set_size(200, 200);
     window.ack_last_and_commit();
@@ -1032,7 +1032,7 @@ fn unfullscreen_to_same_size_floating() {
     f.niri().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size to the same as fullscreen, make niri remember it.
+    // Change size to the same as fullscreen, make jiji remember it.
     let window = f.client(id).window(&surface);
     window.set_size(1920, 1080);
     window.ack_last_and_commit();
@@ -1070,7 +1070,7 @@ fn unmaximize_to_same_size_floating() {
     f.niri().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size to the same as maximized, make niri remember it.
+    // Change size to the same as maximized, make jiji remember it.
     let window = f.client(id).window(&surface);
     window.set_size(1920, 1080);
     window.ack_last_and_commit();
@@ -1111,7 +1111,7 @@ fn unfullscreen_to_same_size_windowed_fullscreen_floating() {
     f.niri().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size to the same as fullscreen, make niri remember it.
+    // Change size to the same as fullscreen, make jiji remember it.
     let window = f.client(id).window(&surface);
     window.set_size(1920, 1080);
     window.ack_last_and_commit();
@@ -1152,7 +1152,7 @@ fn unmaximize_to_same_size_windowed_fullscreen_floating() {
     f.niri().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size to the same as maximized, make niri remember it.
+    // Change size to the same as maximized, make jiji remember it.
     let window = f.client(id).window(&surface);
     window.set_size(1920, 1080);
     window.ack_last_and_commit();
@@ -1216,7 +1216,7 @@ layout {
     f.niri().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size to the same as fullscreen, make niri remember it.
+    // Change size to the same as fullscreen, make jiji remember it.
     let window = f.client(id).window(&surface);
     window.set_size(1920, 1080);
     window.ack_last_and_commit();
@@ -1260,7 +1260,7 @@ layout {
     f.niri().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size to the same as fullscreen, make niri remember it.
+    // Change size to the same as fullscreen, make jiji remember it.
     let window = f.client(id).window(&surface);
     window.set_size(1920, 1080);
     window.ack_last_and_commit();

@@ -235,7 +235,7 @@ fn spawn(path: String, xwl: &Satellite) {
     let mut process = Command::new(&path);
     process.arg(&xwl.x11.display_name).env_remove("DISPLAY");
 
-    // We don't want it spamming the niri output.
+    // We don't want it spamming the jiji output.
     process
         .env_remove("RUST_BACKTRACE")
         .env_remove("RUST_LIB_BACKTRACE");

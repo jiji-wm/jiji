@@ -137,7 +137,7 @@ impl Fixture {
     /// For some reason, when running tests on many threads at once, a single roundtrip is
     /// sometimes not sufficient to get the configure events to the client.
     ///
-    /// I suspect that this is because these configure events are sent from the niri loop callback,
+    /// I suspect that this is because these configure events are sent from the jiji loop callback,
     /// so they arrive after the sync done event and don't get processed in that client dispatch
     /// cycle. I'm not sure why this would be dependent on multithreading. But if this is indeed
     /// the issue, then a double roundtrip fixes it.
@@ -182,7 +182,7 @@ impl Fixture {
 
     /// Drive `State::reload_config(Ok(config))` end-to-end: validate phase of
     /// `reconcile_activities_on_reload_remove`, the unname-prewalk, and
-    /// `reconcile_activities_on_reload_add`. Mirrors how the niri loop
+    /// `reconcile_activities_on_reload_add`. Mirrors how the jiji loop
     /// dispatches a reload after a config-file change.
     pub fn reload_config(&mut self, config: Config) {
         self.niri_state().reload_config(Ok(config));

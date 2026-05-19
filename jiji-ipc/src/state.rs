@@ -2,7 +2,7 @@
 //!
 //! 1. Create an [`EventStreamState`] using `Default::default()`, or any individual state part if
 //!    you only care about part of the state.
-//! 2. Connect to the niri socket and request an event stream.
+//! 2. Connect to the jiji socket and request an event stream.
 //! 3. Pass every [`Event`] to [`EventStreamStatePart::apply`] on your state.
 //! 4. Read the fields of the state as needed.
 
@@ -26,7 +26,7 @@ pub trait EventStreamStatePart {
 /// The full state communicated over the event stream.
 ///
 /// Different parts of the state are not guaranteed to be consistent across every single event
-/// sent by niri. For example, you may receive the first [`Event::WindowOpenedOrChanged`] for a
+/// sent by jiji. For example, you may receive the first [`Event::WindowOpenedOrChanged`] for a
 /// just-opened window *after* an [`Event::WorkspaceActiveWindowChanged`] for that window. Between
 /// these two events, the workspace active window id refers to a window that does not yet exist in
 /// the windows state part.

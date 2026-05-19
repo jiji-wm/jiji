@@ -75,7 +75,7 @@ pub struct ScrollingSpace<W: LayoutElement> {
 
     /// Working area for this space.
     ///
-    /// Takes into account layer-shell exclusive zones and niri struts.
+    /// Takes into account layer-shell exclusive zones and jiji struts.
     working_area: Rectangle<f64, Logical>,
 
     /// Working area for this space excluding struts.

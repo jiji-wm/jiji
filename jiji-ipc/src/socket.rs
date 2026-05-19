@@ -1,4 +1,4 @@
-//! Helper for blocking communication over the niri socket.
+//! Helper for blocking communication over the jiji socket.
 
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
@@ -8,19 +8,19 @@ use std::path::Path;
 
 use crate::{Event, Reply, Request};
 
-/// Name of the environment variable containing the niri IPC socket path.
+/// Name of the environment variable containing the jiji IPC socket path.
 pub const SOCKET_PATH_ENV: &str = "JIJI_SOCKET";
 
-/// Helper for blocking communication over the niri socket.
+/// Helper for blocking communication over the jiji socket.
 ///
-/// This struct is used to communicate with the niri IPC server. It handles the socket connection
+/// This struct is used to communicate with the jiji IPC server. It handles the socket connection
 /// and serialization/deserialization of messages.
 pub struct Socket {
     stream: BufReader<UnixStream>,
 }
 
 impl Socket {
-    /// Connects to the default niri IPC socket.
+    /// Connects to the default jiji IPC socket.
     ///
     /// This is equivalent to calling [`Self::connect_to`] with the path taken from the
     /// [`SOCKET_PATH_ENV`] environment variable.
@@ -34,20 +34,20 @@ impl Socket {
         Self::connect_to(socket_path)
     }
 
-    /// Connects to the niri IPC socket at the given path.
+    /// Connects to the jiji IPC socket at the given path.
     pub fn connect_to(path: impl AsRef<Path>) -> io::Result<Self> {
         let stream = UnixStream::connect(path.as_ref())?;
         let stream = BufReader::new(stream);
         Ok(Self { stream })
     }
 
-    /// Sends a request to niri and returns the response.
+    /// Sends a request to jiji and returns the response.
     ///
     /// Return values:
     ///
-    /// * `Ok(Ok(response))`: successful [`Response`](crate::Response) from niri
-    /// * `Ok(Err(message))`: error message from niri
-    /// * `Err(error)`: error communicating with niri
+    /// * `Ok(Ok(response))`: successful [`Response`](crate::Response) from jiji
+    /// * `Ok(Err(message))`: error message from jiji
+    /// * `Err(error)`: error communicating with jiji
     pub fn send(&mut self, request: Request) -> io::Result<Reply> {
         let mut buf = serde_json::to_string(&request).unwrap();
         buf.push('\n');

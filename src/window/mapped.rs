@@ -247,7 +247,7 @@ impl MappedId {
     /// That way, clients can associate a foreign toplevel handle with an IPC window ID.
     ///
     /// We use the decimal representation of the ID, which is up to 20 characters long for u64::MAX.
-    /// This is within the 32-character limit, and is nice because it matches up with how `niri msg`
+    /// This is within the 32-character limit, and is nice because it matches up with how `jiji msg`
     /// prints the IDs to the console.
     ///
     /// This namespace can be extended in the future, with any non-numeric prefix to disambiguate.

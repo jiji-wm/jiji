@@ -208,7 +208,7 @@ pub struct Niri {
     pub stop_signal: LoopSignal,
     pub display_handle: DisplayHandle,
 
-    /// Whether niri was run with `--session`
+    /// Whether jiji was run with `--session`
     pub is_session_instance: bool,
 
     /// Name of the Wayland socket.
@@ -522,7 +522,7 @@ pub struct PopupGrabState {
     pub has_keyboard_grab: bool,
 }
 
-// The surfaces here are always toplevel surfaces focused as far as niri's logic is concerned, even
+// The surfaces here are always toplevel surfaces focused as far as jiji's logic is concerned, even
 // when popup grabs are active (which means the real keyboard focus is on a popup descending from
 // that toplevel surface).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -543,7 +543,7 @@ pub struct PointContents {
     pub output: Option<Output>,
     // Surface under point and its location in the global coordinate space.
     //
-    // Can be `None` even when `window` is set, for example when the pointer is over the niri
+    // Can be `None` even when `window` is set, for example when the pointer is over the jiji
     // border around the window.
     pub surface: Option<(WlSurface, Point<f64, Logical>)>,
     // If surface belongs to a window, this is that window.
@@ -1699,7 +1699,7 @@ impl State {
             }
 
             if set_xkb_config {
-                // If xkb is unset in the niri config, use settings from locale1.
+                // If xkb is unset in the jiji config, use settings from locale1.
                 if xkb == Xkb::default() {
                     trace!("using xkb from locale1");
                     xkb = self.niri.xkb_from_locale1.clone().unwrap_or_default();
@@ -2965,8 +2965,8 @@ impl Niri {
     /// Converts a `WlOutput` to a corresponding `Output` if it exists.
     ///
     /// Compared to raw `Output::from_resource`, this method also verifies that the output still
-    /// exists in niri. Right after the output global is disabled, but before it is removed for
-    /// good, `Output::from_resource` will succeed, but since niri already forgot the output,
+    /// exists in jiji. Right after the output global is disabled, but before it is removed for
+    /// good, `Output::from_resource` will succeed, but since jiji already forgot the output,
     /// accessing it can cause logic bugs.
     pub fn output_from_resource(&self, wl_output: &WlOutput) -> Option<Output> {
         Output::from_resource(wl_output).filter(|output| self.output_exists(output))
@@ -3662,8 +3662,8 @@ impl Niri {
     /// [`Layout::find_workspace_by_id`] (active-view + disconnected-pool
     /// scoped) — workspaces exclusive to a dormant activity therefore yield
     /// `None`. Callers silent-no-op on `None`; the activity-action cohort
-    /// wires this into the carve-out at `niri-ipc::Action` (see
-    /// `niri-ipc/src/lib.rs:959`).
+    /// wires this into the carve-out at `jiji-ipc::Action` (see
+    /// `jiji-ipc/src/lib.rs:959`).
     pub fn find_output_and_workspace_index(
         &self,
         workspace_reference: WorkspaceReference,
@@ -4924,7 +4924,7 @@ impl Niri {
         }
 
         // We're only updating the current output's windows and layer surfaces. This should be fine
-        // as in niri they can only be rendered on a single output at a time.
+        // as in jiji they can only be rendered on a single output at a time.
         //
         // The reason to do this at all is that it keeps track of whether the surface is visible or
         // not in a unified way with the pointer surfaces, which makes the logic elsewhere simpler.

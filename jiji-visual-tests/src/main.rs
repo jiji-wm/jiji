@@ -34,7 +34,7 @@ mod test_window;
 
 fn main() -> glib::ExitCode {
     let directives =
-        env::var("RUST_LOG").unwrap_or_else(|_| "niri-visual-tests=debug,niri=debug".to_owned());
+        env::var("RUST_LOG").unwrap_or_else(|_| "jiji-visual-tests=debug,jiji=debug".to_owned());
     let env_filter = EnvFilter::builder().parse_lossy(directives);
     tracing_subscriber::fmt()
         .compact()
@@ -178,7 +178,7 @@ fn build_ui(app: &adw::Application) {
     });
 
     let window = adw::ApplicationWindow::new(app);
-    window.set_title(Some("niri visual tests"));
+    window.set_title(Some("jiji visual tests"));
     window.set_content(Some(&split_view));
     window.present();
 }

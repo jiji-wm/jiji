@@ -1,4 +1,4 @@
-//! niri config parsing.
+//! jiji config parsing.
 //!
 //! The config can be constructed from multiple files (includes). To support this, many types are
 //! split into two. For example, `Layout` and `LayoutPart` where `Layout` is the final config and
@@ -2494,7 +2494,7 @@ mod tests {
     #[test]
     fn diff_empty_to_default() {
         // We try to write the config defaults in such a way that empty sections (and an empty
-        // config) give the same outcome as the default config bundled with niri. This test
+        // config) give the same outcome as the default config bundled with jiji. This test
         // verifies the actual differences between the two.
         let mut default_config = Config::load_default();
         let empty_config = Config::parse_mem("").unwrap();
