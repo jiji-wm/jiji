@@ -6,7 +6,7 @@ license.workspace = true
 edition.workspace = true
 repository.workspace = true
 
-description = "Types and helpers for interfacing with the niri Wayland compositor."
+description = "Types and helpers for interfacing with the jiji Wayland compositor."
 keywords = ["wayland"]
 categories = ["api-bindings", "os"]
 readme = "README.md"

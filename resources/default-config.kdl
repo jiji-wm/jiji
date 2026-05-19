@@ -16,7 +16,7 @@ input {
             // layout "us,ru"
             // options "grp:win_space_toggle,compose:ralt,ctrl:nocaps"
 
-            // If this section is empty, niri will fetch xkb settings
+            // If this section is empty, jiji will fetch xkb settings
             // from org.freedesktop.locale1. You can control these using
             // localectl set-x11-keymap.
         }
@@ -70,7 +70,7 @@ input {
 }
 
 // You can configure outputs by their name, which you can find
-// by running `niri msg outputs` while inside a niri instance.
+// by running `jiji msg outputs` while inside a jiji instance.
 // The built-in laptop monitor is usually called "eDP-1".
 // Find more information on the wiki:
 // https://niri-wm.github.io/niri/Configuration:-Outputs
@@ -81,10 +81,10 @@ input {
 
     // Resolution and, optionally, refresh rate of the output.
     // The format is "<width>x<height>" or "<width>x<height>@<refresh rate>".
-    // If the refresh rate is omitted, niri will pick the highest refresh rate
+    // If the refresh rate is omitted, jiji will pick the highest refresh rate
     // for the resolution.
-    // If the mode is omitted altogether or is invalid, niri will pick one automatically.
-    // Run `niri msg outputs` while inside a niri instance to list all outputs and their modes.
+    // If the mode is omitted altogether or is invalid, jiji will pick one automatically.
+    // Run `jiji msg outputs` while inside a jiji instance to list all outputs and their modes.
     mode "1920x1080@120.030"
 
     // You can use integer or fractional scale, for example use 1.5 for 150% scale.
@@ -220,13 +220,13 @@ layout {
         // By default, the shadow draws only around its window, and not behind it.
         // Uncomment this setting to make the shadow draw behind its window.
         //
-        // Note that niri has no way of knowing about the CSD window corner
+        // Note that jiji has no way of knowing about the CSD window corner
         // radius. It has to assume that windows have square corners, leading to
         // shadow artifacts inside the CSD rounded corners. This setting fixes
         // those artifacts.
         //
         // However, instead you may want to set prefer-no-csd and/or
-        // geometry-corner-radius. Then, niri will know the corner radius and
+        // geometry-corner-radius. Then, jiji will know the corner radius and
         // draw the shadow correctly, without having to draw it behind the
         // window. These will also remove client-side shadows if the window
         // draws any.
@@ -263,7 +263,7 @@ layout {
 }
 
 // Add lines like this to spawn processes at startup.
-// Note that running niri as a session supports xdg-desktop-autostart,
+// Note that running jiji as a session supports xdg-desktop-autostart,
 // which may be more convenient to use.
 // See the binds section below for more spawn examples.
 
@@ -355,7 +355,7 @@ binds {
     // when running as a winit window.
     //
     // Most actions that you can bind here can also be invoked programmatically with
-    // `niri msg action do-something`.
+    // `jiji msg action do-something`.
 
     // Mod-Shift-/, which is usually the same as Mod-?,
     // shows a list of important hotkeys.
@@ -507,7 +507,7 @@ binds {
     // Mod+TouchpadScrollUp   { spawn-sh "wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.02-"; }
 
     // You can refer to workspaces by index. However, keep in mind that
-    // niri is a dynamic workspace system, so these commands are kind of
+    // jiji is a dynamic workspace system, so these commands are kind of
     // "best effort". Trying to refer to a workspace index bigger than
     // the current workspace count will instead refer to the bottommost
     // (empty) workspace.
@@ -604,7 +604,7 @@ binds {
     // Note: if you uncomment these, make sure you do NOT have
     // a matching layout switch hotkey configured in xkb options above.
     // Having both at once on the same hotkey will break the switching,
-    // since it will switch twice upon pressing the hotkey (once by xkb, once by niri).
+    // since it will switch twice upon pressing the hotkey (once by xkb, once by jiji).
     // Mod+Space       { switch-layout "next"; }
     // Mod+Shift+Space { switch-layout "prev"; }
 
@@ -613,13 +613,13 @@ binds {
     Alt+Print { screenshot-window; }
 
     // Applications such as remote-desktop clients and software KVM switches may
-    // request that niri stops processing the keyboard shortcuts defined here
+    // request that jiji stops processing the keyboard shortcuts defined here
     // so they may, for example, forward the key presses as-is to a remote machine.
     // It's a good idea to bind an escape hatch to toggle the inhibitor,
     // so a buggy application can't hold your session hostage.
     //
     // The allow-inhibiting=false property can be applied to other binds as well,
-    // which ensures niri always processes them, even when an inhibitor is active.
+    // which ensures jiji always processes them, even when an inhibitor is active.
     Mod+Escape allow-inhibiting=false { toggle-keyboard-shortcuts-inhibit; }
 
     // The quit action will show a confirmation dialog to avoid accidental exits.
