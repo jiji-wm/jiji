@@ -2,7 +2,7 @@
 members = [
     "jiji-config",
     "jiji-ipc",
-    "niri-visual-tests",
+    "jiji-visual-tests",
 ]
 
 [workspace.package]

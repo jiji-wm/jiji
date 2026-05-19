@@ -1,5 +1,5 @@
 [package]
-name = "niri-visual-tests"
+name = "jiji-visual-tests"
 version.workspace = true
 description.workspace = true
 authors.workspace = true
