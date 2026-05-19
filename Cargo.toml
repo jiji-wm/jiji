@@ -172,11 +172,11 @@ similar.opt-level = 3
 version = "26.04"
 assets = [
     { source = "target/release/jiji", dest = "/usr/bin/", mode = "755" },
-    { source = "resources/niri-session", dest = "/usr/bin/", mode = "755" },
-    { source = "resources/niri.desktop", dest = "/usr/share/wayland-sessions/", mode = "644" },
-    { source = "resources/niri-portals.conf", dest = "/usr/share/xdg-desktop-portal/", mode = "644" },
-    { source = "resources/niri.service", dest = "/usr/lib/systemd/user/", mode = "644" },
-    { source = "resources/niri-shutdown.target", dest = "/usr/lib/systemd/user/", mode = "644" },
+    { source = "resources/jiji-session", dest = "/usr/bin/", mode = "755" },
+    { source = "resources/jiji.desktop", dest = "/usr/share/wayland-sessions/", mode = "644" },
+    { source = "resources/jiji-portals.conf", dest = "/usr/share/xdg-desktop-portal/", mode = "644" },
+    { source = "resources/jiji.service", dest = "/usr/lib/systemd/user/", mode = "644" },
+    { source = "resources/jiji-shutdown.target", dest = "/usr/lib/systemd/user/", mode = "644" },
 ]
 [package.metadata.generate-rpm.requires]
 alacritty = "*"
@@ -186,9 +186,9 @@ fuzzel = "*"
 depends = "alacritty, fuzzel"
 assets = [
     ["target/release/jiji", "usr/bin/", "755"],
-    ["resources/niri-session", "usr/bin/", "755"],
-    ["resources/niri.desktop", "/usr/share/wayland-sessions/", "644"],
-    ["resources/niri-portals.conf", "/usr/share/xdg-desktop-portal/", "644"],
-    ["resources/niri.service", "/usr/lib/systemd/user/", "644"],
-    ["resources/niri-shutdown.target", "/usr/lib/systemd/user/", "644"],
+    ["resources/jiji-session", "usr/bin/", "755"],
+    ["resources/jiji.desktop", "/usr/share/wayland-sessions/", "644"],
+    ["resources/jiji-portals.conf", "/usr/share/xdg-desktop-portal/", "644"],
+    ["resources/jiji.service", "/usr/lib/systemd/user/", "644"],
+    ["resources/jiji-shutdown.target", "/usr/lib/systemd/user/", "644"],
 ]

@@ -1,7 +1,7 @@
 type               = process
-command            = niri --session
+command            = jiji --session
 restart            = false
 working-dir        = $HOME
 ready-notification = pipevar:NOTIFY_FD
-logfile            = $HOME/.local/share/niri/niri.log
+logfile            = $HOME/.local/share/jiji/jiji.log
 depends-on:        dbus
