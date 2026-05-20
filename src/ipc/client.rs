@@ -100,6 +100,7 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::FocusedWindow => Request::FocusedWindow,
         Msg::FocusedOutput => Request::FocusedOutput,
         Msg::Activities => Request::Activities,
+        Msg::ActivityViews => Request::ActivityViews,
         Msg::FocusedActivity => Request::FocusedActivity,
         Msg::PickWindow => Request::PickWindow,
         Msg::PickColor => Request::PickColor,
@@ -364,6 +365,34 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
             }
 
             print_activities(&response);
+        }
+        Msg::ActivityViews => {
+            let Response::ActivityViews(response) = response else {
+                bail!("unexpected response: expected ActivityViews, got {response:?}");
+            };
+
+            if json {
+                let s = serde_json::to_string(&response).context("error formatting response")?;
+                println!("{s}");
+                return Ok(());
+            }
+
+            if response.is_empty() {
+                println!("No activity views.");
+                return Ok(());
+            }
+
+            for view in &response {
+                let output_name = view.output_name.as_deref().unwrap_or("(disconnected)");
+                println!(
+                    "activity {} on {} [output_id={}]: ws={:?} active_idx={}",
+                    view.activity_id,
+                    output_name,
+                    view.output_id,
+                    view.workspace_ids,
+                    view.active_idx,
+                );
+            }
         }
         Msg::FocusedActivity => {
             let Response::FocusedActivity(activity) = response else {

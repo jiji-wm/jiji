@@ -703,6 +703,16 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let activities = result.map_err(|_| String::from("error getting activities info"))?;
             Response::Activities(activities)
         }
+        Request::ActivityViews => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let views = build_activity_views_ipc(&state.niri.layout);
+                let _ = tx.send_blocking(views);
+            });
+            let result = rx.recv().await;
+            let views = result.map_err(|_| String::from("error getting activity views info"))?;
+            Response::ActivityViews(views)
+        }
         Request::FocusedActivity => {
             let (tx, rx) = async_channel::bounded(1);
             ctx.event_loop.insert_idle(move |state| {
@@ -914,6 +924,31 @@ pub(crate) fn build_activities_ipc<W: LayoutElement>(
         .iter()
         .map(|a| to_ipc_activity(a, active_id, layout))
         .collect()
+}
+
+/// Project per-activity views into a flat IPC vec. See [`jiji_ipc::ActivityView`] for the
+/// source contract, field semantics, and ordering guarantees.
+pub(crate) fn build_activity_views_ipc<W: LayoutElement>(
+    layout: &Layout<W>,
+) -> Vec<jiji_ipc::ActivityView> {
+    let mut out = Vec::new();
+    for activity in layout.activities().iter() {
+        let mut entries: Vec<_> = activity.views().iter().collect();
+        entries.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+        for (output_id, view) in entries {
+            let output_name = layout
+                .monitor_for_output_id(output_id)
+                .map(|m| m.output_name().clone());
+            out.push(jiji_ipc::ActivityView {
+                activity_id: activity.id().get(),
+                output_id: output_id.as_str().to_owned(),
+                output_name,
+                workspace_ids: view.ids().iter().map(|id| id.get()).collect(),
+                active_idx: view.active_position(),
+            });
+        }
+    }
+    out
 }
 
 pub(crate) fn build_focused_activity_ipc<W: LayoutElement>(

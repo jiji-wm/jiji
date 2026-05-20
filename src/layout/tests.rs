@@ -4703,6 +4703,154 @@ fn build_activities_ipc_mirrors_seed_state() {
 }
 
 #[test]
+fn build_activity_views_ipc_projects_view_map_across_activities_and_outputs() {
+    // Pin `build_activity_views_ipc` against the source contract: one entry per
+    // extant `(activity, output_id)` view pair, with outer order = activity
+    // declaration order, inner order = `OutputId.as_str()` sort,
+    // `output_name` resolved through `monitor_for_output_id`, and the
+    // per-view `workspace_ids` / `active_idx` projection.
+    //
+    // Outputs are added in reverse lex order (output2 before output1) so the
+    // inner-sort assertion proves the helper actively sorts rather than passing
+    // through insertion order. After setup, output1 is disconnected so the
+    // result is asymmetric (alpha: 2 entries; beta: 1), proving the helper
+    // enumerates extant views rather than Cartesian pairs and exercises the
+    // disconnected-output → `output_name: None` branch.
+    let ops = [Op::AddOutput(2), Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // Switch to beta so the projection covers both an active and a dormant view.
+    layout.switch_activity(beta);
+
+    // Capture OutputIds before removal so they survive as lookup keys.
+    // After `AddOutput(2), AddOutput(1)`: monitors[0]=output2, monitors[1]=output1.
+    let out_connected = layout.monitors[0].output_id(); // output2, stays connected
+    let out_disconnected = layout.monitors[1].output_id(); // output1, about to be removed
+    let out_connected_name = layout.monitors[0].output_name().clone();
+
+    // Remove output1: beta (active) loses its output1 view; alpha (dormant)
+    // retains its stale output1 view with output_name → None.
+    let remove_output = layout.monitors[1].output().clone();
+    layout.remove_output(&remove_output);
+
+    let ipc = crate::ipc::server::build_activity_views_ipc(&layout);
+
+    // `expected_pair_count` guards against bugs in the views() iterator;
+    // the literal `3` guards against the Cartesian "fix" (2 activities × 2
+    // original outputs would give 4 — the asymmetric 3 proves eviction ran).
+    let expected_pair_count: usize = layout.activities().iter().map(|a| a.views().len()).sum();
+    assert_eq!(
+        ipc.len(),
+        expected_pair_count,
+        "entry count must equal sum of per-activity view counts (extant pairs, not Cartesian)",
+    );
+    assert_eq!(
+        ipc.len(),
+        3,
+        "alpha has 2 entries (output1+output2), beta has 1 (output2)"
+    );
+
+    // Outer ordering: activity declaration order (alpha first, beta second).
+    let activity_ids_in_order: Vec<u64> = ipc.iter().map(|v| v.activity_id).collect();
+    assert_eq!(
+        activity_ids_in_order,
+        vec![alpha.get(), alpha.get(), beta.get()],
+        "outer ordering must be activity declaration order",
+    );
+
+    // Inner ordering: `OutputId.as_str()` sort within each activity block.
+    // alpha has output1 (disconnected) and output2 (connected); lex sort puts
+    // output1 before output2, which is the opposite of insertion order (output2
+    // was added first) — so this assertion proves active sorting.
+    let alpha_block: Vec<&str> = ipc
+        .iter()
+        .filter(|v| v.activity_id == alpha.get())
+        .map(|v| v.output_id.as_str())
+        .collect();
+    let beta_block: Vec<&str> = ipc
+        .iter()
+        .filter(|v| v.activity_id == beta.get())
+        .map(|v| v.output_id.as_str())
+        .collect();
+    let mut alpha_sorted = alpha_block.clone();
+    alpha_sorted.sort();
+    let mut beta_sorted = beta_block.clone();
+    beta_sorted.sort();
+    assert_eq!(
+        alpha_block, alpha_sorted,
+        "inner ordering for alpha must be `OutputId.as_str()` sort",
+    );
+    assert_eq!(
+        beta_block, beta_sorted,
+        "inner ordering for beta must be `OutputId.as_str()` sort",
+    );
+
+    // Asymmetric structure: alpha has 2 entries, beta has 1.
+    assert_eq!(
+        alpha_block.len(),
+        2,
+        "alpha retains stale view for disconnected output"
+    );
+    assert_eq!(
+        beta_block.len(),
+        1,
+        "beta lost its view for the removed output"
+    );
+
+    // Disconnected-output branch: at least one entry must have output_name: None.
+    assert!(
+        ipc.iter().any(|v| v.output_name.is_none()),
+        "disconnected output must yield output_name: None",
+    );
+
+    // Every entry's `workspace_ids` / `active_idx` / `output_name` matches
+    // the underlying view + monitor connector lookup.
+    for entry in &ipc {
+        let activity_id = super::activity::ActivityId::specific(entry.activity_id);
+        let activity = layout
+            .activities()
+            .get(activity_id)
+            .expect("entry's activity_id must be live");
+        let key = if entry.output_id == out_connected.as_str() {
+            &out_connected
+        } else if entry.output_id == out_disconnected.as_str() {
+            &out_disconnected
+        } else {
+            panic!("unexpected output_id in IPC entry: {}", entry.output_id);
+        };
+        let view = activity
+            .views()
+            .get(key)
+            .expect("IPC entry must back to an extant view");
+
+        let expected_ids: Vec<u64> = view.ids().iter().map(|id| id.get()).collect();
+        assert_eq!(
+            entry.workspace_ids, expected_ids,
+            "workspace_ids must equal view.ids()",
+        );
+        assert_eq!(
+            entry.active_idx,
+            view.active_position(),
+            "active_idx must equal view.active_position()",
+        );
+
+        let expected_output_name = if entry.output_id == out_connected.as_str() {
+            Some(out_connected_name.clone())
+        } else {
+            None // disconnected output
+        };
+        assert_eq!(
+            entry.output_name, expected_output_name,
+            "output_name must be Some(connector) for connected and None for disconnected",
+        );
+    }
+
+    layout.verify_invariants();
+}
+
+#[test]
 fn backwards_compat_default_config_seeds_single_implicit_default_activity() {
     // Backwards-compat pin for: when no `activity` blocks appear in
     // the config, exactly one implicit runtime "Default" activity is seeded,

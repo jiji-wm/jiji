@@ -84,6 +84,8 @@ pub enum Request {
     FocusedWindow,
     /// Request information about activities.
     Activities,
+    /// Request per-activity per-output workspace ordering (see [`ActivityView`]).
+    ActivityViews,
     /// Request information about the focused activity.
     FocusedActivity,
     /// Request picking a window and get its information.
@@ -173,6 +175,9 @@ pub enum Response {
     FocusedOutput(Option<Output>),
     /// Information about activities.
     Activities(Vec<Activity>),
+    /// Per-activity per-output workspace ordering. See [`ActivityView`] for the field
+    /// semantics and the "extant views, not theoretical pairs" source contract.
+    ActivityViews(Vec<ActivityView>),
     /// Information about the focused activity.
     ///
     /// There is always at least one activity, so this is not wrapped in `Option`.
@@ -1763,6 +1768,45 @@ pub struct Activity {
     pub is_urgent: bool,
 }
 
+/// Per-(activity, output) workspace ordering.
+///
+/// Direct projection of `Activity.views: HashMap<OutputId, WorkspaceView>` for
+/// every `(activity, output)` pair the compositor currently tracks a view for.
+/// The reply is a flat `Vec`; clients group/filter as needed.
+///
+/// **Source contract.** One entry per `(activity, output_id)` that exists as a
+/// key in `activity.views()`. Activities without a view for a given output
+/// (e.g. brand-new runtime activity that has not yet been materialized on a
+/// connected output) yield NO entry — the reply enumerates extant views, not
+/// every theoretical pair.
+///
+/// The two string output fields are not redundant: `output_id` is the stable
+/// cross-session join key (matches the key in `Activity.views`; survives
+/// disconnect/reconnect unchanged), while `output_name` is the per-connection
+/// connector name used for display and for joining against `Workspace.output`.
+/// `output_name` goes `None` when the output is currently disconnected.
+// `Default` is constructor scaffolding (FRU-eligible at any call site that
+// wants it), not a real wire value. `ActivityView::default()` produces a
+// sentinel `{ activity_id: 0, output_id: "", output_name: None,
+// workspace_ids: vec![], active_idx: 0 }` that no live view ever has —
+// never ship `Default` values to clients.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct ActivityView {
+    /// `Activity.id()` as `u64`. Stable for the lifetime of the activity.
+    pub activity_id: u64,
+    /// Stable `OutputId.as_str()` handle (typically `"<make> <model> <serial>"`,
+    /// fallback to connector). Survives disconnect/reconnect cycles unchanged.
+    pub output_id: String,
+    /// Connector name (e.g. `"DP-1"`) when the output is currently connected;
+    /// `None` when the output is in the disconnected pool.
+    pub output_name: Option<String>,
+    /// `WorkspaceView.ids()` cloned, in view order. Always non-empty.
+    pub workspace_ids: Vec<u64>,
+    /// Index into `workspace_ids` of the activity's active workspace on this output.
+    pub active_idx: usize,
+}
+
 /// A workspace.
 // `Default` is constructor scaffolding (FRU-eligible at any call site that wants
 // it), not a real wire value. `Workspace::default()` produces a sentinel
@@ -2729,6 +2773,38 @@ mod tests {
             serde_json::to_string(&parsed).expect("re-serialize by-name"),
             json,
         );
+    }
+
+    #[test]
+    fn activity_view_json_round_trip() {
+        // Pin the wire form of `ActivityView` for both the connected case
+        // (`output_name: Some(_)`) and the disconnected case (`output_name:
+        // None`). A field rename or tag change on either arm breaks the
+        // round-trip and surfaces here.
+        let connected = ActivityView {
+            activity_id: 1,
+            output_id: "make model serial".to_owned(),
+            output_name: Some("DP-1".to_owned()),
+            workspace_ids: vec![10, 20, 30],
+            active_idx: 1,
+        };
+        let json = serde_json::to_string(&connected).expect("serialize connected ActivityView");
+        let parsed: ActivityView =
+            serde_json::from_str(&json).expect("deserialize connected ActivityView");
+        assert_eq!(parsed, connected);
+
+        let disconnected = ActivityView {
+            activity_id: 2,
+            output_id: "other make other model other serial".to_owned(),
+            output_name: None,
+            workspace_ids: vec![42],
+            active_idx: 0,
+        };
+        let json =
+            serde_json::to_string(&disconnected).expect("serialize disconnected ActivityView");
+        let parsed: ActivityView =
+            serde_json::from_str(&json).expect("deserialize disconnected ActivityView");
+        assert_eq!(parsed, disconnected);
     }
 
     #[test]

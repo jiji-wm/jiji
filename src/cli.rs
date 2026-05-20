@@ -77,6 +77,9 @@ pub enum Msg {
     FocusedWindow,
     /// List activities.
     Activities,
+    /// List per-activity per-output workspace ordering. One entry per extant (activity, output)
+    /// view pair.
+    ActivityViews,
     /// Print information about the focused activity.
     FocusedActivity,
     /// Pick a window with the mouse and print information about it.
