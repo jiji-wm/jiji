@@ -6182,6 +6182,523 @@ fn add_window_to_active_workspace_maintains_dormant_view_bookend() {
     layout.verify_invariants();
 }
 
+/// Sets up: alpha view = `[W_src(has window, active), W_target]` on output1; beta is a dormant
+/// activity whose view ends in `W_target`. The active workspace's column will be moved into
+/// `W_target` by the action under test, after which `W_target` is no longer empty — so beta's
+/// dormant view bookend invariant requires a fresh empty appended.
+///
+/// Returns `(layout, alpha, beta, mon_out, w_target_id)` for the assertion phase.
+#[track_caller]
+fn setup_shared_trailing_bookend_fixture() -> (
+    Layout<TestWindow>,
+    ActivityId,
+    ActivityId,
+    OutputId,
+    WorkspaceId,
+) {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    // After AddWindow the active view is `[W_src(has window, active), W_target(empty)]`.
+    let w_target_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .last()
+        .copied()
+        .expect("alpha view has trailing bookend");
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    // Set on W_target: {alpha} → {alpha, beta}. The Add branch appends W_target to beta's view
+    // (currently `[W_beta_seed]`), yielding beta's view = `[W_beta_seed, W_target]`.
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(w_target_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    let beta_trailing = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view materialized")
+        .ids()
+        .last()
+        .copied();
+    assert_eq!(
+        beta_trailing,
+        Some(w_target_id),
+        "fixture precondition: w_target is beta's trailing entry",
+    );
+
+    (layout, alpha, beta, mon_out, w_target_id)
+}
+
+/// Common post-condition: beta's dormant view grew by exactly one fresh empty appended after
+/// `w_target_id` (i.e. the fixup ran), and `layout.verify_invariants` passes (which itself
+/// re-checks `Monitor::verify_invariants`'s per-view bookend assertion).
+#[track_caller]
+fn assert_dormant_trailing_fixup_landed(
+    layout: &Layout<TestWindow>,
+    beta: ActivityId,
+    mon_out: &OutputId,
+    w_target_id: WorkspaceId,
+    beta_len_before: usize,
+) {
+    let beta_view_after = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(mon_out)
+        .expect("beta view live");
+    assert_eq!(
+        beta_view_after.len(),
+        beta_len_before + 1,
+        "dormant_view_bookend_fixup must have appended exactly one fresh empty",
+    );
+    assert_ne!(
+        beta_view_after.ids().last(),
+        Some(&w_target_id),
+        "w_target_id is no longer beta's trailing entry — a fresh empty came after it",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn move_column_to_workspace_down_into_shared_trailing_bookend_appends_dormant_bookend() {
+    // alpha view = `[W_src(has window, active at 0), W_target]`; beta view trails W_target.
+    // `move_column_to_workspace_down` moves the column from W_src into W_target. W_target
+    // gains content; beta's dormant view still ends in W_target. Without the public-entry-
+    // point fixup wiring, the per-view bookend invariant trips when verify_invariants runs.
+    let (mut layout, _alpha, beta, mon_out, w_target_id) = setup_shared_trailing_bookend_fixture();
+    let beta_len_before = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap()
+        .len();
+
+    layout.move_column_to_workspace_down(false);
+
+    assert_dormant_trailing_fixup_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
+}
+
+#[test]
+fn move_column_to_workspace_into_shared_trailing_bookend_appends_dormant_bookend() {
+    // Same fixture as the `_down` test; the explicit-idx entry point fires on `idx = 1`.
+    let (mut layout, _alpha, beta, mon_out, w_target_id) = setup_shared_trailing_bookend_fixture();
+    let beta_len_before = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap()
+        .len();
+
+    layout.move_column_to_workspace(1, false);
+
+    assert_dormant_trailing_fixup_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
+}
+
+#[test]
+fn move_column_to_workspace_up_into_shared_trailing_bookend_appends_dormant_bookend() {
+    // Source must be at position > 0 for `_up` to do anything. Move-column-down with
+    // `activate = true` first to grow the view to `[W_target(empty), W_src(has window, active at
+    // 1), W_trail(empty)]`, then set up beta to share W_target at trailing.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::MoveColumnToWorkspaceDown(true),
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    // After the ops: alpha view = `[W_target(empty), W_src(has window, active at 1),
+    // W_trail(empty)]`.
+    let alpha_view_ids: Vec<WorkspaceId> = layout.active_view(&mon_out).ids().to_vec();
+    assert_eq!(alpha_view_ids.len(), 3, "fixture: alpha view has 3 entries");
+    assert_eq!(
+        layout.active_view(&mon_out).active_position(),
+        1,
+        "fixture: alpha active at position 1",
+    );
+    // Position 0 is the formerly-empty trailing bookend that `move_column_to_workspace_down`
+    // minted on the previous step; the column moved down into it, so it is now the source
+    // workspace for the upcoming `_up` move. It will also receive the column when `_up`
+    // reverses the move — making it the "target" from the fixup's perspective.
+    let w_target_id = alpha_view_ids[0];
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(w_target_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    let beta_len_before = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap()
+        .len();
+    assert_eq!(
+        layout
+            .activities
+            .get(beta)
+            .unwrap()
+            .views()
+            .get(&mon_out)
+            .unwrap()
+            .ids()
+            .last()
+            .copied(),
+        Some(w_target_id),
+        "fixture precondition: beta's trailing entry is w_target",
+    );
+
+    layout.move_column_to_workspace_up(false);
+
+    assert_dormant_trailing_fixup_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
+}
+
+#[test]
+fn add_column_by_idx_into_shared_trailing_bookend_appends_dormant_bookend() {
+    // Exercise `add_column_by_idx` via its only public caller: `move_column_to_output`. Two
+    // outputs; alpha has a window on output1 and an empty workspace on output2. beta shares
+    // output2's workspace at its trailing position. Moving the column from output1 to output2
+    // lands it on output2's active workspace via `add_column_by_idx`.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let out2_id = layout.monitors[1].output_id();
+    let out2_output = layout.monitors[1].output.clone();
+
+    // Output2's view in alpha has a single bookend workspace. That's the target.
+    let w_target_id = layout
+        .active_view(&out2_id)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha's output2 view has a bookend");
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(w_target_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    let beta_len_before = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&out2_id)
+        .unwrap()
+        .len();
+
+    layout.move_column_to_output(&out2_output, None, true);
+
+    assert_dormant_trailing_fixup_landed(&layout, beta, &out2_id, w_target_id, beta_len_before);
+}
+
+#[test]
+fn add_column_by_idx_into_shared_leading_bookend_under_ewaf_prepends_dormant_bookend() {
+    // EWAF (empty_workspace_above_first) variant: position 0 is also a bookend slot. The
+    // helper at `dormant_view_bookend_fixup` mints a leading empty in dormant views when
+    // `ewaf && is_first` — i.e. the receiving workspace sits at position 0 of a dormant
+    // view. Construct beta's dormant view via `test_override_activity_view` so the shared
+    // workspace lands at position 0 (`set_workspace_activities`'s Add branch only appends,
+    // so we can't get it there via Set alone).
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+    let alpha = layout.active_activity_id();
+    let out2_id = layout.monitors[1].output_id();
+    let out2_output = layout.monitors[1].output.clone();
+
+    // Output2's view in alpha has a single bookend workspace (no content yet on output2, so
+    // EWAF hasn't minted a leading empty there). That single workspace is the target.
+    let w_target_id = layout
+        .active_view(&out2_id)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha's output2 view has a bookend");
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    // Widen ownership directly on the pool entry rather than going through
+    // `set_workspace_activities` — the latter would leave beta's dormant view at len 2
+    // momentarily and trip the EWAF "1 or 3+" rule before the override below restores it.
+    layout
+        .workspaces
+        .get_mut(&w_target_id)
+        .expect("w_target live")
+        .activities = [alpha, beta].into_iter().collect();
+
+    // Construct beta's output2 view with W_target at position 0 (leading slot). Under
+    // EWAF, `Monitor::verify_invariants` requires either 1 or 3+ workspaces in a view —
+    // mint two fresh empties tagged to beta to fill out a valid 3-wide layout
+    // `[W_target, W_filler_mid, W_filler_trail]` where W_target is the leading slot.
+    let w_filler_mid = test_mint_empty_for(&mut layout, 1, beta);
+    let w_filler_trail = test_mint_empty_for(&mut layout, 1, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        out2_id.clone(),
+        WorkspaceView::new(vec![w_target_id, w_filler_mid, w_filler_trail], 1),
+    );
+    // Pin that the manually-assembled fixture state is already invariant-clean before
+    // the action under test fires.
+    layout.verify_invariants();
+
+    let beta_len_before = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&out2_id)
+        .unwrap()
+        .len();
+
+    // Move the column from output1's active workspace to output2's W_target (idx 0). Under
+    // EWAF, `add_column_on` mints a top bookend in alpha (since workspace_idx == 0). The
+    // dormant-view fixup mirrors for beta: W_target is at beta's position 0 → mint a
+    // leading empty there.
+    layout.move_column_to_output(&out2_output, Some(0), true);
+
+    let beta_view_after = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&out2_id)
+        .unwrap();
+    assert_eq!(
+        beta_view_after.len(),
+        beta_len_before + 1,
+        "EWAF leading share: helper prepends exactly one leading-fixup empty",
+    );
+    assert_ne!(
+        beta_view_after.ids().first(),
+        Some(&w_target_id),
+        "w_target is no longer beta's leading entry — a fresh empty came before it",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn column_add_into_shared_trailing_bookend_keeps_verify_invariants_passing() {
+    // Regression pin against the existing per-view bookend assertion in
+    // `Monitor::verify_invariants`. With the public-entry-point fixup wiring in place,
+    // adding a column to a workspace at a dormant view's trailing position leaves every
+    // monitor's per-view assertion satisfied. Without the wiring, the same operation would
+    // trip the assertion (proven by removing the fixup call and observing the panic during
+    // local discrimination).
+    let (mut layout, _alpha, _beta, _mon_out, _w_target_id) =
+        setup_shared_trailing_bookend_fixture();
+
+    // Fire any of the four newly-wired entry points — the regression pin is that the
+    // post-action verify_invariants passes. `move_column_to_workspace_down` is the simplest.
+    layout.move_column_to_workspace_down(false);
+
+    // `verify_invariants` runs all of `Monitor::verify_invariants` which in turn runs
+    // `assert_view_bookends` per view in every connected monitor — the assertion that would
+    // trip without the new wiring.
+    layout.verify_invariants();
+}
+
+#[test]
+fn move_column_to_workspace_down_floating_path_appends_dormant_bookend() {
+    // Exercises the floating-recursion branch of `move_column_to_workspace_down_on`:
+    // when the active workspace has `floating_is_active() == true`, the inner associated fn
+    // routes through `move_to_workspace_down_on` → `add_tile_on` rather than the scrolling
+    // `add_column_on` path. The public-entry-point fixup at the call site fires
+    // unconditionally, so the dormant bookend must be repaired regardless of which inner
+    // branch executed. Without the unconditional placement at the public entry point, a
+    // refactor that moved the fixup inside `add_column_on` would silently leave the
+    // floating path unfixed.
+    let (mut layout, _alpha, beta, mon_out, w_target_id) = setup_shared_trailing_bookend_fixture();
+
+    // Add a floating window to the active (source) workspace so we can put floating focus
+    // on it. The fixture workspace currently holds one tiling window (id=1); use id=2.
+    let float_win = TestWindow::new(TestWindowParams {
+        id: 2,
+        is_floating: true,
+        ..TestWindowParams::new(2)
+    });
+    layout.add_window(
+        float_win,
+        AddWindowTarget::Auto,
+        None,
+        None,
+        false,
+        true,
+        ActivateWindow::default(),
+    );
+    layout.focus_floating();
+    // Verify the floating branch will actually be taken.
+    assert!(
+        layout
+            .active_workspace()
+            .expect("active workspace exists")
+            .floating_is_active(),
+        "fixture precondition: floating must be active so the floating-recursion branch fires",
+    );
+
+    let beta_len_before = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap()
+        .len();
+
+    layout.move_column_to_workspace_down(false);
+
+    assert_dormant_trailing_fixup_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
+}
+
+#[test]
+fn dormant_view_bookend_fixup_len1_ewaf_mints_both_bookends() {
+    // A dormant view of length 1 under EWAF contains a single workspace that is
+    // simultaneously `is_last` (position == len-1 == 0) and `ewaf && is_first`
+    // (position == 0). Both branches in `dormant_view_bookend_fixup`'s loop body fire
+    // on the same needs_fixup entry, minting a new trailing empty AND a new leading empty
+    // in one call — growing the view from length 1 to length 3 with the original
+    // workspace sandwiched in the middle.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+    let alpha = layout.active_activity_id();
+    let out2_id = layout.monitors[1].output_id();
+    let out2_output = layout.monitors[1].output.clone();
+
+    // Alpha's out2 view has a single trailing bookend (no content on out2 yet, so EWAF
+    // has not minted a leading empty). That single workspace is the shared target.
+    let w_target_id = layout
+        .active_view(&out2_id)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha's out2 view has a bookend");
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    // Directly widen the workspace's activity set so beta shares it. The
+    // `set_workspace_activities` Add branch would give beta a len-2 view (its seed
+    // workspace + w_target); we want len-1 to hit the dual-mint case. Bypass via the pool.
+    layout
+        .workspaces
+        .get_mut(&w_target_id)
+        .expect("w_target live")
+        .activities = [alpha, beta].into_iter().collect();
+
+    // Construct beta's out2 view as a length-1 singleton [W_target, active=0]. Under
+    // EWAF, len==1 satisfies the "1 or 3+" rule (the singleton-allowed branch).
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        out2_id.clone(),
+        WorkspaceView::new(vec![w_target_id], 0),
+    );
+    // Verify the fixture state is invariant-clean before the action under test fires.
+    layout.verify_invariants();
+
+    // Move the column from out1 to out2's w_target (idx 0). Under EWAF, `add_column_on`
+    // mints both a leading and a trailing bookend in alpha's view. The fixup observes that
+    // w_target is at position 0 of beta's len-1 view, so both `is_last` and
+    // `ewaf && is_first` are true — the helper mints one trailing empty AND one leading
+    // empty, growing beta's out2 view from [W_target] to [fresh_top, W_target, fresh_bottom].
+    layout.move_column_to_output(&out2_output, Some(0), true);
+
+    let beta_view_after = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&out2_id)
+        .unwrap();
+    assert_eq!(
+        beta_view_after.len(),
+        3,
+        "len-1 EWAF dormant view: fixup must mint both leading and trailing empty, growing view to 3",
+    );
+    assert_ne!(
+        beta_view_after.ids().first(),
+        Some(&w_target_id),
+        "w_target is no longer at position 0 — a fresh leading empty was prepended",
+    );
+    assert_ne!(
+        beta_view_after.ids().last(),
+        Some(&w_target_id),
+        "w_target is no longer at the trailing position — a fresh trailing empty was appended",
+    );
+
+    layout.verify_invariants();
+}
+
 #[test]
 fn switch_activity_focus_follows_active_activity_view() {
     // `Layout::focus()` reads the active activity's view for the active monitor and

@@ -1444,6 +1444,13 @@ impl<W: LayoutElement> Layout<W> {
         );
         let seed_activity = self.activities.active_id();
         let mon_out = self.monitors[monitor_idx].output_id();
+        // Capture the receiving workspace id before the split-borrow scope so the
+        // post-split fixup can patch dormant views. `WorkspaceId: Copy` releases the
+        // shared borrow as the inner block returns.
+        let receiving_ws_id = {
+            let view = self.active_view(&mon_out);
+            view.ids()[workspace_idx]
+        };
         let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
         Self::add_column_on(
             monitors,
@@ -1459,6 +1466,21 @@ impl<W: LayoutElement> Layout<W> {
         if activate {
             self.active_monitor_idx = monitor_idx;
         }
+
+        // End of split borrow. `add_column_on` mints the active view's trailing/leading
+        // bookend inline, but every dormant activity that shares `receiving_ws_id` at the
+        // same bookend slot also needs a fresh empty appended (mirror under EWAF for
+        // position 0). The helper internally short-circuits if the receiving workspace
+        // is not present in a dormant view, or is not at a bookend slot.
+        //
+        // A future refactor that hoists this fixup into `add_column_on` itself would
+        // silently double-mint (active view minted twice) or interact poorly with the
+        // `move_to_workspace_*_on` floating-recursion branch which routes through
+        // `add_tile_on` instead — keep the maintenance at the public entry point.
+        //
+        // Mirrors the post-split fixup on `add_window` above (search the file for
+        // "Run the per-activity bookend fixup on dormant views").
+        self.dormant_view_bookend_fixup(receiving_ws_id, monitor_idx);
     }
 
     /// After a window has been added to `ws_id` on `mon_idx`, walk every dormant activity's
@@ -4601,6 +4623,13 @@ impl<W: LayoutElement> Layout<W> {
         let active_monitor_idx = self.active_monitor_idx;
         let mon_out = self.monitors[active_monitor_idx].output_id();
         let seed_activity = self.activities.active_id();
+        // Capture the receiving workspace id (active_position - 1, saturating) before
+        // the split-borrow scope. If source is at position 0, the inner associated fn
+        // is a no-op; the fixup still runs but short-circuits via `position_of`.
+        let receiving_ws_id = {
+            let view = self.active_view(&mon_out);
+            view.ids()[view.active_position().saturating_sub(1)]
+        };
         let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
         Self::move_column_to_workspace_up_on(
             monitors,
@@ -4610,6 +4639,15 @@ impl<W: LayoutElement> Layout<W> {
             activate,
             seed_activity,
         );
+
+        // End of split borrow. The associated fn routes through `add_column_on` (which
+        // maintains the active view's bookend) for the scrolling path, or through
+        // `add_tile_on` for the floating-recursion path — both mint the active-view
+        // bookend inline but neither touches dormant views. Fire the fixup so any
+        // dormant view that shared `receiving_ws_id` at a bookend slot grows a fresh
+        // empty too. A future refactor that hoists fixup into the associated fn would
+        // need to handle the floating-recursion branch as well.
+        self.dormant_view_bookend_fixup(receiving_ws_id, active_monitor_idx);
     }
 
     pub fn move_column_to_workspace_down(&mut self, activate: bool) {
@@ -4619,6 +4657,14 @@ impl<W: LayoutElement> Layout<W> {
         let active_monitor_idx = self.active_monitor_idx;
         let mon_out = self.monitors[active_monitor_idx].output_id();
         let seed_activity = self.activities.active_id();
+        // Capture the receiving workspace id (min(active + 1, last)) before the
+        // split-borrow scope. If source is already at the last slot, the inner
+        // associated fn is a no-op; the fixup still runs but short-circuits via
+        // `position_of` for the receiving slot.
+        let receiving_ws_id = {
+            let view = self.active_view(&mon_out);
+            view.ids()[min(view.active_position() + 1, view.len() - 1)]
+        };
         let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
         Self::move_column_to_workspace_down_on(
             monitors,
@@ -4628,6 +4674,11 @@ impl<W: LayoutElement> Layout<W> {
             activate,
             seed_activity,
         );
+
+        // End of split borrow. See `move_column_to_workspace_up` for the rationale —
+        // the associated fn maintains the active view's bookend (via `add_column_on`
+        // or the floating-recursion `add_tile_on`) but never touches dormant views.
+        self.dormant_view_bookend_fixup(receiving_ws_id, active_monitor_idx);
     }
 
     pub fn move_column_to_workspace(&mut self, idx: usize, activate: bool) {
@@ -4637,6 +4688,13 @@ impl<W: LayoutElement> Layout<W> {
         let active_monitor_idx = self.active_monitor_idx;
         let mon_out = self.monitors[active_monitor_idx].output_id();
         let seed_activity = self.activities.active_id();
+        // Capture the receiving workspace id (min(idx, last)) before the split-borrow
+        // scope. Identity case (target == source) leaves the inner fn a no-op; the
+        // fixup still fires but short-circuits via `position_of`.
+        let receiving_ws_id = {
+            let view = self.active_view(&mon_out);
+            view.ids()[min(idx, view.len() - 1)]
+        };
         let ids_to_destroy = {
             let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
             Self::move_column_to_workspace_on(
@@ -4654,6 +4712,14 @@ impl<W: LayoutElement> Layout<W> {
             &mut self.workspaces,
             ids_to_destroy,
         );
+
+        // End of split borrow. Fires after `destroy_workspaces_cross_activity` so any
+        // dormant view dropped by the destroy pass is observed by the helper in its
+        // post-destroy shape. If `receiving_ws_id` was itself destroyed (defensive — a
+        // workspace that just received a column should not be in the destroy set), the
+        // helper short-circuits via `position_of`. See `move_column_to_workspace_up`
+        // for the broader rationale.
+        self.dormant_view_bookend_fixup(receiving_ws_id, active_monitor_idx);
     }
 
     pub fn switch_workspace_up(&mut self) {
@@ -9546,6 +9612,25 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Reorder the active workspace down within the active activity's view, minting a
+    /// fresh trailing-empty bookend in the active view (and a leading-empty under EWAF)
+    /// when the swap pushes the active workspace into a bookend slot.
+    ///
+    /// No dormant-view bookend fixup is required: this entry point and its `_up` / `_to_idx`
+    /// siblings mutate **only the active view's order** via `WorkspaceView::swap` /
+    /// `move_within` and mint bookends in the active view via
+    /// `Self::add_workspace_{bottom,top}_on`. Workspace identities are preserved and no
+    /// shared workspace's content (tiles, name, activity-set) changes — so a dormant view
+    /// that shared one of the reordered workspaces at a bookend slot cannot break its
+    /// per-view bookend invariant via these paths. Contrast with the column-add public
+    /// entry points (`add_column_by_idx`, `move_column_to_workspace*`) which widen the
+    /// receiving workspace's content and thus require `dormant_view_bookend_fixup`.
+    ///
+    /// Workspaces may still be destroyed downstream via `clean_up_workspaces_on` →
+    /// `destroy_workspaces_cross_activity`, but that pass's shared-id skip (only workspaces
+    /// with `activities().len() == 1` are destroyed) ensures no dormant view's content is
+    /// mutated — weakening that skip would also need this entry point to grow a
+    /// `dormant_view_bookend_fixup` call.
     pub fn move_workspace_down(&mut self) {
         if self.monitors.is_empty() {
             return;
@@ -9564,6 +9649,8 @@ impl<W: LayoutElement> Layout<W> {
         );
     }
 
+    /// See [`Self::move_workspace_down`] for the no-shared-content-mutation invariant
+    /// that lets this entry point skip `dormant_view_bookend_fixup`.
     pub fn move_workspace_up(&mut self) {
         if self.monitors.is_empty() {
             return;
@@ -9582,6 +9669,8 @@ impl<W: LayoutElement> Layout<W> {
         );
     }
 
+    /// See [`Self::move_workspace_down`] for the no-shared-content-mutation invariant
+    /// that lets this entry point skip `dormant_view_bookend_fixup`.
     pub fn move_workspace_to_idx(
         &mut self,
         reference: Option<(Option<Output>, usize)>,
