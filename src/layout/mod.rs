@@ -9716,6 +9716,33 @@ impl<W: LayoutElement> Layout<W> {
         );
     }
 
+    /// Assign `name` to a workspace selected by `reference` (or the active
+    /// workspace when `reference` is `None`).
+    ///
+    /// ## Bookend invariant
+    ///
+    /// Per-view bookend rule: every connected output's per-activity view ends
+    /// in a workspace whose `name.is_none() && !has_windows()`, and — under
+    /// `empty_workspace_above_first` — also begins with one. Naming a
+    /// workspace that currently sits at a bookend slot of any view violates
+    /// that rule, so a fresh empty must be minted in its place — but only
+    /// when the freshly-named workspace was actually at a bookend slot before
+    /// the rename. The active activity's view of the workspace's hosting
+    /// monitor is patched inline via `add_workspace_top_on` /
+    /// `add_workspace_bottom_on` (`monitors_pool_view_mut(&out)` returns the
+    /// active activity's view for that output); every dormant activity's view
+    /// of that same output is patched via `dormant_view_bookend_fixup`.
+    ///
+    /// ## Asymmetry with `unset_workspace_name`
+    ///
+    /// `set_workspace_name` *adds* `name.is_some()` at a slot whose contract
+    /// requires `name.is_none()` — so it can break the bookend rule and
+    /// requires the mint described above. `unset_workspace_name` clears
+    /// `name` to `None`, moving the workspace toward — never away from — the
+    /// bookend predicate's `name.is_none()` requirement. The bookend slot
+    /// identity is also preserved: `clean_up_workspaces_on`'s prune range
+    /// excludes the trailing slot (and the leading slot under EWAF), so the
+    /// unset path needs no bookend wiring.
     pub fn set_workspace_name(&mut self, name: String, reference: Option<WorkspaceReference>) {
         // ignore the request if the name is already used by another workspace
         if self.find_workspace_by_name(&name).is_some() {
@@ -9735,14 +9762,26 @@ impl<W: LayoutElement> Layout<W> {
 
         let wsid = ws.id();
 
-        // if `empty_workspace_above_first` is set and `ws` is the first
-        // workspace on a monitor, another empty workspace needs to
-        // be added before.
-        // Conversely, if `ws` was the last workspace on a monitor, an
-        // empty workspace needs to be added after.
+        // Locate the workspace's actual monitor — the active view of *some*
+        // connected output must contain `wsid`. Using `active_monitor_idx`
+        // here would silently no-op for a `WorkspaceReference::Id` that
+        // targets a workspace currently shown on a different output. Mirrors
+        // `unname_workspace_by_id`'s lookup shape.
+        //
+        // Returns `None` when (a) no monitors are connected (workspace lives
+        // in `disconnected_workspace_ids`), or (b) `wsid` is held only in a
+        // dormant activity's view — no active-activity view holds it. Both
+        // are silent-skip boundaries: the disconnected case remediates on
+        // reconnect via `Monitor::new`'s `with_merged_layout` path, while
+        // the dormant-only case waits for the next mutating touch of that
+        // workspace. Extending the lookup to fan out into dormant views is
+        // structural work deferred to the EWAF source-of-truth follow-up.
+        let mon_idx_opt = self
+            .monitors
+            .iter()
+            .position(|mon| self.active_view(&mon.output_id()).ids().contains(&wsid));
 
-        if !self.monitors.is_empty() {
-            let mon_idx = self.active_monitor_idx;
+        if let Some(mon_idx) = mon_idx_opt {
             let monitor = &self.monitors[mon_idx];
             let mon_out = monitor.output_id();
             let monitor_view = self.active_view(&mon_out);
@@ -9750,13 +9789,33 @@ impl<W: LayoutElement> Layout<W> {
                 && monitor_view.ids().first().is_some_and(|id| *id == wsid);
             let add_bottom = monitor_view.ids().last().is_some_and(|id| *id == wsid);
             let seed_activity = self.activities.active_id();
-            let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
-            if add_top {
-                Self::add_workspace_top_on(monitors, pool, view, mon_idx, seed_activity);
+            {
+                let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+                if add_top {
+                    Self::add_workspace_top_on(monitors, pool, view, mon_idx, seed_activity);
+                }
+                if add_bottom {
+                    Self::add_workspace_bottom_on(monitors, pool, view, mon_idx, seed_activity);
+                }
             }
-            if add_bottom {
-                Self::add_workspace_bottom_on(monitors, pool, view, mon_idx, seed_activity);
-            }
+
+            // End of split borrow. `add_workspace_{top,bottom}_on` patches the
+            // active view's bookend slot inline, but every dormant activity
+            // that holds `wsid` at the same bookend slot of its own view
+            // needs the same mint. The helper short-circuits on activities
+            // whose view does not contain `wsid` at a bookend slot, and on
+            // the active activity (already patched above).
+            //
+            // The `wsid` lookup anchors to the workspace's *actual* monitor
+            // rather than `active_monitor_idx` so a `WorkspaceReference::Id`
+            // targeting a workspace on another connected monitor patches the
+            // correct view. The silent-skip cases — workspace reachable only
+            // via the disconnected pool, or held only in a dormant activity's
+            // view — are the deferred boundary tracked by the EWAF
+            // source-of-truth follow-up: `position` returns `None` and we
+            // silently skip; the next reconnect mints a clean view via
+            // `Monitor::new`.
+            self.dormant_view_bookend_fixup(wsid, mon_idx);
         }
     }
 

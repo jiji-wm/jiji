@@ -6700,6 +6700,244 @@ fn dormant_view_bookend_fixup_len1_ewaf_mints_both_bookends() {
 }
 
 #[test]
+fn set_workspace_name_trailing_dormant_view_appends_bookend() {
+    // Naming a workspace at the trailing bookend slot of a dormant view violates the
+    // per-view bookend invariant on that view (name.is_some() at a slot whose contract
+    // requires name.is_none()). The active view's bookend is patched inline via
+    // `add_workspace_bottom_on`; the dormant view is patched via
+    // `dormant_view_bookend_fixup`.
+    let (mut layout, alpha, beta, mon_out, w_target_id) = setup_shared_trailing_bookend_fixture();
+    // Pin the fixture: w_target is at the trailing slot of both alpha (active) and beta
+    // (dormant). Both views need a fresh trailing empty after the rename.
+    let alpha_view = layout.active_view(&mon_out).ids().to_vec();
+    assert_eq!(
+        alpha_view.last().copied(),
+        Some(w_target_id),
+        "fixture precondition: w_target is alpha's trailing slot",
+    );
+    let beta_len_before = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap()
+        .len();
+    let alpha_len_before = alpha_view.len();
+
+    layout.set_workspace_name(
+        "named".to_owned(),
+        Some(WorkspaceReference::Id(w_target_id.get())),
+    );
+
+    // Alpha's active view: w_target was named, so a fresh trailing empty was appended.
+    let alpha_view_after = layout.active_view(&mon_out).ids().to_vec();
+    assert_eq!(
+        alpha_view_after.len(),
+        alpha_len_before + 1,
+        "active view grew by exactly one fresh trailing empty",
+    );
+    assert_eq!(
+        alpha_view_after[alpha_len_before - 1],
+        w_target_id,
+        "w_target is no longer the trailing slot but still occupies its old position",
+    );
+    let new_trailing_id = *alpha_view_after.last().expect("trailing slot exists");
+    let new_trailing_ws = layout
+        .workspaces
+        .get(&new_trailing_id)
+        .expect("trailing id is a pool key");
+    assert!(
+        new_trailing_ws.name.is_none(),
+        "fresh trailing empty must be unnamed",
+    );
+    assert!(
+        !new_trailing_ws.has_windows(),
+        "fresh trailing empty must hold no windows",
+    );
+
+    // w_target itself now carries the new name.
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&w_target_id)
+            .expect("w_target live")
+            .name
+            .as_deref(),
+        Some("named"),
+        "w_target now carries the new name",
+    );
+
+    // Dormant view (beta): w_target was at beta's trailing slot too, so the dormant fixup
+    // appended a fresh trailing empty.
+    assert_dormant_trailing_fixup_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
+    let _ = alpha;
+}
+
+#[test]
+fn set_workspace_name_under_ewaf_leading_dormant_view_prepends_bookend() {
+    // EWAF variant: position 0 is also a bookend slot. Naming a workspace at position 0 of
+    // both active and dormant views must mint a fresh leading empty in each.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    // Under EWAF, alpha's view is `[W_top_empty, W_src(has window), W_trail_empty]`. The
+    // leading workspace W_top_empty is the rename target.
+    let w_target_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has a leading bookend under EWAF");
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    // Widen w_target's activity set so beta shares it. Bypass `set_workspace_activities`:
+    // we want a hand-rolled beta view with w_target at position 0, and the Add branch would
+    // append it instead.
+    layout
+        .workspaces
+        .get_mut(&w_target_id)
+        .expect("w_target live")
+        .activities = [alpha, beta].into_iter().collect();
+
+    // Construct beta's view with w_target at position 0. EWAF requires 1 or 3+; use 3
+    // with w_target leading and two fresh empties filling the middle and trailing slots.
+    let w_filler_mid = test_mint_empty_for(&mut layout, 0, beta);
+    let w_filler_trail = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![w_target_id, w_filler_mid, w_filler_trail], 1),
+    );
+    layout.verify_invariants();
+
+    let beta_len_before = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap()
+        .len();
+    let alpha_len_before = layout.active_view(&mon_out).ids().len();
+
+    layout.set_workspace_name(
+        "named".to_owned(),
+        Some(WorkspaceReference::Id(w_target_id.get())),
+    );
+
+    // Alpha's active view: w_target was at position 0 → fresh leading empty prepended.
+    let alpha_view_after = layout.active_view(&mon_out).ids().to_vec();
+    assert_eq!(
+        alpha_view_after.len(),
+        alpha_len_before + 1,
+        "active view grew by exactly one fresh leading empty",
+    );
+    assert_ne!(
+        alpha_view_after.first(),
+        Some(&w_target_id),
+        "w_target is no longer alpha's leading slot — a fresh empty was prepended",
+    );
+
+    // Dormant view (beta): w_target was at position 0 → fresh leading empty prepended.
+    let beta_view_after = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap();
+    assert_eq!(
+        beta_view_after.len(),
+        beta_len_before + 1,
+        "EWAF leading share: dormant fixup prepends exactly one leading empty",
+    );
+    assert_ne!(
+        beta_view_after.ids().first(),
+        Some(&w_target_id),
+        "w_target is no longer beta's leading slot — a fresh empty was prepended",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_name_via_id_targets_non_active_monitor() {
+    // Cross-monitor `Id` rename regression pin: `WorkspaceReference::Id` can target a workspace on
+    // a monitor that is *not* `active_monitor_idx`. The bookend mint must anchor to the
+    // workspace's actual monitor, not the active one. Without the fix, this test trips the
+    // per-view bookend assertion on monitor 1 at the next `verify_invariants` call.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    // Focus stays on monitor 0 after AddWindow.
+    assert_eq!(layout.active_monitor_idx, 0, "fixture: focus on monitor 0");
+    let mon0_out = layout.monitors[0].output_id();
+    let mon1_out = layout.monitors[1].output_id();
+
+    // Monitor 1's active view holds a single bookend workspace — the rename target.
+    let w_target_id = layout
+        .active_view(&mon1_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("monitor 1 has a bookend workspace");
+
+    let mon0_view_before = layout.active_view(&mon0_out).ids().to_vec();
+    let mon1_len_before = layout.active_view(&mon1_out).ids().len();
+
+    layout.set_workspace_name(
+        "named".to_owned(),
+        Some(WorkspaceReference::Id(w_target_id.get())),
+    );
+
+    // Monitor 1: w_target was at the trailing slot of a len-1 view → fresh trailing empty
+    // appended.
+    let mon1_view_after = layout.active_view(&mon1_out).ids().to_vec();
+    assert_eq!(
+        mon1_view_after.len(),
+        mon1_len_before + 1,
+        "monitor 1's view grew by exactly one fresh trailing empty",
+    );
+    assert_ne!(
+        mon1_view_after.last(),
+        Some(&w_target_id),
+        "w_target is no longer monitor 1's trailing slot",
+    );
+
+    // Monitor 0: unchanged.
+    let mon0_view_after = layout.active_view(&mon0_out).ids().to_vec();
+    assert_eq!(
+        mon0_view_after, mon0_view_before,
+        "monitor 0's view is untouched by a rename targeted at monitor 1",
+    );
+
+    // The pinned regression: `verify_invariants` runs `assert_view_bookends` per view in
+    // every connected monitor — would trip on monitor 1 without the fix.
+    layout.verify_invariants();
+}
+
+#[test]
 fn switch_activity_focus_follows_active_activity_view() {
     // `Layout::focus()` reads the active activity's view for the active monitor and
     // selects the window via that workspace's own active_column_idx / active_tile_idx.
