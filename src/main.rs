@@ -193,10 +193,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         socket_name.to_string_lossy()
     );
 
-    // Set JIJI_SOCKET for children.
+    // Set JIJI_SOCKET (and NIRI_SOCKET as a backwards-compat alias for
+    // consumers built against the pre-rename env-var name) for children.
     if let Some(ipc) = &state.niri.ipc_server {
         let socket_path = ipc.socket_path.as_deref().unwrap();
         env::set_var(SOCKET_PATH_ENV, socket_path);
+        env::set_var("NIRI_SOCKET", socket_path);
         info!("IPC listening on: {}", socket_path.to_string_lossy());
     }
 
