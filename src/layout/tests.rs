@@ -1774,6 +1774,82 @@ fn check_ops_with_options(
     layout
 }
 
+/// Test-side helper: install a freshly-minted [`Activity`] into the pool and immediately
+/// materialize bookend views on every connected monitor.
+///
+/// Production code creates activities via `Layout::create_activity`, which atomically inserts
+/// and materializes. The lower-level `Activities::insert` bypass is `pub(super)` and reachable
+/// only from this test module; it leaves the new activity without views, violating the
+/// per-activity bookend invariant the next time `verify_invariants` runs. This helper restores
+/// that invariant in a single call.
+#[track_caller]
+fn test_insert_activity(layout: &mut Layout<TestWindow>, activity: super::activity::Activity) {
+    layout.activities.insert(activity);
+    layout.ensure_all_activity_views();
+}
+
+/// Mint a fresh empty workspace tagged exclusively to `activity_id`, bound to `mon_idx`'s
+/// output, and inserted into the pool. Returns the new id. Used by tests that need to
+/// hand-roll dormant views with a proper trailing-empty bookend.
+#[track_caller]
+fn test_mint_empty_for(
+    layout: &mut Layout<TestWindow>,
+    mon_idx: usize,
+    activity_id: ActivityId,
+) -> WorkspaceId {
+    let mon = &layout.monitors[mon_idx];
+    let ws = Workspace::new(
+        &mon.output,
+        HashSet::from([activity_id]),
+        layout.clock.clone(),
+        mon.options.clone(),
+    );
+    let id = ws.id();
+    assert!(
+        layout.workspaces.insert(id, ws).is_none(),
+        "fresh id must be unique",
+    );
+    id
+}
+
+/// Test-side helper: override `activity_id`'s view for `output_id` with a hand-rolled
+/// `new_view`, dropping any materializer-installed bookend workspaces that the override no
+/// longer references so the pool-keys union invariant stays satisfied.
+///
+/// Direct `activity.views_mut().insert(...)` calls from tests that bypass the materializer
+/// leak the materializer's freshly-minted bookend workspaces into the pool — they remain pool
+/// keys but no view references them, tripping `Layout::verify_invariants`' "pool keys must
+/// equal the union of every activity's views over all outputs plus disconnected_workspace_ids"
+/// assertion. This helper performs the override and the cleanup atomically.
+#[track_caller]
+fn test_override_activity_view(
+    layout: &mut Layout<TestWindow>,
+    activity_id: ActivityId,
+    output_id: OutputId,
+    new_view: WorkspaceView,
+) {
+    let materialized: Vec<WorkspaceId> = layout
+        .activities
+        .get(activity_id)
+        .expect("activity must be a live key")
+        .views()
+        .get(&output_id)
+        .map(|v| v.ids().to_vec())
+        .unwrap_or_default();
+    let keep: HashSet<WorkspaceId> = new_view.ids().iter().copied().collect();
+    layout
+        .activities
+        .get_mut(activity_id)
+        .expect("activity must be a live key")
+        .views_mut()
+        .insert(output_id, new_view);
+    for id in materialized {
+        if !keep.contains(&id) {
+            layout.workspaces.remove(&id);
+        }
+    }
+}
+
 #[test]
 fn operations_dont_panic() {
     if std::env::var_os("RUN_SLOW_TESTS").is_none() {
@@ -4602,7 +4678,7 @@ fn build_activities_ipc_mirrors_seed_state() {
     // or `build_focused_activity_ipc` returning the wrong entry.
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta_activity.id();
-    layout.activities.insert(beta_activity);
+    test_insert_activity(&mut layout, beta_activity);
     layout.switch_activity(beta_id);
 
     let ipc = crate::ipc::server::build_activities_ipc(&layout);
@@ -4891,7 +4967,7 @@ fn layout_switch_activity_previous_toggles_active() {
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta_activity.id();
-    layout.activities.insert(beta_activity);
+    test_insert_activity(&mut layout, beta_activity);
 
     // Switch to beta — this populates previous = seed_id.
     layout.switch_activity(beta_id);
@@ -4909,7 +4985,7 @@ fn layout_switch_activity_previous_toggles_active() {
 #[test]
 fn switch_activity_bootstraps_view_on_first_visit() {
     // First switch to a brand-new activity on a monitor that's been connected only for
-    // the seed activity: ensure_active_views must allocate a fresh empty workspace for
+    // the seed activity: ensure_all_activity_views must allocate a fresh empty workspace for
     // beta (no pre-tagged candidates), wrap it in a view, and install it into beta's
     // per-output map.
     let ops = [Op::AddOutput(1)];
@@ -4920,7 +4996,7 @@ fn switch_activity_bootstraps_view_on_first_visit() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     layout.switch_activity(beta_id);
 
@@ -4959,7 +5035,7 @@ fn switch_activity_preserves_seed_dormant_view() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     layout.switch_activity(beta_id);
 
@@ -4980,14 +5056,14 @@ fn switch_activity_preserves_seed_dormant_view() {
 #[test]
 fn switch_activity_reuses_existing_view_entry() {
     // Going back to an activity whose view was already populated must not allocate
-    // another workspace: contains_key hits in ensure_active_views and the loop skips.
+    // another workspace: contains_key hits in ensure_all_activity_views and the loop skips.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
     let seed_id = layout.active_activity_id();
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     layout.switch_activity(beta_id);
     layout.verify_invariants();
@@ -5012,15 +5088,17 @@ fn switch_activity_reuses_existing_view_entry() {
 
 #[test]
 fn switch_activity_with_tagged_workspace_builds_view_from_pool() {
-    // Pre-tag an existing seed-owned workspace with beta. Switching to beta must lift
-    // that workspace into beta's new view instead of allocating a fresh one.
+    // Pre-tag an existing seed-owned workspace with beta BEFORE inserting beta. The
+    // per-activity bookend invariant fires the materializer at insert time; with the
+    // pre-tag already in place, the materializer lifts the tagged workspace into
+    // beta's fresh view instead of allocating a stand-alone fresh empty.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
     let out_id = layout.monitors[0].output_id();
 
+    // Mint beta out-of-pool so we have a known `beta_id` to pre-tag with.
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
 
     // Pick a workspace currently on this monitor (the bottom bookend is always present)
     // and add beta to its activity set. `activities` is pub(super) on Workspace, so this
@@ -5035,9 +5113,16 @@ fn switch_activity_with_tagged_workspace_builds_view_from_pool() {
 
     let pool_size_before = layout.workspaces.len();
 
-    layout.switch_activity(beta_id);
+    // Insert beta and materialize — the materializer's lift branch picks up `pick`.
+    test_insert_activity(&mut layout, beta);
 
-    let beta_view = &layout.activities.active().views()[&out_id];
+    let beta_view = layout
+        .activities
+        .get(beta_id)
+        .expect("beta is live")
+        .views()
+        .get(&out_id)
+        .expect("beta has a view for out_id post-materialize");
     assert!(
         beta_view.ids().contains(&pick),
         "beta's view must include the pre-tagged workspace",
@@ -5063,14 +5148,15 @@ fn switch_activity_with_tagged_workspace_builds_view_from_pool() {
         "lift branch appends one fresh trailing empty so monitor invariants hold",
     );
 
-    // Widened pool-keys union includes `pick` once (HashSet dedupes it across seed's
-    // dormant view and beta's active view).
+    // Switching to beta is now a pure activate-cursor flip; the view is already there.
+    layout.switch_activity(beta_id);
+    assert_eq!(layout.active_activity_id(), beta_id);
     layout.verify_invariants();
 }
 
 #[test]
 fn switch_activity_creates_views_for_all_connected_monitors() {
-    // ensure_active_views loops over every connected monitor. With two outputs,
+    // ensure_all_activity_views loops over every connected monitor. With two outputs,
     // switching to a brand-new activity must populate a view entry for *each*
     // output — not just the first one the loop visits.
     let ops = [Op::AddOutput(1), Op::AddOutput(2)];
@@ -5081,7 +5167,7 @@ fn switch_activity_creates_views_for_all_connected_monitors() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     layout.switch_activity(beta_id);
 
@@ -5090,7 +5176,7 @@ fn switch_activity_creates_views_for_all_connected_monitors() {
     assert_eq!(
         beta_views.len(),
         2,
-        "ensure_active_views must cover both connected outputs",
+        "ensure_all_activity_views must cover both connected outputs",
     );
     assert!(
         beta_views.contains_key(&out1),
@@ -5107,23 +5193,24 @@ fn switch_activity_creates_views_for_all_connected_monitors() {
 #[test]
 fn switch_activity_tagged_workspace_output_affinity() {
     // Two outputs: output1 has no pre-tagged candidate for beta (forces the
-    // fresh-allocation branch in ensure_active_views), while output2 has one
+    // fresh-allocation branch in `ensure_all_activity_views`), while output2 has one
     // pre-tagged workspace (forces the lift-from-pool branch).
     // Assertions:
     //   - output2's view contains the pre-tagged id (no fresh allocation there)
     //   - output1's view holds one freshly-minted id (not in pool_ids_before)
-    //   - pool grows by exactly 1 (the one fresh workspace for output1)
+    //   - pool grows by exactly 2 (out1's fresh empty + out2's lift-branch trailing empty)
     let ops = [Op::AddOutput(1), Op::AddOutput(2)];
     let mut layout = check_ops(ops);
     let out1 = layout.monitors[0].output_id();
     let out2 = layout.monitors[1].output_id();
     assert_ne!(out1, out2);
 
+    // Mint beta out-of-pool so we have a known `beta_id` to pre-tag with.
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
 
-    // Tag a workspace bound to out2 (only) with beta.
+    // Tag a workspace bound to out2 (only) with beta BEFORE inserting beta — the
+    // per-activity bookend materializer fires at insert and consumes the pre-tag.
     let pick = layout
         .workspaces
         .values()
@@ -5140,12 +5227,12 @@ fn switch_activity_tagged_workspace_output_affinity() {
     let pool_ids_before: HashSet<WorkspaceId> = layout.workspaces.keys().copied().collect();
     let pool_size_before = pool_ids_before.len();
 
+    test_insert_activity(&mut layout, beta);
     layout.switch_activity(beta_id);
 
     let beta_views = layout.activities.active().views();
 
-    // output2: must contain the pre-tagged id with a fresh trailing empty appended
-    // (lift branch — see `ensure_active_views`).
+    // output2: must contain the pre-tagged id with a fresh trailing empty appended (lift branch).
     let out2_view = beta_views
         .get(&out2)
         .expect("beta must have a view for out2");
@@ -5195,7 +5282,7 @@ fn switch_activity_lift_branch_appends_bottom_empty_for_named_tagged_workspace()
     // The lift branch must allocate a fresh trailing empty even when the only
     // pre-tagged candidate is named — otherwise `Monitor::verify_invariants` trips
     // "monitor must have an empty workspace in the end" (monitor.rs:1724) the moment
-    // `Layout::verify_invariants` walks the new view. Pre-fix `ensure_active_views`
+    // `Layout::verify_invariants` walks the new view. Pre-fix `ensure_all_activity_views`
     // produced `[named_pick]` (len=1) and panicked on the very first invariant chain.
     let ops = [
         Op::AddOutput(1),
@@ -5210,9 +5297,9 @@ fn switch_activity_lift_branch_appends_bottom_empty_for_named_tagged_workspace()
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
 
-    // Tag the named workspace with beta.
+    // Pre-tag the named workspace with beta BEFORE the activity is inserted, so the
+    // materializer's lift branch picks it up at insert time.
     let pick = layout
         .workspaces
         .values()
@@ -5226,6 +5313,7 @@ fn switch_activity_lift_branch_appends_bottom_empty_for_named_tagged_workspace()
         .activities
         .insert(beta_id);
 
+    test_insert_activity(&mut layout, beta);
     layout.switch_activity(beta_id);
 
     let beta_view = &layout.activities.active().views()[&out_id];
@@ -5283,7 +5371,6 @@ fn switch_activity_lift_branch_named_tagged_with_ewaf_adds_top_and_bottom_empty(
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
 
     let pick = layout
         .workspaces
@@ -5298,6 +5385,7 @@ fn switch_activity_lift_branch_named_tagged_with_ewaf_adds_top_and_bottom_empty(
         .activities
         .insert(beta_id);
 
+    test_insert_activity(&mut layout, beta);
     layout.switch_activity(beta_id);
 
     let beta_view = &layout.activities.active().views()[&out_id];
@@ -5335,7 +5423,7 @@ fn switch_activity_lift_branch_named_tagged_with_ewaf_adds_top_and_bottom_empty(
 #[test]
 fn switch_activity_lift_branch_reads_ewaf_from_monitor_not_layout() {
     // Per-monitor `Rc<Options>` discriminator: the global `self.options` keeps EWAF
-    // disabled, but the monitor's `layout_config` flips it on. `ensure_active_views`
+    // disabled, but the monitor's `layout_config` flips it on. `ensure_all_activity_views`
     // must read `monitors[i].options.layout.empty_workspace_above_first`, not
     // `self.options.layout.empty_workspace_above_first`. If it reads the global, the
     // view comes back as `[named_pick, bottom_empty]` (len=2) and trips
@@ -5375,7 +5463,6 @@ fn switch_activity_lift_branch_reads_ewaf_from_monitor_not_layout() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
 
     let pick = layout
         .workspaces
@@ -5390,6 +5477,7 @@ fn switch_activity_lift_branch_reads_ewaf_from_monitor_not_layout() {
         .activities
         .insert(beta_id);
 
+    test_insert_activity(&mut layout, beta);
     layout.switch_activity(beta_id);
 
     let beta_view = &layout.activities.active().views()[&out_id];
@@ -5416,7 +5504,7 @@ fn switch_activity_lift_branch_reads_ewaf_from_monitor_not_layout() {
 fn switch_activity_lift_branch_per_monitor_ewaf_two_monitors_mixed() {
     // Two monitors: out1 has EWAF on (via per-monitor layout_config), out2 has EWAF off
     // (uses default options). Both have a named workspace pre-tagged with beta. Structural
-    // risk: if `ensure_active_views` hoists `mon_options` outside the loop and reads the
+    // risk: if `ensure_all_activity_views` hoists `mon_options` outside the loop and reads the
     // first monitor's value for all monitors, the second monitor's view is built with the
     // wrong bookend discipline — either over-bookending (3 for out2 when 2 is correct) or
     // under-bookending (2 for out1 when 3 is correct, tripping monitor.rs:1746 "1 or 3+").
@@ -5468,9 +5556,8 @@ fn switch_activity_lift_branch_per_monitor_ewaf_two_monitors_mixed() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
 
-    // Tag ws1 (bound to out1) and ws2 (bound to out2) with beta.
+    // Tag ws1 (bound to out1) and ws2 (bound to out2) with beta BEFORE inserting beta.
     let pick1 = layout
         .workspaces
         .values()
@@ -5496,6 +5583,7 @@ fn switch_activity_lift_branch_per_monitor_ewaf_two_monitors_mixed() {
         .activities
         .insert(beta_id);
 
+    test_insert_activity(&mut layout, beta);
     layout.switch_activity(beta_id);
 
     let beta_views = layout.activities.active().views();
@@ -5553,7 +5641,7 @@ fn switch_activity_lift_branch_sticky_workspace_is_lifted() {
     // branch, producing a single empty view instead of [sticky_ws, bottom_empty].
     //
     // Note: we use direct pool mutation (`is_sticky` is pub(super)) instead of
-    // `create_activity` to isolate the `ensure_active_views` lift-branch path from the
+    // `create_activity` to isolate the `ensure_all_activity_views` lift-branch path from the
     // `create_activity` auto-tagging path.
     let ops = [
         Op::AddOutput(1),
@@ -5568,10 +5656,10 @@ fn switch_activity_lift_branch_sticky_workspace_is_lifted() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
 
-    // Mark ws1 as sticky and tag it with beta — simulating what create_activity does
-    // for sticky workspaces, but exercising ensure_active_views in isolation.
+    // Mark ws1 as sticky and tag it with beta BEFORE inserting beta — simulating what
+    // `create_activity` does for sticky workspaces, but exercising the materializer's lift
+    // branch in isolation by pre-staging the tag.
     let pick = layout
         .workspaces
         .values()
@@ -5589,6 +5677,7 @@ fn switch_activity_lift_branch_sticky_workspace_is_lifted() {
 
     let pool_size_before = layout.workspaces.len();
 
+    test_insert_activity(&mut layout, beta);
     layout.switch_activity(beta_id);
 
     let beta_view = &layout.activities.active().views()[&out_id];
@@ -5618,6 +5707,333 @@ fn switch_activity_lift_branch_sticky_workspace_is_lifted() {
     layout.verify_invariants();
 }
 
+// --- Per-activity bookend invariant: every (activity, connected-monitor) pair holds a
+// bookended `WorkspaceView`. The materializer runs at create_activity / add_output /
+// switch / view-mutator sites; the verifier enforces it on every refresh.
+
+#[test]
+fn create_activity_materializes_bookend_views_on_all_monitors() {
+    // `Layout::create_activity` runs the per-activity materializer, so the newly-minted
+    // activity must hold a fresh-empty trailing-empty view on every connected monitor
+    // immediately — no `switch_activity` needed.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let out1 = layout.monitors[0].output_id();
+    let out2 = layout.monitors[1].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let beta_views = layout.activities.get(beta).expect("beta live").views();
+    assert_eq!(
+        beta_views.len(),
+        2,
+        "materializer must install a view per connected monitor at create-time",
+    );
+    let v1 = beta_views.get(&out1).expect("view for out1");
+    let v2 = beta_views.get(&out2).expect("view for out2");
+    assert_eq!(
+        v1.len(),
+        1,
+        "fresh branch yields a single trailing-empty bookend on out1"
+    );
+    assert_eq!(
+        v2.len(),
+        1,
+        "fresh branch yields a single trailing-empty bookend on out2"
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn create_activity_with_ewaf_materializes_trailing_empty_at_len_one() {
+    // Under EWAF the materializer's fresh branch still produces a single trailing-empty
+    // view (len == 1 is the EWAF "1 or 3+ length rule" allowed singleton). It does NOT
+    // prepend a leading empty for the fresh branch — the leading-empty rule only fires
+    // when there's at least one lifted body workspace to bookend.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops_with_options(options, ops);
+    let out_id = layout.monitors[0].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let beta_view = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&out_id)
+        .expect("view for out_id");
+    assert_eq!(
+        beta_view.len(),
+        1,
+        "fresh branch under EWAF still yields a single trailing-empty bookend (len==1 \
+         singleton allowed by the EWAF 1-or-3+ rule)",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_remaining_activities_keep_bookends() {
+    // Removing one runtime activity that holds an exclusive-empty workspace destroys that
+    // workspace and the activity. The materializer then re-runs over the remaining
+    // activities; every surviving activity still has a bookend view per connected monitor.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    let gamma = layout.create_activity("Gamma".to_owned()).expect("create");
+
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("remove beta");
+
+    assert!(!layout.activities.contains(beta));
+    let out_id = layout.monitors[0].output_id();
+    for (act, name) in [(alpha, "alpha"), (gamma, "gamma")] {
+        let view = layout
+            .activities
+            .get(act)
+            .expect("{name} must remain live")
+            .views()
+            .get(&out_id)
+            .unwrap_or_else(|| panic!("{name} must hold a bookend view on out_id"));
+        assert!(
+            !view.ids().is_empty(),
+            "{name}'s view is non-empty under the bookend invariant",
+        );
+    }
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn add_output_materializes_views_for_every_existing_activity() {
+    // Connecting a new monitor must materialize bookend views on the new output for EVERY
+    // activity, not just the active one.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    let gamma = layout.create_activity("Gamma".to_owned()).expect("create");
+
+    // Connect a second monitor.
+    check_ops_on_layout(&mut layout, [Op::AddOutput(2)]);
+
+    let out2 = layout.monitors[1].output_id();
+    for act in [beta, gamma] {
+        assert!(
+            layout
+                .activities
+                .get(act)
+                .expect("activity live")
+                .views()
+                .contains_key(&out2),
+            "connecting a new monitor must materialize a view for every existing activity",
+        );
+    }
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn disconnect_reconnect_cycle_preserves_dormant_bookend_on_other_activities() {
+    // Two monitors, three activities. Disconnect one — the active activity's view for that
+    // output is evicted; dormant activities keep their (now-stale) views as
+    // disconnected-output dormant views, validated by the disconnected-output bookend pass.
+    // Reconnecting restores the active activity's view.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let out1 = layout.monitors[0].output_id();
+
+    let _beta = layout.create_activity("Beta".to_owned()).expect("create");
+    let _gamma = layout.create_activity("Gamma".to_owned()).expect("create");
+
+    // Disconnect output1.
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
+
+    // The active activity's view for out1 is evicted; the disconnected-output bookend pass
+    // validates dormant views on out1 (they survived per the spec's posture).
+    assert!(!layout.activities.active().views().contains_key(&out1));
+    layout.verify_invariants();
+
+    // Reconnect — active activity regains a view for out1.
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+    let out1_post = layout
+        .monitors
+        .iter()
+        .find(|m| m.output_name() == "output1");
+    assert!(out1_post.is_some(), "output1 must be connected again");
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_reinstates_view_after_single_entry_drop_in_dormant_activity() {
+    // Set(W, [alpha]) where W previously had {alpha, beta} and beta's dormant view's single
+    // non-bookend entry was W. The single-entry drop triggers the materializer to reinstall
+    // a bookend on beta's view — `dropped_any_view_entry` covers dormant drops too.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    let target_ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has ws");
+
+    layout
+        .workspaces
+        .get_mut(&target_ws_id)
+        .expect("live")
+        .activities = [alpha, beta].into_iter().collect();
+    // Beta's view = [target] alone — explicitly drop the materialized bookend. The override
+    // helper cleans up the orphaned bookend from the pool.
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![target_ws_id], 0),
+    );
+
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[ActivityReferenceArg::Id(alpha.get())],
+        )
+        .expect("set must succeed");
+
+    // Beta's view: the materializer re-installed a fresh bookend after the single-entry drop.
+    let beta_view = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta's view re-installed by the materializer after single-entry drop");
+    assert_eq!(beta_view.len(), 1, "fresh bookend");
+    assert!(
+        !beta_view.ids().contains(&target_ws_id),
+        "target dropped from beta"
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn ensure_all_activity_views_no_op_when_monitors_empty() {
+    // `ensure_all_activity_views` early-returns when monitors is empty — no view fabrication,
+    // no pool growth. The no-monitors-empty branch of `verify_invariants` requires every
+    // activity's views map to be empty in that state.
+    let mut layout = Layout::<TestWindow>::default();
+    let alpha = layout.active_activity_id();
+    let pool_size_before = layout.workspaces.len();
+
+    // No monitors connected.
+    assert!(layout.monitors.is_empty());
+
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    test_insert_activity(&mut layout, beta_activity);
+
+    // Both activities' views remain empty (materializer is a no-op).
+    assert!(layout.activities.get(alpha).unwrap().views().is_empty());
+    assert_eq!(
+        layout.workspaces.len(),
+        pool_size_before,
+        "monitors-empty materializer does not allocate",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn add_window_to_active_workspace_maintains_dormant_view_bookend() {
+    // Cross-activity bookend maintenance: a workspace shared between alpha (active) and
+    // beta (dormant) where beta's view has it as the trailing entry. When a window opens
+    // into the workspace via the active path, the dormant_view_bookend_fixup must append
+    // a fresh trailing empty to beta's view too.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    let w_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha has a workspace");
+    // `SetWorkspaceActivities` from {alpha} → {alpha, beta} adds beta. The Add branch
+    // appends w_id to beta's view (which currently holds only its materialized bookend),
+    // yielding beta's view = [beta_bookend, w_id]. w_id is the trailing entry.
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(w_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    let beta_view_before = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta has view")
+        .clone();
+    assert_eq!(beta_view_before.ids().last(), Some(&w_id));
+
+    // Add a window via the active path.
+    let win = TestWindow::new(TestWindowParams::new(7));
+    layout.add_window(
+        win,
+        AddWindowTarget::Auto,
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::Smart,
+    );
+
+    // Beta's view must have grown: the trailing entry is no longer w_id (now non-empty), a
+    // fresh empty was appended after it.
+    let beta_view_after = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta has view");
+    assert!(
+        beta_view_after.len() > beta_view_before.len(),
+        "dormant_view_bookend_fixup must have extended beta's view past w_id",
+    );
+    assert_ne!(
+        beta_view_after.ids().last(),
+        Some(&w_id),
+        "w_id is no longer the trailing entry of beta's view",
+    );
+
+    layout.verify_invariants();
+}
+
 #[test]
 fn switch_activity_focus_follows_active_activity_view() {
     // `Layout::focus()` reads the active activity's view for the active monitor and
@@ -5638,7 +6054,7 @@ fn switch_activity_focus_follows_active_activity_view() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     layout.switch_activity(beta_id);
     assert_eq!(layout.active_activity_id(), beta_id);
@@ -5670,7 +6086,7 @@ fn switch_activity_preserves_active_monitor_idx_in_range() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     layout.switch_activity(beta_id);
 
@@ -5721,7 +6137,7 @@ fn switch_activity_view_active_remains_in_ids_after_switch() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     layout.switch_activity(beta_id);
     layout.verify_invariants();
@@ -5869,7 +6285,7 @@ fn switch_activity_snaps_in_flight_animation_and_proceeds() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     layout.switch_activity(beta_id);
 
@@ -6553,29 +6969,38 @@ fn workspaces_with_activity_filters_by_membership() {
     let alpha = layout.active_activity_id();
     let mon_out = layout.monitors[0].output_id();
 
-    // Capture all workspace ids on this output before any mutation so we
-    // can deterministically designate one for beta (smallest id by value)
-    // while leaving the remainder as alpha-only.
+    // Capture every alpha-tagged workspace id on this output before any mutation. We then
+    // re-stamp exactly one to be beta-only so the alpha filter has a known size.
     let mut on_output: Vec<WorkspaceId> = layout
         .workspaces
         .values()
-        .filter(|ws| ws.output_id() == Some(&mon_out))
+        .filter(|ws| ws.output_id() == Some(&mon_out) && ws.activities().contains(&alpha))
         .map(|ws| ws.id())
         .collect();
     on_output.sort_by_key(|id| id.get());
     assert!(
         on_output.len() >= 2,
-        "need at least two workspaces on the output for a non-vacuous test"
+        "need at least two alpha-tagged workspaces on the output for a non-vacuous test"
     );
 
-    // Mint a distinct activity and install it in the pool (test-only path).
+    // Mint a distinct activity and install it in the pool. The materializer mints one
+    // fresh empty-bookend workspace for beta on this monitor as a side effect — we account
+    // for it in the beta filter assertion below.
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.insert(beta_activity);
+    test_insert_activity(&mut layout, beta_activity);
+    let beta_materialized_bookend_id = layout
+        .activities()
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("materializer installed beta's view")
+        .ids()[0];
 
-    // Stamp the first workspace (lowest id) with beta-only; leave the rest
-    // as alpha-only. Direct field mutation is legal here: tests live in
-    // the `super` module and `Workspace::activities` is `pub(super)`.
+    // Stamp the first alpha-tagged workspace (lowest id) with beta-only; leave the rest as
+    // alpha-only. Direct field mutation is legal here: tests live in the `super` module and
+    // `Workspace::activities` is `pub(super)`.
     let beta_ws_id = on_output[0];
     let expected_alpha_ids: HashSet<WorkspaceId> = on_output[1..].iter().copied().collect();
     layout
@@ -6599,8 +7024,9 @@ fn workspaces_with_activity_filters_by_membership() {
         .collect();
     assert_eq!(
         beta_ids,
-        HashSet::from([beta_ws_id]),
-        "beta filter on this output must yield exactly the beta-stamped workspace",
+        HashSet::from([beta_ws_id, beta_materialized_bookend_id]),
+        "beta filter on this output must include the beta-stamped workspace AND the \
+         materializer's fresh bookend",
     );
 
     layout.verify_invariants();
@@ -6700,14 +7126,14 @@ fn layout_activity_is_urgent_aggregates_workspace_urgency() {
     // with both seed and beta — a shared workspace.
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta_activity.id();
-    layout.activities.insert(beta_activity);
+    test_insert_activity(&mut layout, beta_activity);
 
     // Mint and insert a third activity `gamma` that does NOT get tagged on
     // any workspace — its aggregate urgency must remain `false` no matter
     // what happens on the shared workspace.
     let gamma_activity = super::activity::Activity::new_runtime("gamma".to_owned());
     let gamma_id = gamma_activity.id();
-    layout.activities.insert(gamma_activity);
+    test_insert_activity(&mut layout, gamma_activity);
 
     // Find the workspace holding the window and tag it with seed + beta.
     let ws_id = layout
@@ -6836,7 +7262,7 @@ fn ipc_workspace_snapshot_hidden_workspace_has_idx_zero_and_flag_false() {
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.insert(beta_activity);
+    test_insert_activity(&mut layout, beta_activity);
 
     // Stamp the lowest-id workspace with beta-only so it leaves the active
     // (seed) activity's membership.
@@ -6996,7 +7422,7 @@ fn ipc_workspace_snapshot_mixed_visibility_preserves_pass_disjointness() {
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.insert(beta_activity);
+    test_insert_activity(&mut layout, beta_activity);
 
     // ws_b: beta-only (hidden, pass 2).
     // ws_c: alpha + beta (visible via alpha, pass 1).
@@ -7723,7 +8149,7 @@ fn remove_activity_exclusive_workspace_with_windows_errs() {
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.insert(beta_activity);
+    test_insert_activity(&mut layout, beta_activity);
 
     // Pick the window-carrying workspace and flip its activities set to
     // {beta} exclusively.
@@ -7770,7 +8196,7 @@ fn remove_activity_exclusive_named_workspace_errs() {
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.insert(beta_activity);
+    test_insert_activity(&mut layout, beta_activity);
 
     // Find the named workspace and flip it to exclusively beta.
     let named_ws_id = layout
@@ -7811,14 +8237,14 @@ fn remove_activity_runtime_non_active_with_shared_only_prunes() {
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.insert(beta_activity);
+    test_insert_activity(&mut layout, beta_activity);
 
     // Union beta into the alpha workspace (making it shared {alpha, beta}).
     let shared_ws_id = layout
         .workspaces
         .values()
+        .find(|ws| ws.activities() == &HashSet::from([alpha]))
         .map(|ws| ws.id())
-        .next()
         .expect("AddOutput allocated a seed workspace");
     layout
         .workspaces
@@ -7834,10 +8260,13 @@ fn remove_activity_runtime_non_active_with_shared_only_prunes() {
 
     assert_eq!(layout.activities.len(), 1, "beta dropped from pool");
     assert!(!layout.activities.contains(beta), "beta no longer live");
+    // The shared workspace is retained (only its beta tag is pruned). The materializer's
+    // exclusive-to-beta bookend, though, IS destroyed by `remove_activity` (it's an empty
+    // unnamed exclusive of the removed activity) — pool drops by exactly one.
     assert_eq!(
         layout.workspaces.len(),
-        pool_size_before,
-        "shared workspace is retained, not destroyed",
+        pool_size_before - 1,
+        "shared workspace is retained; only beta's materialized bookend is destroyed",
     );
     let shared_ws = layout
         .workspaces
@@ -7859,12 +8288,13 @@ fn remove_activity_runtime_non_active_destroys_empty_unnamed_exclusives() {
     // activity's views). Baseline pool size returns to pre-allocation.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
+    // Capture the baseline BEFORE inserting beta, so it doesn't include the materializer's
+    // freshly-minted exclusive bookend (which is also destroyed by `remove_activity(beta)`).
+    let pool_size_baseline = layout.workspaces.len();
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.insert(beta_activity);
-
-    let pool_size_baseline = layout.workspaces.len();
+    test_insert_activity(&mut layout, beta_activity);
 
     // Allocate a fresh exclusive unnamed workspace tagged to beta.
     let mon_out = layout.monitors[0].output_id();
@@ -7902,7 +8332,8 @@ fn remove_activity_runtime_non_active_destroys_empty_unnamed_exclusives() {
     assert_eq!(
         layout.workspaces.len(),
         pool_size_baseline,
-        "workspace count must return to pre-allocation baseline",
+        "workspace count must return to pre-allocation baseline (materializer's exclusive \
+         bookend was also exclusive-empty-unnamed and is also destroyed)",
     );
 
     layout.verify_invariants();
@@ -8104,7 +8535,7 @@ fn remove_activity_error_precedence_windows_beats_named() {
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.insert(beta_activity);
+    test_insert_activity(&mut layout, beta_activity);
 
     // Flip the named workspace to exclusively beta.
     let named_ws_id = layout
@@ -8171,11 +8602,11 @@ fn remove_activity_view_patching_both_branches() {
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.insert(beta_activity);
+    test_insert_activity(&mut layout, beta_activity);
 
     let gamma_activity = super::activity::Activity::new_runtime("gamma".to_owned());
     let gamma = gamma_activity.id();
-    layout.activities.insert(gamma_activity);
+    test_insert_activity(&mut layout, gamma_activity);
 
     // Allocate an exclusive unnamed empty workspace for beta.
     let mon_out = layout.monitors[0].output_id();
@@ -8211,12 +8642,12 @@ fn remove_activity_view_patching_both_branches() {
         .insert(1, beta_ws_id);
 
     // Drop branch: give gamma a dormant view whose sole entry is beta_ws_id.
-    layout
-        .activities
-        .get_mut(gamma)
-        .expect("gamma must be a live activity")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![beta_ws_id], 0));
+    test_override_activity_view(
+        &mut layout,
+        gamma,
+        mon_out.clone(),
+        WorkspaceView::new(vec![beta_ws_id], 0),
+    );
 
     // Sanity: both branches are populated before removal.
     assert_eq!(
@@ -8248,17 +8679,26 @@ fn remove_activity_view_patching_both_branches() {
         "alpha view must have beta_ws_id removed (patch branch)",
     );
 
-    // Drop branch result: gamma's view entry for the output must be gone
-    // because its only entry was the destroyed workspace.
+    // Drop branch result: gamma's old view entry for the output (the single beta_ws_id) was
+    // dropped by the destroy_workspaces_cross_activity retain closure. The per-activity
+    // bookend materializer then runs (because `remove_activity` calls it on success), so
+    // gamma ends up with a freshly-minted single-bookend view — NOT the original
+    // pointing at beta_ws_id.
+    let gamma_view = layout
+        .activities
+        .get(gamma)
+        .expect("gamma still live")
+        .views()
+        .get(&mon_out)
+        .expect("gamma's view re-materialized by the per-activity bookend invariant");
     assert!(
-        layout
-            .activities
-            .get(gamma)
-            .expect("gamma still live")
-            .views()
-            .get(&mon_out)
-            .is_none(),
-        "gamma view entry for output must be dropped (drop branch)",
+        !gamma_view.ids().contains(&beta_ws_id),
+        "gamma's view must no longer reference the destroyed beta_ws_id (drop branch)",
+    );
+    assert_eq!(
+        gamma_view.len(),
+        1,
+        "re-materialized view holds exactly one fresh bookend id",
     );
 
     assert!(!layout.activities.contains(beta), "beta removed");
@@ -8273,7 +8713,7 @@ fn remove_activity_view_patching_both_branches() {
 #[test]
 fn remove_activity_active_with_exclusive_workspace_cascades_and_destroys() {
     // Compound path: active activity with an exclusive unnamed-empty workspace.
-    // switch_activity → ensure_active_views allocates an exclusive workspace for
+    // switch_activity → ensure_all_activity_views allocates an exclusive workspace for
     // beta on the connected output. Both the cascade (active → previous) and
     // exclusive-ws destruction must complete in a single `remove_activity` call.
     let ops = [Op::AddOutput(1)];
@@ -8294,13 +8734,13 @@ fn remove_activity_active_with_exclusive_workspace_cascades_and_destroys() {
         .create_activity("Beta".to_owned())
         .expect("create beta");
 
-    // Switch so beta is active; ensure_active_views allocates an unnamed-empty
+    // Switch so beta is active; ensure_all_activity_views allocates an unnamed-empty
     // exclusive workspace for beta on the output.
     layout.switch_activity(beta);
     assert_eq!(layout.active_activity_id(), beta);
     assert_eq!(layout.activities.previous_id(), Some(alpha));
 
-    // Identify the exclusive workspace that ensure_active_views created for beta.
+    // Identify the exclusive workspace that ensure_all_activity_views created for beta.
     let beta_ws_id = layout
         .workspaces
         .values()
@@ -8310,7 +8750,7 @@ fn remove_activity_active_with_exclusive_workspace_cascades_and_destroys() {
                 && !ws.has_windows()
                 && ws.name().is_none()
         })
-        .expect("ensure_active_views must have created an exclusive empty workspace for beta")
+        .expect("ensure_all_activity_views must have created an exclusive empty workspace for beta")
         .id();
 
     let pool_size_before = layout.workspaces.len();
@@ -8358,12 +8798,13 @@ fn remove_activity_multiple_exclusive_workspaces_all_destroyed() {
     // path through the destroy_ids loop). Both must be removed from the pool.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
+    // Capture the baseline BEFORE inserting beta, so it doesn't include the materializer's
+    // exclusive bookend (also destroyed by `remove_activity(beta)`).
+    let pool_size_baseline = layout.workspaces.len();
 
     let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
     let beta = beta_activity.id();
-    layout.activities.insert(beta_activity);
-
-    let pool_size_baseline = layout.workspaces.len();
+    test_insert_activity(&mut layout, beta_activity);
 
     let output = layout.monitors[0].output.clone();
 
@@ -8392,10 +8833,11 @@ fn remove_activity_multiple_exclusive_workspaces_all_destroyed() {
         layout.workspaces.insert(beta_ws2_id, beta_ws2).is_none(),
         "beta_ws2 id must be unique",
     );
+    // pool has: baseline (alpha's view) + 1 (materializer's beta bookend) + 2 (beta_ws1, beta_ws2)
     assert_eq!(
         layout.workspaces.len(),
-        pool_size_baseline + 2,
-        "two workspaces allocated",
+        pool_size_baseline + 3,
+        "two exclusive workspaces plus the materializer's beta bookend",
     );
 
     layout
@@ -8659,15 +9101,12 @@ fn destroy_workspaces_cross_activity_patches_other_activity_views() {
     // remains {Alpha} (exclusive), so the guard clears and destroy proceeds.
     // The retain closure patches Beta's view because it iterates every activity's
     // views regardless of workspace membership.
-    layout
-        .activities
-        .get_mut(beta_id)
-        .expect("beta must exist")
-        .views_mut()
-        .insert(
-            mon_out.clone(),
-            WorkspaceView::new(vec![doomed_id, spare_id], 0),
-        );
+    test_override_activity_view(
+        &mut layout,
+        beta_id,
+        mon_out.clone(),
+        WorkspaceView::new(vec![doomed_id, spare_id], 0),
+    );
 
     // Call destroy with `doomed_id`. Active activity's view contains it at
     // a non-terminal position (pos 1) and has multiple entries — it must be
@@ -8726,12 +9165,12 @@ fn destroy_workspaces_cross_activity_drops_single_entry_view() {
     // remains {Alpha} (exclusive), so the guard clears and destroy proceeds.
     // The retain closure patches Beta's view because it iterates every activity's
     // views regardless of workspace membership.
-    layout
-        .activities
-        .get_mut(beta_id)
-        .expect("beta")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![doomed_id], 0));
+    test_override_activity_view(
+        &mut layout,
+        beta_id,
+        mon_out.clone(),
+        WorkspaceView::new(vec![doomed_id], 0),
+    );
 
     Layout::<TestWindow>::destroy_workspaces_cross_activity(
         &mut layout.activities,
@@ -8950,15 +9389,12 @@ fn destroy_workspaces_cross_activity_skips_shared_id_keeps_pool_and_views_intact
             .bind_output(&mon_output);
         id
     };
-    layout
-        .activities
-        .get_mut(beta_id)
-        .expect("beta must exist")
-        .views_mut()
-        .insert(
-            mon_out.clone(),
-            WorkspaceView::new(vec![shared_id, beta_spare_id], 0),
-        );
+    test_override_activity_view(
+        &mut layout,
+        beta_id,
+        mon_out.clone(),
+        WorkspaceView::new(vec![shared_id, beta_spare_id], 0),
+    );
 
     // Snapshot the shapes that must not change after the (no-op) destroy.
     let alpha_view_before: Vec<_> = layout.active_view(&mon_out).ids().to_vec();
@@ -9174,15 +9610,12 @@ fn take_workspace_ids_doomed_flushed_from_other_activity_view_on_remove_output()
     // remains {Alpha} (exclusive), so the guard clears and destroy proceeds.
     // The retain closure patches Beta's view because it iterates every activity's
     // views regardless of workspace membership.
-    layout
-        .activities
-        .get_mut(beta_id)
-        .expect("beta must exist")
-        .views_mut()
-        .insert(
-            mon_out.clone(),
-            WorkspaceView::new(vec![beta_spare_id, e_bottom_id], 0),
-        );
+    test_override_activity_view(
+        &mut layout,
+        beta_id,
+        mon_out.clone(),
+        WorkspaceView::new(vec![beta_spare_id, e_bottom_id], 0),
+    );
 
     // Disconnect the output. `remove_output` → `take_workspace_ids` returns
     // `e_bottom_id` as a doomed bookend and must flush it through
@@ -9193,6 +9626,11 @@ fn take_workspace_ids_doomed_flushed_from_other_activity_view_on_remove_output()
     assert!(
         !layout.workspace_pool().contains_key(&e_bottom_id),
         "doomed bookend must be gone from the pool after remove_output",
+    );
+    // beta_spare_id was also empty and unnamed — it must be doomed and gone.
+    assert!(
+        !layout.workspace_pool().contains_key(&beta_spare_id),
+        "beta's empty unnamed spare must be doomed and removed from the pool after remove_output",
     );
     // Beta's view must have e_bottom_id patched out.
     let beta_view_ids: Vec<_> = layout
@@ -9207,6 +9645,93 @@ fn take_workspace_ids_doomed_flushed_from_other_activity_view_on_remove_output()
         !beta_view_ids.contains(&e_bottom_id),
         "beta's view must not contain the doomed bookend after remove_output",
     );
+    layout.verify_invariants();
+}
+
+// `remove_output` no-monitors-left: a dormant activity's view that contains a
+// window-bearing workspace must land that workspace in `disconnected_workspace_ids`
+// (the "kept" branch), not in `doomed_ids`. Pin that (a) the workspace survives in
+// the pool, (b) its options are reset to layout-root, and (c) `unbind_output` was
+// called (C1 fix — dormant workspaces were previously missing this).
+#[test]
+fn remove_last_output_classifies_dormant_view_kept_leg() {
+    // One output. Alpha's view: `[W1 (active, window-bearing), E_bottom]`.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let mon_out = layout.monitors[0].output_id();
+    let mon_output = layout.monitors[0].output.clone();
+
+    // Create Beta. The materializer gives it a fresh bookend view for output1.
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    // Find the window-bearing workspace in alpha's active view.
+    let alpha_view = layout.active_view(&mon_out).ids().to_vec();
+    let w1_id = alpha_view[0];
+    assert!(
+        layout
+            .workspaces
+            .get(&w1_id)
+            .expect("w1 in pool")
+            .has_windows(),
+        "precondition: w1 must be window-bearing",
+    );
+
+    // Widen w1's activities to include Beta so the pool entry carries {Alpha, Beta}.
+    layout
+        .workspaces
+        .get_mut(&w1_id)
+        .expect("w1 in pool")
+        .activities
+        .insert(beta_id);
+
+    // Hand-roll Beta's view: [w1_id, beta_bookend] — w1_id is window-bearing and at
+    // position 0 (non-trailing), bookend is trailing. This satisfies the bookend
+    // invariant while placing a window-bearing workspace in Beta's dormant view.
+    let beta_bookend_id = test_mint_empty_for(&mut layout, 0, beta_id);
+    test_override_activity_view(
+        &mut layout,
+        beta_id,
+        mon_out.clone(),
+        WorkspaceView::new(vec![w1_id, beta_bookend_id], 1),
+    );
+
+    // Disconnect the only output.
+    layout.remove_output(&mon_output);
+
+    // w1 is window-bearing — it must have survived into disconnected_workspace_ids.
+    assert!(
+        layout.disconnected_workspace_ids.contains(&w1_id),
+        "window-bearing dormant workspace must join disconnected_workspace_ids on remove_output",
+    );
+    assert!(
+        layout.workspace_pool().contains_key(&w1_id),
+        "window-bearing dormant workspace must remain in the pool",
+    );
+
+    // Options must have been reset to layout-root (same as active-view kept ids).
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&w1_id)
+            .expect("w1 in pool")
+            .base_options,
+        layout.options,
+        "kept dormant workspace options must be reset to layout-root after remove_output",
+    );
+
+    // beta_bookend was empty and unnamed — it must be doomed and removed.
+    assert!(
+        !layout.workspace_pool().contains_key(&beta_bookend_id),
+        "empty unnamed dormant bookend must be doomed and gone after remove_output",
+    );
+
     layout.verify_invariants();
 }
 
@@ -9273,7 +9798,7 @@ fn seed_two_activities_with_one_window_each() -> (Layout<TestWindow>, ActivityId
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     layout.switch_activity(beta_id);
     check_ops_on_layout(
@@ -10114,7 +10639,7 @@ fn switch_activity_dormant_view_survives_output_disconnect_and_reconnect() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     // Switch to beta and populate its view on output1 with a non-bookend active workspace.
     layout.switch_activity(beta_id);
@@ -10190,7 +10715,7 @@ fn switch_activity_dormant_view_survives_output_disconnect_and_reconnect() {
     );
     layout.verify_invariants();
 
-    // Reconnect output1. When we switch back to beta, ensure_active_views must reuse
+    // Reconnect output1. When we switch back to beta, ensure_all_activity_views must reuse
     // the retained dormant view (contains_key hit) rather than rebuilding a fresh one.
     check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
     layout.switch_activity(beta_id);
@@ -10221,7 +10746,7 @@ fn switch_activity_active_view_eviction_is_active_only() {
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     // Switch to beta so it gets views for both outputs, then switch back to seed.
     layout.switch_activity(beta_id);
@@ -10331,7 +10856,7 @@ fn setup_two_activities_with_move_workspaces_test() -> (
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     // Switch to beta (seed becomes dormant; its view snapshot above is now stable).
     layout.switch_activity(beta_id);
@@ -11129,6 +11654,77 @@ fn reload_promotion_preserves_runtime_name_casing() {
     layout.verify_invariants();
 }
 
+// `reconcile_activities_on_reload_add` must call `ensure_all_activity_views` so
+// any newly-added or freshly-promoted config activity holds a bookend view for
+// every connected monitor. Pin this for the "config-new activity added while a
+// monitor is connected" path.
+#[test]
+fn reload_adds_new_config_activity_materializes_bookend_for_dormant_survivor_on_connected_monitor()
+{
+    // Start with one connected output and a runtime "Default" activity.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let mon_out = layout.monitors[0].output_id();
+
+    let default_id = layout.active_activity_id();
+
+    // Reload config declares [Work, Default]. "Work" is brand-new.
+    let cfg = [
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Work".to_owned()),
+        },
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg, &[]);
+
+    let work_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Work")
+        .expect("Work must be present after reload")
+        .id();
+
+    // "Work" is a dormant survivor — it was never switched-to, so without the
+    // materializer call its views map would be empty. Assert it has a bookend view
+    // for the connected output.
+    let work_view = layout
+        .activities
+        .get(work_id)
+        .expect("work live")
+        .views()
+        .get(&mon_out)
+        .expect("Work must hold a view for the connected monitor after reload_add")
+        .clone();
+
+    assert_eq!(
+        work_view.len(),
+        1,
+        "freshly-materialised view must have exactly one trailing-empty bookend",
+    );
+    assert!(
+        !layout
+            .workspaces
+            .get(work_view.ids().first().unwrap())
+            .expect("bookend in pool")
+            .has_windows_or_name(),
+        "bookend must be empty and unnamed",
+    );
+    // Default (existing activity) must still have its view.
+    assert!(
+        layout
+            .activities
+            .get(default_id)
+            .expect("default live")
+            .views()
+            .contains_key(&mon_out),
+        "existing activity must still hold its view after reload_add",
+    );
+
+    layout.verify_invariants();
+}
+
 // --- Config-reload activity reconciliation — removal half ---
 //
 // These tests exercise `Layout::reconcile_activities_on_reload_remove` — the
@@ -11280,8 +11876,8 @@ fn reconcile_remove_destroys_empty_unnamed_exclusive_workspace() {
     );
     assert_eq!(
         layout.workspaces.len(),
-        ws_baseline - 1,
-        "exactly the beta workspace was destroyed",
+        ws_baseline - 2,
+        "beta_ws plus the materializer's exclusive bookend were destroyed",
     );
     assert_eq!(layout.active_activity_id(), seed_id);
 
@@ -11311,7 +11907,7 @@ fn reconcile_remove_destroys_empty_named_exclusive_workspace() {
     // isolation, not the full `State::reload_config` prewalk.
     let beta_activity = super::activity::Activity::new_config_declared("Beta".to_owned());
     let beta_id = beta_activity.id();
-    layout.activities.insert(beta_activity);
+    test_insert_activity(&mut layout, beta_activity);
 
     // Flip the named workspace to exclusively beta.
     let named_ws_id = layout
@@ -11371,13 +11967,14 @@ fn reconcile_remove_prunes_shared_workspaces() {
         .expect("Beta was added")
         .id();
 
-    // Union beta into the seed workspace.
+    // Union beta into the seed-Default workspace (NOT beta's materialized bookend — that one
+    // is exclusive to beta and would itself become shared after the union, defeating the test).
     let shared_ws_id = layout
         .workspaces
         .values()
+        .find(|ws| ws.activities() == &HashSet::from([default_id]))
         .map(|ws| ws.id())
-        .next()
-        .expect("seed workspace allocated");
+        .expect("seed-Default workspace allocated");
     layout
         .workspaces
         .get_mut(&shared_ws_id)
@@ -11394,10 +11991,12 @@ fn reconcile_remove_prunes_shared_workspaces() {
         .expect("shared prune must succeed");
 
     assert!(!layout.activities.contains(beta_id), "Beta dropped");
+    // The shared workspace is retained; beta's materializer bookend (exclusive to beta) is
+    // destroyed as part of the reconcile remove.
     assert_eq!(
         layout.workspaces.len(),
-        ws_before,
-        "shared workspace is retained, not destroyed",
+        ws_before - 1,
+        "shared workspace retained; only beta's materialized bookend was destroyed",
     );
     let shared_ws = layout
         .workspaces
@@ -11803,7 +12402,7 @@ fn reconcile_remove_rebinds_orphan_workspace_into_cascade_target_view() {
 
     // (b2) Active-cursor patch landed: beta's view on mon_out had `len == 1`
     // pre-insert (only the trailing-empty bookend, since beta was a fresh
-    // branch whose `ensure_active_views` synthesized a singleton view), so the
+    // branch whose `ensure_all_activity_views` synthesized a singleton view), so the
     // cascade promotes the rebound orphan to the active cursor — the user
     // lands on the orphan that was active under the removed activity, not on
     // the empty bookend.
@@ -11879,7 +12478,7 @@ fn reconcile_remove_predicate_skips_workspace_already_anchored_by_surviving_view
         .find(|a| a.name() == "beta")
         .expect("beta in pool")
         .id();
-    // Switch beta active first so `ensure_active_views` materializes a
+    // Switch beta active first so `ensure_all_activity_views` materializes a
     // well-formed view (trailing empty bookend) for beta on mon_out, then
     // switch to alpha for the test's pre-reload state. Required because we
     // need to splice the orphan into beta's view as a non-last entry, which
@@ -12276,11 +12875,11 @@ fn prepare_picker_layout(
 
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
 
     let gamma = super::activity::Activity::new_runtime("gamma".to_owned());
     let gamma_id = gamma.id();
-    layout.activities.insert(gamma);
+    test_insert_activity(&mut layout, gamma);
 
     // Pick any pool workspace (there is exactly one — seeded by the
     // no-monitor Default ctor via the disconnected-pool path).
@@ -12472,7 +13071,7 @@ fn focus_window_hard_block_gate_fires_before_switch() {
     // Mint a beta activity and switch to it so the window is hidden.
     let beta = super::activity::Activity::new_runtime("beta".to_owned());
     let beta_id = beta.id();
-    layout.activities.insert(beta);
+    test_insert_activity(&mut layout, beta);
     layout.switch_activity(beta_id);
     assert_eq!(
         layout.active_activity_id(),
@@ -12558,12 +13157,12 @@ fn add_workspace_to_activity_appends_to_dormant_view() {
         .first()
         .copied()
         .expect("alpha's view must have a workspace");
-    layout
-        .activities
-        .get_mut(beta)
-        .expect("beta is live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![seed_ws_id], 0));
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![seed_ws_id], 0),
+    );
 
     // Pick a workspace from the alpha view that is NOT in beta's view, so
     // Add appends a distinct id.
@@ -12643,12 +13242,12 @@ fn add_workspace_to_activity_no_op_when_already_member() {
         .get_mut(&target_ws_id)
         .expect("target ws live")
         .activities = [alpha, beta].into_iter().collect();
-    layout
-        .activities
-        .get_mut(beta)
-        .expect("beta live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![target_ws_id], 0),
+    );
 
     let before_set = layout
         .workspaces
@@ -12698,10 +13297,13 @@ fn add_workspace_to_activity_no_op_when_already_member() {
 }
 
 #[test]
-fn add_workspace_to_activity_no_view_on_output() {
-    // Dormant activity without any view on the workspace's output. Add must
-    // still union the id into `ws.activities` and leave beta's views map
-    // empty (lazy rebuild on next switch).
+fn add_workspace_to_activity_appends_to_materialized_bookend_view() {
+    // The per-activity bookend invariant materializes a bookend view for every newly-created
+    // activity on every connected monitor. `add_workspace_to_activity` for a workspace bound
+    // to that monitor must then append the id to beta's materialized view (just before the
+    // trailing-empty bookend — preserved by the materializer at insert time). This replaces
+    // the pre-invariant "Add does not fabricate a view; rebuild happens lazily on switch"
+    // assertion: views are now eager.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();
@@ -12710,14 +13312,22 @@ fn add_workspace_to_activity_no_view_on_output() {
     let beta = layout
         .create_activity("Beta".to_owned())
         .expect("create beta");
-    // Confirm beta has no view on mon_out.
-    assert!(layout
+
+    // Materialized view for beta on mon_out: a single fresh trailing empty.
+    let beta_view_before = layout
         .activities
         .get(beta)
-        .expect("live")
+        .expect("beta live")
         .views()
         .get(&mon_out)
-        .is_none(),);
+        .expect("materializer must install a view for beta on mon_out")
+        .clone();
+    assert_eq!(
+        beta_view_before.len(),
+        1,
+        "fresh materialized view holds exactly one trailing-empty bookend id",
+    );
+
     let target_ws_id = layout
         .active_view(&mon_out)
         .ids()
@@ -12740,16 +13350,19 @@ fn add_workspace_to_activity_no_view_on_output() {
             .activities(),
         &HashSet::from([alpha, beta]),
     );
-    // No view fabricated for beta.
+
+    // Beta's view gained the target id (appended at the tail per `add_workspace_to_activity`'s
+    // position-invariant insert).
+    let beta_view_after = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view persisted");
     assert!(
-        layout
-            .activities
-            .get(beta)
-            .expect("live")
-            .views()
-            .get(&mon_out)
-            .is_none(),
-        "Add must not fabricate a view — views rebuild lazily on switch",
+        beta_view_after.ids().contains(&target_ws_id),
+        "Add must union the workspace id into beta's view",
     );
 
     layout.verify_invariants();
@@ -12803,9 +13416,11 @@ fn add_workspace_to_activity_workspace_not_found() {
 
 #[test]
 fn remove_workspace_from_activity_drops_single_entry_view_inactive() {
-    // Dormant activity beta has a view containing a single id; its workspace
-    // is {alpha, beta}. Remove(ws, beta) must prune beta from ws.activities
-    // and drop the single-entry view entry entirely.
+    // Dormant activity beta has a view containing the target as its sole non-bookend entry;
+    // its workspace is {alpha, beta}. Remove(ws, beta) must prune beta from ws.activities and
+    // drop the entry from beta's view, leaving the materializer-side bookend in place (under
+    // the per-activity bookend invariant the materializer re-installs a fresh bookend if the
+    // single-entry path drops the view entirely).
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();
@@ -12821,18 +13436,21 @@ fn remove_workspace_from_activity_drops_single_entry_view_inactive() {
         .copied()
         .expect("alpha view has ws");
 
-    // Seed shared membership + a dormant single-entry view.
+    // Seed shared membership + a dormant 2-entry view (target + materializer's bookend kept
+    // as the trailing empty). Under the per-view bookend invariant, every view on a connected
+    // monitor must end with an empty unnamed workspace.
     layout
         .workspaces
         .get_mut(&target_ws_id)
         .expect("live")
         .activities = [alpha, beta].into_iter().collect();
-    layout
-        .activities
-        .get_mut(beta)
-        .expect("live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
+    let beta_bottom = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![target_ws_id, beta_bottom], 0),
+    );
 
     layout
         .remove_workspace_from_activity(
@@ -12850,15 +13468,24 @@ fn remove_workspace_from_activity_drops_single_entry_view_inactive() {
         &HashSet::from([alpha]),
         "beta must be pruned from ws.activities",
     );
+    // The target entry is gone from beta's view, but the trailing-empty bookend remains
+    // because every view on a connected monitor must hold one under the per-activity bookend
+    // invariant.
+    let beta_view = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view persists (carries the bookend)");
     assert!(
-        layout
-            .activities
-            .get(beta)
-            .expect("live")
-            .views()
-            .get(&mon_out)
-            .is_none(),
-        "single-entry view must be dropped entirely",
+        !beta_view.ids().contains(&target_ws_id),
+        "target id must be removed from beta's view",
+    );
+    assert_eq!(
+        beta_view.len(),
+        1,
+        "only the trailing-empty bookend remains"
     );
 
     layout.verify_invariants();
@@ -12930,16 +13557,16 @@ fn remove_workspace_from_activity_patches_multi_entry_view() {
         alpha_view.insert(tail + 2, b_id);
     }
 
-    // Give beta a 3-entry dormant view with active = b_id.
-    layout
-        .activities
-        .get_mut(beta)
-        .expect("live")
-        .views_mut()
-        .insert(
-            mon_out.clone(),
-            WorkspaceView::new(vec![a_id, target_id, b_id], 2),
-        );
+    // Give beta a 4-entry dormant view with active = b_id; the trailing empty satisfies the
+    // per-view bookend invariant on beta's dormant view (every view on a connected monitor
+    // must end with an empty unnamed workspace).
+    let beta_bottom = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![a_id, target_id, b_id, beta_bottom], 2),
+    );
 
     // Sanity: precondition invariants hold.
     layout.verify_invariants();
@@ -12957,8 +13584,8 @@ fn remove_workspace_from_activity_patches_multi_entry_view() {
         .expect("live")
         .views()
         .get(&mon_out)
-        .expect("view still present (len was 3)");
-    assert_eq!(view.ids(), &[a_id, b_id]);
+        .expect("view still present (len was 4)");
+    assert_eq!(view.ids(), &[a_id, b_id, beta_bottom]);
     assert_eq!(view.active(), b_id);
     // target_id's pool entry still exists (still has alpha tag); only beta was pruned.
     assert_eq!(
@@ -12976,7 +13603,7 @@ fn remove_workspace_from_activity_patches_multi_entry_view() {
 #[test]
 fn remove_workspace_from_activity_active_activity_recreates_view() {
     // Remove from the active activity in a way that drops its view's last
-    // entry on a connected monitor. `ensure_active_views` must reinstate
+    // entry on a connected monitor. `ensure_all_activity_views` must reinstate
     // the view so `active.views.len() == monitors.len()` holds.
     //
     // Fixture shape: ws_id is tagged {alpha, beta}, appears in alpha's
@@ -13026,12 +13653,12 @@ fn remove_workspace_from_activity_active_activity_recreates_view() {
 
     // Place ws_id in beta's dormant view on mon_out too so pool-keys
     // equality holds pre-call.
-    layout
-        .activities
-        .get_mut(beta)
-        .expect("beta live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![ws_id], 0));
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![ws_id], 0),
+    );
 
     // Sanity: precondition invariants hold.
     layout.verify_invariants();
@@ -13044,14 +13671,14 @@ fn remove_workspace_from_activity_active_activity_recreates_view() {
         )
         .expect("remove from active activity must succeed");
 
-    // After the mutation, alpha's view for mon_out must exist (ensure_active_views reinstated it)
-    // and must NOT contain ws_id (ws no longer carries alpha).
+    // After the mutation, alpha's view for mon_out must exist (ensure_all_activity_views reinstated
+    // it) and must NOT contain ws_id (ws no longer carries alpha).
     let reinstated = layout
         .activities
         .active()
         .views()
         .get(&mon_out)
-        .expect("ensure_active_views must reinstate alpha's view on mon_out");
+        .expect("ensure_all_activity_views must reinstate alpha's view on mon_out");
     assert!(!reinstated.ids().contains(&ws_id));
     assert!(!reinstated.ids().is_empty(), "reinstated view is non-empty");
 
@@ -13193,12 +13820,15 @@ fn remove_workspace_from_activity_snaps_animation() {
         .get_mut(&target_ws_id)
         .expect("live")
         .activities = [alpha, beta].into_iter().collect();
-    layout
-        .activities
-        .get_mut(beta)
-        .expect("live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
+    // The override replaces beta's materialized fresh-empty view; include a freshly-minted
+    // trailing-empty bookend so the per-view bookend invariant holds on beta's dormant view.
+    let beta_bottom = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![target_ws_id, beta_bottom], 0),
+    );
     layout.verify_invariants();
 
     // Arm a workspace-switch animation by switching to a different position.
@@ -13295,12 +13925,13 @@ fn set_workspace_activities_diff_removes_from_dormant_view() {
         .get_mut(&target_ws_id)
         .expect("live")
         .activities = [alpha, beta].into_iter().collect();
-    layout
-        .activities
-        .get_mut(beta)
-        .expect("live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
+    let beta_bottom = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![target_ws_id, beta_bottom], 0),
+    );
 
     let (ws_id, new_set, active_affected) = layout
         .set_workspace_activities(
@@ -13323,16 +13954,17 @@ fn set_workspace_activities_diff_removes_from_dormant_view() {
             .activities(),
         &HashSet::from([alpha]),
     );
-    assert!(
-        layout
-            .activities
-            .get(beta)
-            .expect("live")
-            .views()
-            .get(&mon_out)
-            .is_none(),
-        "beta's single-entry view must be dropped",
-    );
+    // Beta's view loses target_ws_id; the trailing-empty bookend stays. Per the per-activity
+    // bookend invariant the view is never absent on a connected monitor.
+    let beta_view = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&mon_out)
+        .expect("beta's view persists (carries the bookend)");
+    assert!(!beta_view.ids().contains(&target_ws_id));
+    assert_eq!(beta_view.len(), 1, "only trailing-empty bookend remains");
 
     layout.verify_invariants();
 }
@@ -13365,12 +13997,12 @@ fn set_workspace_activities_diff_adds_to_target_view() {
         .first()
         .copied()
         .expect("alpha view has ws");
-    layout
-        .activities
-        .get_mut(beta)
-        .expect("beta live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![seed_ws_id], 0));
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![seed_ws_id], 0),
+    );
 
     // Pick a workspace from alpha's view NOT in beta's view — distinct.
     let target_ws_id = {
@@ -13422,7 +14054,7 @@ fn set_workspace_activities_diff_adds_to_target_view() {
 fn set_workspace_activities_drops_single_entry_view_for_removed_active_activity() {
     // Set removes the active activity from a workspace whose active-activity
     // view has exactly that workspace as its single entry on a connected
-    // monitor. `ensure_active_views` must reinstate the view.
+    // monitor. `ensure_all_activity_views` must reinstate the view.
     //
     // Fixture shape mirrors `remove_workspace_from_activity_active_activity_recreates_view`:
     // ws is tagged {alpha, beta}, appears in alpha's active view (single
@@ -13455,12 +14087,12 @@ fn set_workspace_activities_drops_single_entry_view_for_removed_active_activity(
     for id in &original_ids {
         let _ = layout.workspaces.remove(id);
     }
-    layout
-        .activities
-        .get_mut(beta)
-        .expect("beta live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![ws_id], 0));
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![ws_id], 0),
+    );
     layout.verify_invariants();
 
     // Set(ws, [beta]) → to_remove = {alpha}, drops alpha's single-entry view.
@@ -13480,7 +14112,7 @@ fn set_workspace_activities_drops_single_entry_view_for_removed_active_activity(
         .active()
         .views()
         .get(&mon_out)
-        .expect("ensure_active_views must reinstate alpha's view on mon_out");
+        .expect("ensure_all_activity_views must reinstate alpha's view on mon_out");
     assert!(!reinstated.ids().contains(&ws_id));
     assert!(!reinstated.ids().is_empty(), "reinstated view non-empty");
 
@@ -13698,14 +14330,16 @@ fn set_workspace_activities_snaps_animation_only_when_active_affected() {
             .expect("named workspace must be present")
     };
 
-    // Place into beta's dormant view for pool-keys equality after the
-    // cross-activity changes below. ws.activities stays {alpha} initially.
-    layout
-        .activities
-        .get_mut(beta)
-        .expect("live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
+    // Place into beta's dormant view for pool-keys equality after the cross-activity changes
+    // below. ws.activities stays {alpha} initially. Append a freshly-minted trailing-empty
+    // bookend so the per-view bookend invariant holds on beta's dormant view.
+    let beta_bottom = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![target_ws_id, beta_bottom], 0),
+    );
     layout.verify_invariants();
 
     // Arm an animation.
@@ -13803,12 +14437,12 @@ fn set_workspace_activities_active_affected_via_to_add_branch() {
         layout.workspaces.remove(id);
     }
     // Beta's dormant view also holds ws so pool-keys equality holds.
-    layout
-        .activities
-        .get_mut(beta)
-        .expect("beta live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![ws_id], 0));
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![ws_id], 0),
+    );
     layout.verify_invariants();
 
     // Sanity: alpha is NOT in ws.activities yet (to_add branch precondition).
@@ -13903,20 +14537,22 @@ fn move_workspace_to_activity_atomic_add_then_remove() {
     let beta = layout
         .create_activity("Beta".to_owned())
         .expect("create beta");
-    // Seed beta's view with an id from alpha's view (distinct from the
-    // named one we'll move, so Move appends to a non-empty view).
+    // Seed beta's view with an id from alpha's view (distinct from the named one we'll move,
+    // so Move appends to a non-empty view). Append a freshly-minted trailing-empty bookend so
+    // the per-view bookend invariant holds on beta's dormant view.
     let seed_ws_id = layout
         .active_view(&mon_out)
         .ids()
         .first()
         .copied()
         .expect("alpha view has ws");
-    layout
-        .activities
-        .get_mut(beta)
-        .expect("beta live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![seed_ws_id], 0));
+    let beta_bottom = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![seed_ws_id, beta_bottom], 0),
+    );
 
     // Pick the named workspace (preserves bookend discipline under remove_at).
     let target_ws_id = {
@@ -14012,18 +14648,18 @@ fn move_workspace_to_activity_preserves_other_memberships() {
         .get_mut(&target_ws_id)
         .expect("live")
         .activities = [alpha, x, y].into_iter().collect();
-    layout
-        .activities
-        .get_mut(x)
-        .expect("x live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
-    layout
-        .activities
-        .get_mut(y)
-        .expect("y live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
+    test_override_activity_view(
+        &mut layout,
+        x,
+        mon_out.clone(),
+        WorkspaceView::new(vec![target_ws_id], 0),
+    );
+    test_override_activity_view(
+        &mut layout,
+        y,
+        mon_out.clone(),
+        WorkspaceView::new(vec![target_ws_id], 0),
+    );
 
     let (_, target_id, source_id) = layout
         .move_workspace_to_activity(
@@ -14073,12 +14709,12 @@ fn move_workspace_to_activity_workspace_already_in_target() {
         .activities = [alpha, target].into_iter().collect();
     // Give target a dormant view containing the id so Add is a delegate
     // no-op.
-    layout
-        .activities
-        .get_mut(target)
-        .expect("target live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![target_ws_id], 0));
+    test_override_activity_view(
+        &mut layout,
+        target,
+        mon_out.clone(),
+        WorkspaceView::new(vec![target_ws_id], 0),
+    );
 
     layout
         .move_workspace_to_activity(
@@ -14173,18 +14809,18 @@ fn move_workspace_to_activity_not_in_active_errors() {
     );
     let ws_id = ws.id();
     assert!(layout.workspaces.insert(ws_id, ws).is_none());
-    layout
-        .activities
-        .get_mut(x)
-        .expect("x live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![ws_id], 0));
-    layout
-        .activities
-        .get_mut(y)
-        .expect("y live")
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![ws_id], 0));
+    test_override_activity_view(
+        &mut layout,
+        x,
+        mon_out.clone(),
+        WorkspaceView::new(vec![ws_id], 0),
+    );
+    test_override_activity_view(
+        &mut layout,
+        y,
+        mon_out.clone(),
+        WorkspaceView::new(vec![ws_id], 0),
+    );
     // alpha remains active. Verify precondition.
     assert_eq!(layout.active_activity_id(), alpha);
     assert!(!layout
@@ -14956,11 +15592,11 @@ fn monitor_for_workspace_in_activity_returns_none_for_workspace_not_in_activity(
 }
 
 #[test]
-fn view_in_activity_or_materialize_creates_fresh_view_for_inactive_activity() {
-    // alpha is the seed (active); beta has no workspaces in config and no
-    // active view. After `view_in_activity_or_materialize(beta, output1)`,
-    // beta must own a fresh view rooted on output1 with exactly one
-    // trailing-empty workspace ( fresh branch under no-EWAF).
+fn view_in_activity_or_materialize_is_idempotent_when_view_exists() {
+    // alpha is the seed (active); beta is config-declared with no workspace bindings. Under
+    // the per-activity bookend invariant, `add_output` materializes a single-bookend view for
+    // beta on output1 at connect time. `view_in_activity_or_materialize` is then a pure
+    // no-op (the contains-key skip fires before any allocation).
     let mut layout = Layout::<TestWindow>::new(
         Clock::with_time(Duration::ZERO),
         &cross_activity_config(&[], &[]),
@@ -14970,32 +15606,46 @@ fn view_in_activity_or_materialize_creates_fresh_view_for_inactive_activity() {
     let beta_id = layout.activities().find_by_name("beta").unwrap().id();
     let output_id = OutputId::new(&layout.monitors[0].output);
 
-    assert!(
-        layout
-            .activities()
-            .get(beta_id)
-            .unwrap()
-            .views()
-            .get(&output_id)
-            .is_none(),
-        "precondition: beta has no view for output1",
-    );
-
-    layout.view_in_activity_or_materialize(beta_id, &output_id);
-
-    let view = layout
+    // Precondition: beta already has a single-bookend view materialized by add_output.
+    let pre_view_ids: Vec<WorkspaceId> = layout
         .activities()
         .get(beta_id)
         .unwrap()
         .views()
         .get(&output_id)
-        .expect("post: beta must own a fresh view for output1");
+        .expect("precondition: per-activity materializer installed beta's view")
+        .ids()
+        .to_vec();
     assert_eq!(
-        view.len(),
+        pre_view_ids.len(),
         1,
-        "fresh branch must allocate exactly one empty"
+        "freshly-materialized view holds exactly one trailing-empty bookend",
     );
-    let id = view.ids()[0];
+    let pool_size_pre = layout.workspace_pool().len();
+
+    layout.view_in_activity_or_materialize(beta_id, &output_id);
+
+    // Post: no new workspace allocated; the view is byte-identical.
+    let post_view_ids: Vec<WorkspaceId> = layout
+        .activities()
+        .get(beta_id)
+        .unwrap()
+        .views()
+        .get(&output_id)
+        .expect("post: beta still owns the view")
+        .ids()
+        .to_vec();
+    assert_eq!(
+        post_view_ids, pre_view_ids,
+        "no-op materialize must leave the view unchanged",
+    );
+    assert_eq!(
+        layout.workspace_pool().len(),
+        pool_size_pre,
+        "no-op materialize must not allocate a new workspace",
+    );
+
+    let id = post_view_ids[0];
     let ws = layout.workspace_pool().get(&id).unwrap();
     assert!(ws.activities().contains(&beta_id));
     assert!(!ws.has_windows_or_name());
@@ -15184,7 +15834,7 @@ fn add_window_to_hidden_activity_workspace_via_add_window_target_workspace() {
 fn view_in_activity_or_materialize_then_switch_activity_does_not_double_allocate() {
     // Regression pin: `view_in_activity_or_materialize` followed by
     // `switch_activity` to the same target must not allocate a second trailing
-    // empty. The `contains_key` early-exit in `ensure_active_views` is what
+    // empty. The `contains_key` early-exit in `ensure_all_activity_views` is what
     // prevents it; this test drives through the public `switch_activity` entry
     // to confirm the guard is reachable via that path.
     let mut layout = Layout::<TestWindow>::new(
@@ -15316,4 +15966,156 @@ fn monitor_for_workspace_in_activity_resolves_case_insensitively() {
             .is_none(),
         "substring of the workspace name must not resolve"
     );
+}
+
+// `add_window_to_hidden_workspace` must call `dormant_view_bookend_fixup` so that
+// a dormant activity whose view has the target workspace as its trailing entry gets
+// a fresh trailing empty appended after the window lands via the pool-direct hidden
+// path (the workspace is NOT in any active view).
+#[test]
+fn add_window_to_hidden_workspace_with_dormant_trailing_appends_bookend() {
+    // Two config activities (alpha + beta). "beta-ws" is exclusively beta's.
+    let mut layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(&[], &[("beta-ws", Some("output1"))]),
+    );
+    layout.add_output(make_test_output("output1"), None);
+
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+    let output_id = OutputId::new(&layout.monitors[0].output);
+
+    // Ensure beta's view is materialized.
+    layout.view_in_activity_or_materialize(beta_id, &output_id);
+
+    // Find beta-ws in the pool.
+    let beta_ws_id = layout
+        .find_workspace_in_activity_by_name("beta-ws", beta_id)
+        .expect("beta-ws must be in pool")
+        .id();
+
+    // Hand-roll beta's view so beta-ws is the sole trailing entry (no bookend).
+    // This is the precondition the fixup must correct: after the window lands on
+    // beta-ws, the view must grow.
+    test_override_activity_view(
+        &mut layout,
+        beta_id,
+        output_id.clone(),
+        WorkspaceView::new(vec![beta_ws_id], 0),
+    );
+
+    let beta_view_len_before = 1usize; // just beta_ws_id
+
+    // beta-ws is NOT in alpha's active view, so add_window takes the hidden-target
+    // path (`add_window_to_hidden_workspace`).
+    let window = TestWindow::new(TestWindowParams::new(42));
+    let _out = layout.add_window(
+        window,
+        AddWindowTarget::Workspace(beta_ws_id),
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::No,
+    );
+
+    // beta's view must have grown: dormant_view_bookend_fixup must have appended a
+    // fresh trailing empty after beta_ws_id.
+    let beta_view_after = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&output_id)
+        .expect("beta has view");
+    assert!(
+        beta_view_after.len() > beta_view_len_before,
+        "dormant_view_bookend_fixup must extend beta's view after add_window_to_hidden_workspace",
+    );
+    assert_ne!(
+        beta_view_after.ids().last(),
+        Some(&beta_ws_id),
+        "beta_ws_id must no longer be beta's trailing entry after the window was added",
+    );
+
+    layout.verify_invariants();
+}
+
+// `dormant_view_bookend_fixup` under `empty_workspace_above_first = true`: when a
+// window lands on a workspace that sits at position 0 of a dormant activity's view,
+// the fixup must prepend a fresh leading-empty bookend in addition to appending the
+// trailing one. A single-entry view (`[shared_ws]`) where `shared_ws` is both first
+// and last exercises both branches.
+#[test]
+fn add_window_under_ewaf_prepends_leading_empty_to_dormant_view_at_position_zero() {
+    // Build a layout with EWAF enabled.
+    let config = {
+        let mut c = cross_activity_config(&[], &[("beta-ws", Some("output1"))]);
+        c.layout.empty_workspace_above_first = true;
+        c
+    };
+    let mut layout = Layout::<TestWindow>::new(Clock::with_time(Duration::ZERO), &config);
+    layout.add_output(make_test_output("output1"), None);
+
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+    let output_id = OutputId::new(&layout.monitors[0].output);
+
+    // Materialize beta's view so beta-ws is reachable.
+    layout.view_in_activity_or_materialize(beta_id, &output_id);
+
+    let beta_ws_id = layout
+        .find_workspace_in_activity_by_name("beta-ws", beta_id)
+        .expect("beta-ws must be in pool")
+        .id();
+
+    // Hand-roll beta's view as a single-entry [beta_ws_id]. Under EWAF, a single
+    // workspace view is valid (it acts as the combined leading+trailing empty).
+    // beta_ws_id is at position 0 (= last), so both `is_first` and `is_last` fire.
+    test_override_activity_view(
+        &mut layout,
+        beta_id,
+        output_id.clone(),
+        WorkspaceView::new(vec![beta_ws_id], 0),
+    );
+
+    let beta_view_len_before = 1usize;
+
+    // beta-ws is NOT in alpha's active view — add_window takes the hidden path.
+    let window = TestWindow::new(TestWindowParams::new(55));
+    let _out = layout.add_window(
+        window,
+        AddWindowTarget::Workspace(beta_ws_id),
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::No,
+    );
+
+    // Beta's view must have grown by 2: trailing bookend appended and leading bookend
+    // prepended, yielding [ewaf_leading, beta_ws_id, trailing_bookend].
+    let beta_view_after = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&output_id)
+        .expect("beta has view");
+    assert!(
+        beta_view_after.len() > beta_view_len_before,
+        "EWAF fixup must grow beta's view after the window lands at position 0",
+    );
+    // beta_ws_id must no longer be the first entry (a new leading empty was prepended).
+    assert_ne!(
+        beta_view_after.ids().first(),
+        Some(&beta_ws_id),
+        "beta_ws_id must no longer be beta's first entry after EWAF leading-empty prepend",
+    );
+    // beta_ws_id must no longer be the last entry (a trailing bookend was appended).
+    assert_ne!(
+        beta_view_after.ids().last(),
+        Some(&beta_ws_id),
+        "beta_ws_id must no longer be beta's trailing entry after the window was added",
+    );
+
+    layout.verify_invariants();
 }

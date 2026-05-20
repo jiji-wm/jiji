@@ -139,11 +139,11 @@ fn refresh_narrows_on_activity_switch() {
     // workspace declared without `open-on-output` is seeded with OutputId("")
     // (workspace.rs:329-334), and `bind_output` does not re-tag it on
     // first-monitor-attach (workspace.rs:575-588, reclaim design). On activity
-    // switch, `ensure_active_views` (mod.rs:3894-3901) filters pool candidates
+    // switch, `ensure_all_activity_views` (mod.rs:3894-3901) filters pool candidates
     // by output_id equality and does not rediscover ws_b; beta's view is built
     // with a fresh trailing-empty instead. This asymmetry between Monitor::new
     // (unfiltered parked-id load at Layout::add_output, mod.rs:858-890) and
-    // ensure_active_views (output_id-filtered) is orthogonal to the projection
+    // ensure_all_activity_views (output_id-filtered) is orthogonal to the projection
     // contract — this asymmetry is not yet addressed.
     assert!(
         !s1.contains(&ws_a_id),

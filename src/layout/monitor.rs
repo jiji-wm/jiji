@@ -1687,78 +1687,57 @@ impl<W: LayoutElement> Monitor<W> {
     pub(super) fn verify_invariants(
         &self,
         pool: &HashMap<WorkspaceId, Workspace<W>>,
-        view: &WorkspaceView,
+        views: &[&WorkspaceView],
     ) {
         use approx::assert_abs_diff_eq;
+
+        assert!(
+            !views.is_empty(),
+            "Monitor::verify_invariants requires at least one view — the active activity's view \
+             for this monitor's output",
+        );
 
         let options =
             Options::clone(&self.base_options).with_merged_layout(self.layout_config.as_ref());
         assert_eq!(&*self.options, &options);
 
-        // `WorkspaceView::new` already enforces `!ids.is_empty()` and no mutator empties the
-        // view, so `view.len() >= 1` is a `WorkspaceView` invariant — not re-asserted here.
-        for (i, id) in view.ids().iter().enumerate() {
-            assert!(
-                pool.contains_key(id),
-                "view.ids[{i}] must be a key in the workspace pool",
-            );
+        let ewaf = self.options.layout.empty_workspace_above_first;
+        let active_view = views[0];
+
+        // Per-view assertions: every activity's view for this monitor's output must hold the
+        // structural bookend / pool-membership / "1 or 3+" rules. The in-flight switch animation
+        // bounds-check looks at the active view only — `WorkspaceSwitch` lives on the monitor and
+        // points at positions inside the *active* activity's view.
+        for (vi, view) in views.iter().enumerate() {
+            for (i, id) in view.ids().iter().enumerate() {
+                assert!(
+                    pool.contains_key(id),
+                    "views[{vi}].ids[{i}] must be a key in the workspace pool",
+                );
+            }
+            assert!(view.active_position() < view.len());
+
+            assert_view_bookends(pool, view, ewaf, None);
         }
-        assert!(view.active_position() < view.len());
 
         if let Some(WorkspaceSwitch::Animation(anim)) = &self.workspace_switch {
             let before_idx = anim.from() as usize;
             let after_idx = anim.to() as usize;
 
-            assert!(before_idx < view.len());
-            assert!(after_idx < view.len());
+            assert!(before_idx < active_view.len());
+            assert!(after_idx < active_view.len());
         }
 
         let ws = |id: WorkspaceId| -> &Workspace<W> {
             pool.get(&id).expect("view id must be a key in the pool")
         };
 
-        let last_id = *view.ids().last().unwrap();
-        let first_id = *view.ids().first().unwrap();
-
-        assert!(
-            !ws(last_id).has_windows(),
-            "monitor must have an empty workspace in the end"
-        );
-        if self.options.layout.empty_workspace_above_first {
-            assert!(
-                !ws(first_id).has_windows(),
-                "first workspace must be empty when empty_workspace_above_first is set"
-            )
-        }
-
-        assert!(
-            ws(last_id).name.is_none(),
-            "monitor must have an unnamed workspace in the end"
-        );
-        if self.options.layout.empty_workspace_above_first {
-            assert!(
-                ws(first_id).name.is_none(),
-                "first workspace must be unnamed when empty_workspace_above_first is set"
-            )
-        }
-
-        if self.options.layout.empty_workspace_above_first {
-            assert!(
-                view.len() != 2,
-                "if empty_workspace_above_first is set there must be just 1 or 3+ workspaces"
-            )
-        }
-
-        // If there's no workspace switch in progress, there can't be any non-last non-active
-        // empty workspaces. If empty_workspace_above_first is set then the first workspace
-        // will be empty too.
-        let pre_skip = if self.options.layout.empty_workspace_above_first {
-            1
-        } else {
-            0
-        };
+        // The "no non-active empty workspaces in the middle" rule is scoped to the active view:
+        // it relies on `view.active_position()` matching the monitor's current focus state, which
+        // is meaningful only for the active activity's view.
+        let pre_skip = if ewaf { 1 } else { 0 };
         if self.workspace_switch.is_none() {
-            for (idx, id) in view
+            for (idx, id) in active_view
                 .ids()
                 .iter()
                 .enumerate()
@@ -1767,7 +1746,7 @@ impl<W: LayoutElement> Monitor<W> {
                 // skip last
                 .skip(1)
             {
-                if idx != view.active_position() {
+                if idx != active_view.active_position() {
                     assert!(
                         ws(*id).has_windows_or_name(),
                         "non-active workspace can't be empty and unnamed except the last one"
@@ -1776,29 +1755,38 @@ impl<W: LayoutElement> Monitor<W> {
             }
         }
 
-        for id in view.ids() {
-            let workspace = ws(*id);
-            assert_eq!(self.clock, workspace.clock);
+        // Scale / view-size / working-area / option synchronization: each workspace whose id is
+        // anywhere in views[0..] for this monitor is currently bound to this monitor (or will be
+        // on the next bind cycle), so its render-side fields must match. A workspace appearing in
+        // multiple views is re-checked once per view; the redundant work is bounded by the
+        // activity count and stays cheap.
+        for view in views {
+            for id in view.ids() {
+                let workspace = ws(*id);
+                assert_eq!(self.clock, workspace.clock);
 
-            assert_eq!(
-                self.scale().integer_scale(),
-                workspace.scale().integer_scale()
-            );
-            assert_eq!(
-                self.scale().fractional_scale(),
-                workspace.scale().fractional_scale()
-            );
-            assert_eq!(self.view_size, workspace.view_size());
-            assert_eq!(self.working_area, workspace.working_area());
+                assert_eq!(
+                    self.scale().integer_scale(),
+                    workspace.scale().integer_scale()
+                );
+                assert_eq!(
+                    self.scale().fractional_scale(),
+                    workspace.scale().fractional_scale()
+                );
+                assert_eq!(self.view_size, workspace.view_size());
+                assert_eq!(self.working_area, workspace.working_area());
 
-            assert_eq!(
-                workspace.base_options, self.options,
-                "workspace options must be synchronized with monitor"
-            );
+                assert_eq!(
+                    workspace.base_options, self.options,
+                    "workspace options must be synchronized with monitor"
+                );
+            }
         }
 
+        // Render-geo walk: active view only — monitor render state (workspace_switch offsets,
+        // overview zoom, layout placement) is driven by the active activity's view.
         let scale = self.scale().fractional_scale();
-        let ctx = LayoutCtx::new(pool, view);
+        let ctx = LayoutCtx::new(pool, active_view);
         let iter = self.workspaces_with_render_geo(ctx);
         for (_ws, ws_geo) in iter {
             let pos = ws_geo.loc;
@@ -1808,5 +1796,59 @@ impl<W: LayoutElement> Monitor<W> {
             assert_abs_diff_eq!(pos.x, rounded_pos.x, epsilon = 1e-5);
             assert_abs_diff_eq!(pos.y, rounded_pos.y, epsilon = 1e-5);
         }
+    }
+}
+
+/// Per-view bookend invariant: trailing workspace empty + unnamed, and (under EWAF) leading
+/// workspace empty + unnamed plus the "1 or 3+ length" rule. Shared between
+/// `Monitor::verify_invariants` (called per activity-view of a connected monitor) and
+/// `Layout::verify_invariants` (called for views on outputs that are no longer connected).
+///
+/// Callers pass the EWAF flag explicitly because the source-of-truth differs by call site:
+/// connected monitors use their per-monitor merged options; disconnected outputs use the
+/// layout-root options (matching what `ensure_all_activity_views` uses when materializing).
+///
+/// The optional `ctx` parameter is appended to each assertion message to identify which
+/// `(activity_id, output_id)` pair tripped the invariant, aiding proptest failure diagnosis.
+#[cfg(debug_assertions)]
+pub(super) fn assert_view_bookends<W: LayoutElement>(
+    pool: &HashMap<WorkspaceId, Workspace<W>>,
+    view: &WorkspaceView,
+    ewaf: bool,
+    ctx: Option<(&super::activity::ActivityId, &super::OutputId)>,
+) {
+    let ctx_str = ctx
+        .map(|(a, o)| format!(" [activity={a:?}, output={o:?}]"))
+        .unwrap_or_default();
+
+    let ws = |id: WorkspaceId| -> &Workspace<W> {
+        pool.get(&id).expect("view id must be a key in the pool")
+    };
+
+    let last_id = *view.ids().last().unwrap();
+    let first_id = *view.ids().first().unwrap();
+
+    assert!(
+        !ws(last_id).has_windows(),
+        "view must have an empty workspace at the end{ctx_str}",
+    );
+    assert!(
+        ws(last_id).name.is_none(),
+        "view must have an unnamed workspace at the end{ctx_str}",
+    );
+
+    if ewaf {
+        assert!(
+            !ws(first_id).has_windows(),
+            "first workspace must be empty when empty_workspace_above_first is set{ctx_str}",
+        );
+        assert!(
+            ws(first_id).name.is_none(),
+            "first workspace must be unnamed when empty_workspace_above_first is set{ctx_str}",
+        );
+        assert!(
+            view.len() != 2,
+            "if empty_workspace_above_first is set there must be just 1 or 3+ workspaces{ctx_str}",
+        );
     }
 }

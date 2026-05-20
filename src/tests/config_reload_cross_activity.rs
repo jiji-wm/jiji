@@ -8,13 +8,13 @@
 //!    orphan-rebind leg). Without it, `Workspace::new_with_config_no_outputs` seeds named config
 //!    workspaces with the empty-string `OutputId` sentinel, `Monitor::new`'s lift loop pulls every
 //!    disconnected workspace into the seed-active activity's view at first-monitor-attach
-//!    regardless of `activities` tagging, and the cascade target's `ensure_active_views` cannot
-//!    reclaim such an orphan (sentinel ≠ real output id). On reload-drop-active the orphan's only
-//!    anchoring view evaporates with `self.activities.remove`, and `Layout::verify_invariants`'
-//!    pool-keys-equal-union check would panic. The named `ws_a` workspace declared under the
-//!    dropped alpha is what drives the prewalk → `unname_workspace` → reconcile-add precondition
-//!    assert; replacing it with an unnamed runtime workspace silently drops that leg. Review-stop
-//!    on any change that swaps `ws_a` out for an unnamed substitute.
+//!    regardless of `activities` tagging, and the cascade target's `ensure_all_activity_views`
+//!    cannot reclaim such an orphan (sentinel ≠ real output id). On reload-drop-active the orphan's
+//!    only anchoring view evaporates with `self.activities.remove`, and
+//!    `Layout::verify_invariants`' pool-keys-equal-union check would panic. The named `ws_a`
+//!    workspace declared under the dropped alpha is what drives the prewalk → `unname_workspace` →
+//!    reconcile-add precondition assert; replacing it with an unnamed runtime workspace silently
+//!    drops that leg. Review-stop on any change that swaps `ws_a` out for an unnamed substitute.
 //!
 //! 2. **The cascade-target arm exercised**: `previous_id == None` → first-declaration-order
 //!    non-remove-set survivor (= beta), per the cascade-target resolution in

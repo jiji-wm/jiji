@@ -61,6 +61,8 @@ pub use self::activity::{
     SetWorkspaceActivitiesError, SetWorkspaceStickyError, SwitchActivityError,
     ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
 };
+#[cfg(debug_assertions)]
+use self::monitor::assert_view_bookends;
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{Monitor, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
@@ -1151,6 +1153,10 @@ impl<W: LayoutElement> Layout<W> {
             self.monitors.push(monitor);
             self.primary_idx = 0;
             self.active_monitor_idx = 0;
+
+            // First-monitor bootstrap: every dormant activity needs a view for this output now
+            // so the per-activity bookend invariant holds at the next debug refresh.
+            self.ensure_all_activity_views();
             return;
         }
 
@@ -1279,6 +1285,11 @@ impl<W: LayoutElement> Layout<W> {
             &mut self.workspaces,
             doomed_ids,
         );
+
+        // Materialize bookend views for every dormant activity on the newly-connected output —
+        // the per-activity bookend invariant requires every activity to hold a view for every
+        // connected monitor.
+        self.ensure_all_activity_views();
     }
 
     pub fn remove_output(&mut self, output: &Output) {
@@ -1309,11 +1320,73 @@ impl<W: LayoutElement> Layout<W> {
         self.last_active_workspace_id
             .insert(monitor.output_name().clone(), view.active());
 
-        let (workspace_ids, doomed_ids) = self.take_workspace_ids(&monitor, &view);
+        let (mut workspace_ids, doomed_ids) = self.take_workspace_ids(&monitor, &view);
 
         if self.monitors.is_empty() {
-            // Removed the last monitor. Values already live in the pool; just reset their options
-            // to layout-root ones and park the id order for the next reconnect.
+            // The active activity's `views` map must be empty when no monitors are connected;
+            // dormant activities may retain views keyed by previously-disconnected outputs
+            // (validated by the disconnected-output bookend pass). The active activity's view for
+            // `output_id` was already evicted above and its workspaces flow into
+            // `workspace_ids` via `take_workspace_ids`. Under the new posture every other
+            // activity also holds a view for the now-removed output: walk those, classify each
+            // dormant view id into either "kept" (named or has windows — joins
+            // `workspace_ids` to be parked in the disconnected pool) or "doomed" (empty
+            // unnamed — joins `doomed_ids` to be destroyed by
+            // `destroy_workspaces_cross_activity`), then clear the activity view. The
+            // disconnected pool may not hold empty unnamed workspaces (asserted at
+            // `verify_invariants`), so the classification mirrors `take_workspace_ids`.
+            let mut doomed_ids = doomed_ids;
+            let doomed_set: HashSet<WorkspaceId> = doomed_ids.iter().copied().collect();
+            let mut already_kept: HashSet<WorkspaceId> = workspace_ids.iter().copied().collect();
+            let mut already_doomed: HashSet<WorkspaceId> = doomed_set;
+            let to_visit: Vec<(ActivityId, Vec<WorkspaceId>)> = self
+                .activities
+                .iter_mut()
+                .filter_map(|activity| {
+                    activity
+                        .views_mut()
+                        .remove(&output_id)
+                        .map(|v| (activity.id(), v.ids().to_vec()))
+                })
+                .collect();
+            for (_act_id, ids) in to_visit {
+                for ws_id in ids {
+                    if already_kept.contains(&ws_id) || already_doomed.contains(&ws_id) {
+                        continue;
+                    }
+                    let ws = self
+                        .workspaces
+                        .get_mut(&ws_id)
+                        .expect("dormant view id must be a live pool key");
+                    // Normalize: a workspace whose output_id is the empty-string sentinel
+                    // (produced by `new_with_config_no_outputs` without an explicit
+                    // `open_on_output`) was never bound to any real output and must not land
+                    // in the disconnected pool (where a future `Monitor::new` reclaim-bind
+                    // could latch onto it). Treat it as doomed instead.
+                    let is_sentinel_output_id =
+                        ws.output_id().is_some_and(|id| id.as_str().is_empty());
+                    if is_sentinel_output_id {
+                        doomed_ids.push(ws_id);
+                        already_doomed.insert(ws_id);
+                        continue;
+                    }
+                    if ws.has_windows_or_name() {
+                        // Fire output_leave for all windows on this workspace before it joins
+                        // the disconnected pool; mirrors the unbind done for active-view kept ids
+                        // in take_workspace_ids.
+                        ws.unbind_output(&monitor.output);
+                        workspace_ids.push(ws_id);
+                        already_kept.insert(ws_id);
+                    } else {
+                        doomed_ids.push(ws_id);
+                        already_doomed.insert(ws_id);
+                    }
+                }
+            }
+
+            // Reset options on every parked id (active-view ids plus the just-merged dormant
+            // ones) — layout-root options replace per-monitor merged ones for the disconnected
+            // lifetime.
             for id in &workspace_ids {
                 self.workspaces
                     .get_mut(id)
@@ -1350,6 +1423,12 @@ impl<W: LayoutElement> Layout<W> {
             &mut self.workspaces,
             doomed_ids,
         );
+
+        // After cross-activity destroy may have dropped single-entry dormant views, the
+        // per-activity bookend invariant could be missing a view for one of the still-connected
+        // monitors. Re-run the materializer so every remaining activity holds a bookend view
+        // for every connected monitor.
+        self.ensure_all_activity_views();
     }
 
     pub fn add_column_by_idx(
@@ -1379,6 +1458,89 @@ impl<W: LayoutElement> Layout<W> {
 
         if activate {
             self.active_monitor_idx = monitor_idx;
+        }
+    }
+
+    /// After a window has been added to `ws_id` on `mon_idx`, walk every dormant activity's
+    /// view of the same output and append a fresh trailing-empty bookend if `ws_id` is that
+    /// view's trailing entry; under EWAF, also prepend a fresh leading empty if `ws_id` is at
+    /// position 0. Mirrors the trailing-empty bookend spawn the active-side `add_column_on`
+    /// already does, but for the dormant activities' views.
+    ///
+    /// Called outside the `(monitors, pool, view)` split-borrow scope so `&mut self` is
+    /// available; mirrors the post-split flush pattern in `add_output` / `remove_output`.
+    fn dormant_view_bookend_fixup(&mut self, ws_id: WorkspaceId, mon_idx: usize) {
+        let mon_output = self.monitors[mon_idx].output.clone();
+        let mon_options = self.monitors[mon_idx].options.clone();
+        let mon_out_id = OutputId::new(&mon_output);
+        let ewaf = mon_options.layout.empty_workspace_above_first;
+        let clock = self.clock.clone();
+        let active_id = self.activities.active_id();
+
+        let needs_fixup: Vec<(ActivityId, bool, bool)> = self
+            .activities
+            .iter()
+            .filter_map(|a| {
+                if a.id() == active_id {
+                    // The active view's bookend is maintained by `add_column_on`.
+                    return None;
+                }
+                let view = a.views().get(&mon_out_id)?;
+                let pos = view.position_of(ws_id)?;
+                let is_last = pos == view.len() - 1;
+                let is_first = pos == 0;
+                if is_last || (ewaf && is_first) {
+                    Some((a.id(), is_last, is_first))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (act_id, is_last, is_first) in needs_fixup {
+            if is_last {
+                let bottom = Workspace::new(
+                    &mon_output,
+                    HashSet::from([act_id]),
+                    clock.clone(),
+                    mon_options.clone(),
+                );
+                let bottom_id = bottom.id();
+                assert!(
+                    self.workspaces.insert(bottom_id, bottom).is_none(),
+                    "fresh id must be unique",
+                );
+                let view = self
+                    .activities
+                    .get_mut(act_id)
+                    .expect("act_id sourced from iter")
+                    .views_mut()
+                    .get_mut(&mon_out_id)
+                    .expect("view existed at filter time");
+                let insert_pos = view.len();
+                view.insert(insert_pos, bottom_id);
+            }
+            if ewaf && is_first {
+                let top = Workspace::new(
+                    &mon_output,
+                    HashSet::from([act_id]),
+                    clock.clone(),
+                    mon_options.clone(),
+                );
+                let top_id = top.id();
+                assert!(
+                    self.workspaces.insert(top_id, top).is_none(),
+                    "fresh id must be unique",
+                );
+                let view = self
+                    .activities
+                    .get_mut(act_id)
+                    .expect("act_id sourced from iter")
+                    .views_mut()
+                    .get_mut(&mon_out_id)
+                    .expect("view existed at filter time");
+                view.insert(0, top_id);
+            }
         }
     }
 
@@ -1646,19 +1808,20 @@ impl<W: LayoutElement> Layout<W> {
             *active_monitor_idx = mon_idx;
         }
 
+        // Resolve `ws_id` (the workspace that received the window) while the split-borrow is
+        // still in scope. Used both for the scrolling-height patch below and for the
+        // post-split-borrow per-activity bookend fixup.
+        let receiving_ws_id = view.ids().iter().copied().find(|ws_id| {
+            pool.get(ws_id)
+                .expect("view id must be a key in the pool")
+                .has_window(&id)
+        });
+
         // Set the default height for scrolling windows.
         if !is_floating {
             if let Some(change) = scrolling_height {
-                let ws_id = view
-                    .ids()
-                    .iter()
-                    .copied()
-                    .find(|ws_id| {
-                        pool.get(ws_id)
-                            .expect("view id must be a key in the pool")
-                            .has_window(&id)
-                    })
-                    .unwrap();
+                let ws_id = receiving_ws_id
+                    .expect("a scrolling window must land on some workspace in the active view");
                 let ws = pool
                     .get_mut(&ws_id)
                     .expect("view id must be a key in the pool");
@@ -1666,7 +1829,16 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        Some(&monitors[mon_idx].output)
+        // End of split borrow. Run the per-activity bookend fixup on dormant views — for the
+        // active view `add_column_on` already handled the trailing bookend, but dormant views
+        // that share `receiving_ws_id` as their trailing entry still need a fresh empty appended
+        // (mirror under EWAF for position 0). The receiving workspace must exist for any
+        // successful add, including floating windows.
+        let ws_id = receiving_ws_id
+            .expect("add_window must have placed the window on some active-view workspace");
+        self.dormant_view_bookend_fixup(ws_id, mon_idx);
+
+        Some(&self.monitors[mon_idx].output)
     }
 
     /// Pool-only [`Self::add_window`] path used when the requested
@@ -1738,6 +1910,10 @@ impl<W: LayoutElement> Layout<W> {
                 ws.set_window_height(Some(&id), change);
             }
         }
+
+        // Hidden-target path only fires when ws_id is NOT in any active view, so the helper's
+        // active-activity skip is correct here — only dormant views may need a bookend appended.
+        self.dormant_view_bookend_fixup(ws_id, mon_idx);
 
         Some(&self.monitors[mon_idx].output)
     }
@@ -4669,8 +4845,8 @@ impl<W: LayoutElement> Layout<W> {
     ///    `mon.workspace_switch = None` matches every other clear site in the codebase. Fractional
     ///    positions inside `WorkspaceSwitch` refer to positions in the previously-active activity's
     ///    view, so leaving them around after the flip would be incoherent.
-    /// 5. Lazily populate the target activity's per-output views via [`Self::ensure_active_views`]
-    ///    — see step 3.
+    /// 5. Lazily populate the target activity's per-output views via
+    ///    [`Self::ensure_all_activity_views`] — see step 3.
     ///
     /// # Focus restoration
     ///
@@ -4713,7 +4889,7 @@ impl<W: LayoutElement> Layout<W> {
         for mon in &mut self.monitors {
             mon.workspace_switch = None;
         }
-        self.ensure_active_views();
+        self.ensure_all_activity_views();
 
         // Post-condition pins. See the "Focus restoration" rustdoc paragraph for rationale.
         #[cfg(debug_assertions)]
@@ -4739,30 +4915,53 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
-    // Make the newly-active activity's `views` map cover every connected monitor.
-    // Required by the active-activity cross-field invariant at verify_invariants: after
-    // a switch, we may land on an activity that has no view yet for some output — either
-    // because this is the first time it's becoming active on that output, or because an
-    // output reconnected while the activity was dormant. We either lift pre-tagged
-    // workspaces from the pool into a fresh view, or allocate a single empty workspace.
+    // Make every activity's `views` map cover every connected monitor. Required by the
+    // per-activity bookend invariant: every (activity, connected-monitor) pair must hold a
+    // `WorkspaceView` whose first and last workspaces satisfy the trailing-empty (and EWAF
+    // leading-empty) rule.
     //
-    // Borrow discipline: we read `&self.monitors` once into a Vec of triples
-    // (OutputId, cloned `Output`, cloned per-monitor `Rc<Options>`), drop that borrow,
-    // and only then dispatch to [`Self::ensure_view_for`], which owns the
-    // pool/activities split-borrow internally.
-    pub(super) fn ensure_active_views(&mut self) {
-        let connected: Vec<(OutputId, Output, Rc<Options>)> = self
+    // Dormant views keyed by a *disconnected* output (e.g. a view that survived a previous
+    // `remove_output` on the active activity, or that we never materialized on the dormant
+    // side) are deliberately left alone — they have no user-facing surface (nothing renders
+    // on a missing output), and re-materializing the active activity's view on a freshly
+    // disconnected output would defeat `remove_output`'s active-only eviction semantics. The
+    // stale dormant views ARE validated by `Layout::verify_invariants`' disconnected-output
+    // bookend pass, so structural drift is still caught.
+    //
+    // No-op when no monitors are connected: the `monitors.is_empty()` branch of
+    // `verify_invariants` requires every activity's `views` map to be empty in that state, and
+    // `disconnected_workspace_ids` then holds workspaces directly without per-activity views.
+    //
+    // Borrow discipline: we read `&self.monitors` once into a `Vec` of triples
+    // `(OutputId, Option<Output>, Rc<Options>)` (`Option<Output>` is always `Some` today; the
+    // `None` shape on `ensure_view_for` is reserved for a future caller that mints a view
+    // without a live `Output` handle). After the snapshot we drop the borrow and only then
+    // dispatch to [`Self::ensure_view_for`], which owns the pool/activities split-borrow
+    // internally.
+    pub(super) fn ensure_all_activity_views(&mut self) {
+        if self.monitors.is_empty() {
+            return;
+        }
+
+        let known_outputs: Vec<(OutputId, Option<Output>, Rc<Options>)> = self
             .monitors
             .iter()
-            .map(|m| (m.output_id(), m.output.clone(), m.options.clone()))
+            .map(|m| (m.output_id(), Some(m.output.clone()), m.options.clone()))
             .collect();
-        let target = self.activities.active_id();
 
-        for (output_id, output, mon_options) in connected {
-            if self.activities.active().views().contains_key(&output_id) {
-                continue;
+        let activity_ids: Vec<ActivityId> = self.activities.iter().map(|a| a.id()).collect();
+
+        for activity_id in activity_ids {
+            for (output_id, output_opt, options) in &known_outputs {
+                let already = self
+                    .activities
+                    .get(activity_id)
+                    .is_some_and(|a| a.views().contains_key(output_id));
+                if already {
+                    continue;
+                }
+                self.ensure_view_for(activity_id, output_id.clone(), output_opt.as_ref(), options);
             }
-            self.ensure_view_for(target, output_id, &output, &mon_options);
         }
     }
 
@@ -4770,35 +4969,77 @@ impl<W: LayoutElement> Layout<W> {
     /// `output_id` if and only if no entry exists yet.
     ///
     /// The body mirrors the per-output allocation discipline of
-    /// [`Self::ensure_active_views`] — pre-tagged candidates from the pool are
-    /// lifted into the new view (sorted by `WorkspaceId.get()` as a Phase-1a
+    /// [`Self::ensure_all_activity_views`] — pre-tagged candidates from the
+    /// pool are lifted into the new view (sorted by `WorkspaceId.get()` as a
     /// placeholder for `cmp_by_config_then_creation`), padded with a fresh
-    /// trailing empty so `Monitor::verify_invariants`' "last must be empty"
-    /// (`monitor.rs:1724`) and "last must be unnamed" (`monitor.rs:1735`)
-    /// hold; under `empty_workspace_above_first` for this monitor, a fresh
-    /// leading empty is also prepended so "first must be empty" (1728),
-    /// "first must be unnamed" (1739), and the "1 or 3+" length rule (1746)
-    /// hold. The active index becomes 1 in the EWAF lift branch so the first
-    /// lifted workspace stays selected. The `Rc<Options>` must be the
-    /// per-monitor merged options (mirrors `Monitor::new`'s ctor; using
-    /// `self.options` would silently violate the EWAF first/last-empty
-    /// invariants for outputs whose `layout_config` flips the flag).
+    /// trailing empty so the bookend "last must be empty / unnamed" invariant
+    /// holds; under `empty_workspace_above_first` for this output, a fresh
+    /// leading empty is also prepended so the "first must be empty / unnamed"
+    /// and "1 or 3+" length rules hold. The active index becomes 1 in the
+    /// EWAF lift branch so the first lifted workspace stays selected.
     ///
-    /// Used both by [`Self::ensure_active_views`] (target = active activity)
-    /// and by [`Self::view_in_activity_or_materialize`] (target = arbitrary
-    /// activity, e.g. an inactive activity addressed by an `open-on-activity`
-    /// window rule per).
+    /// `output` is `Some(&Output)` for outputs that are currently connected
+    /// (`mon_options` is then the per-monitor merged options, mirroring
+    /// `Monitor::new`'s ctor — using `self.options` would silently violate
+    /// the EWAF first/last-empty invariants for outputs whose
+    /// `layout_config` flips the flag) and `None` for outputs that are known
+    /// only because some activity's view is keyed by them (e.g. a stale
+    /// dormant view for an output that disconnected while the activity was
+    /// inactive). On the `None` branch we use `Workspace::new_no_outputs`
+    /// and then patch `ws.output_id` so the materialized bookend can be
+    /// reclaimed by a future `bind_output` (mirrors the established pattern
+    /// in `reconcile_activities_on_reload_remove` at the orphan-rebind site).
     ///
-    /// Caller must ensure the entry does not yet exist (else the final insert
-    /// asserts).
+    /// Used by [`Self::ensure_all_activity_views`] and by
+    /// [`Self::view_in_activity_or_materialize`] (target = arbitrary
+    /// activity, e.g. an inactive activity addressed by an
+    /// `open-on-activity` window rule).
+    ///
+    /// Caller must ensure the entry does not yet exist (else the final
+    /// insert asserts).
     pub(crate) fn ensure_view_for(
         &mut self,
         activity_id: ActivityId,
         output_id: OutputId,
-        output: &Output,
+        output: Option<&Output>,
         mon_options: &Rc<Options>,
     ) {
+        assert!(
+            !output_id.as_str().is_empty(),
+            "ensure_view_for requires a non-sentinel OutputId",
+        );
         let clock = self.clock.clone();
+
+        // Helper: mint a fresh empty workspace for this (activity, output) pair. The `Some`
+        // branch is the only one fired today — `ensure_all_activity_views` narrows
+        // `known_outputs` to connected monitors. The `None` branch (using
+        // `Workspace::new_no_outputs` and patching `output_id` to the known OutputId — same
+        // pattern as the orphan-rebind in `reconcile_activities_on_reload_remove`) is reserved
+        // for a future caller that needs to materialize a view without a live `Output` handle.
+        let mint_empty = |workspaces: &mut HashMap<WorkspaceId, Workspace<W>>| -> WorkspaceId {
+            let mut ws = match output {
+                Some(o) => Workspace::new(
+                    o,
+                    HashSet::from([activity_id]),
+                    clock.clone(),
+                    mon_options.clone(),
+                ),
+                None => Workspace::new_no_outputs(
+                    HashSet::from([activity_id]),
+                    clock.clone(),
+                    mon_options.clone(),
+                ),
+            };
+            if output.is_none() {
+                ws.output_id = Some(output_id.clone());
+            }
+            let id = ws.id();
+            assert!(
+                workspaces.insert(id, ws).is_none(),
+                "fresh id must be unique",
+            );
+            id
+        };
 
         // Collect pre-tagged candidates under a shared borrow of the pool, so we can
         // later take `&mut self.workspaces` without a conflicting active borrow.
@@ -4811,62 +5052,28 @@ impl<W: LayoutElement> Layout<W> {
             .map(|ws| ws.id())
             .collect();
         // sort by WorkspaceId (monotonic creation counter) — placeholder for
-        // cmp_by_config_then_creation which requires is_config_declared on Workspace
-        // . See step 3.
+        // cmp_by_config_then_creation which requires is_config_declared on Workspace.
         tagged.sort_by_key(|id| id.get());
 
         let ewaf = mon_options.layout.empty_workspace_above_first;
 
         let view = if tagged.is_empty() {
-            // Fresh branch: a single trailing empty satisfies all EWAF invariants at
-            // len=1. Mirrors `Monitor::new`'s trailing-empty allocation
-            // (monitor.rs:286-381).
-            let ws = Workspace::new(
-                output,
-                HashSet::from([activity_id]),
-                clock.clone(),
-                mon_options.clone(),
-            );
-            let id = ws.id();
-            assert!(
-                self.workspaces.insert(id, ws).is_none(),
-                "fresh id must be unique",
-            );
+            // Fresh branch: a single trailing empty satisfies all EWAF invariants at len=1.
+            let id = mint_empty(&mut self.workspaces);
             WorkspaceView::new(vec![id], 0)
         } else {
-            // Lift branch: pre-tagged candidates form the body. Append a fresh trailing
-            // empty so the "last must be empty" (monitor.rs:1724) and "last must be
-            // unnamed" (monitor.rs:1735) invariants hold. Under EWAF for this monitor,
-            // also prepend a fresh leading empty so the "first must be empty" (1728),
-            // "first must be unnamed" (1739), and "1 or 3+" (1746) invariants hold;
-            // the active index becomes 1 so the first lifted workspace stays selected.
-            let bottom = Workspace::new(
-                output,
-                HashSet::from([activity_id]),
-                clock.clone(),
-                mon_options.clone(),
-            );
-            let bottom_id = bottom.id();
-            assert!(
-                self.workspaces.insert(bottom_id, bottom).is_none(),
-                "fresh id must be unique",
-            );
+            // Lift branch: pre-tagged candidates form the body. Append a fresh trailing empty
+            // so the trailing-empty / trailing-unnamed bookend holds. Under EWAF for this
+            // output, also prepend a fresh leading empty so the leading-empty / leading-unnamed
+            // / "1 or 3+" rules hold; the active index becomes 1 so the first lifted workspace
+            // stays selected.
+            let bottom_id = mint_empty(&mut self.workspaces);
 
             let mut ids = tagged;
             let mut active_idx = 0usize;
 
             if ewaf {
-                let top = Workspace::new(
-                    output,
-                    HashSet::from([activity_id]),
-                    clock.clone(),
-                    mon_options.clone(),
-                );
-                let top_id = top.id();
-                assert!(
-                    self.workspaces.insert(top_id, top).is_none(),
-                    "fresh id must be unique",
-                );
+                let top_id = mint_empty(&mut self.workspaces);
                 ids.insert(0, top_id);
                 active_idx = 1;
             }
@@ -4926,7 +5133,7 @@ impl<W: LayoutElement> Layout<W> {
             // Output not connected — nothing to materialize against.
             return;
         };
-        self.ensure_view_for(activity_id, output_id.clone(), &output, &options);
+        self.ensure_view_for(activity_id, output_id.clone(), Some(&output), &options);
     }
 
     /// Switch to the previously-active activity (history-based toggle).
@@ -4968,6 +5175,9 @@ impl<W: LayoutElement> Layout<W> {
                 ws.activities.insert(id);
             }
         }
+        // Materialize a bookend view for the new activity on every connected monitor; the
+        // per-activity bookend invariant requires it eagerly, not lazily on first switch.
+        self.ensure_all_activity_views();
         Ok(id)
     }
 
@@ -5118,6 +5328,12 @@ impl<W: LayoutElement> Layout<W> {
         // previous = Some(target)) and any non-active case where previous
         // happened to already equal target.
         let _ = self.activities.remove(target);
+
+        // Destroying exclusive workspaces above may have dropped single-entry views in other
+        // activities (cross-activity `retain` at `destroy_workspaces_cross_activity`). Re-run
+        // the materializer so every remaining activity holds a bookend view for every
+        // connected monitor.
+        self.ensure_all_activity_views();
 
         #[cfg(debug_assertions)]
         self.verify_invariants();
@@ -5305,9 +5521,9 @@ impl<W: LayoutElement> Layout<W> {
     ///   `WorkspaceView::remove_at` shifts the active / previous cursors.
     /// - Active-activity special case: when dropping the last view entry on a connected monitor's
     ///   output for the active activity, the cross-field invariant `active.views.len() ==
-    ///   monitors.len()` would be violated — [`Self::ensure_active_views`] is called immediately
-    ///   after the drop to reinstate the view (fresh trailing empty + EWAF leading empty if
-    ///   applicable).
+    ///   monitors.len()` would be violated — [`Self::ensure_all_activity_views`] is called
+    ///   immediately after the drop to reinstate the view (fresh trailing empty + EWAF leading
+    ///   empty if applicable).
     ///
     /// Callers that dispatch via IPC must first consult
     /// [`Self::is_workspace_activity_assignment_blocked_by_gesture`] — a
@@ -5375,13 +5591,11 @@ impl<W: LayoutElement> Layout<W> {
             ws.activities.remove(&activity_id);
         }
 
-        // Patch the activity's view for the workspace's output (if the output
-        // is known and the activity has a view there). Track whether we dropped
-        // the last entry of the *active* activity's view on a connected monitor
-        // so the cross-field invariant can be reinstated below.
-        let mut dropped_active_view_entry = false;
+        // Patch the activity's view for the workspace's output (if the output is known and the
+        // activity has a view there). Track any view-entry drop on a connected monitor so the
+        // materializer can reinstate the dropped view via ensure_all_activity_views below.
+        let mut dropped_any_view_entry = false;
         if let Some(out_id) = out_id.as_ref() {
-            let is_active_activity = activity_id == self.activities.active_id();
             let is_connected = self.monitors.iter().any(|m| &m.output_id() == out_id);
             let activity = self
                 .activities
@@ -5391,11 +5605,10 @@ impl<W: LayoutElement> Layout<W> {
                 if let Some(pos) = view.position_of(ws_id) {
                     if view.len() == 1 {
                         // Drop the single-entry view outright — mirrors the
-                        // `destroy_workspaces_cross_activity` single-entry
-                        // retain-drop path.
+                        // `destroy_workspaces_cross_activity` single-entry retain-drop path.
                         activity.views_mut().remove(out_id);
-                        if is_active_activity && is_connected {
-                            dropped_active_view_entry = true;
+                        if is_connected {
+                            dropped_any_view_entry = true;
                         }
                     } else {
                         view.remove_at(pos);
@@ -5404,12 +5617,11 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Reinstate the active activity's view for the connected monitor we
-        // just emptied. `ensure_active_views` takes `&mut self`, so every
-        // nested borrow above must already be released (they are — the scope
-        // above ended).
-        if dropped_active_view_entry {
-            self.ensure_active_views();
+        // Reinstate dropped views via the materializer. `ensure_all_activity_views` takes
+        // `&mut self`, so every nested borrow above must already be released (they are — the
+        // scope above ended).
+        if dropped_any_view_entry {
+            self.ensure_all_activity_views();
         }
 
         #[cfg(debug_assertions)]
@@ -5443,8 +5655,8 @@ impl<W: LayoutElement> Layout<W> {
     ///   `WorkspaceSwitch::Animation`, the animation is snapped on every monitor before patching (
     ///   snap+proceed, mirroring `remove_workspace_from_activity`).
     /// - If the active activity's view for a connected monitor is emptied by a single-entry drop on
-    ///   the Remove side, [`Self::ensure_active_views`] is called to reinstate the cross-field
-    ///   invariant `active.views.len() == monitors.len()`.
+    ///   the Remove side, [`Self::ensure_all_activity_views`] is called to reinstate the
+    ///   cross-field invariant `active.views.len() == monitors.len()`.
     ///
     /// Does NOT destroy the workspace when `to_remove` prunes its last
     /// activity — the `EmptyActivityList` gate guarantees `new` is
@@ -5533,19 +5745,17 @@ impl<W: LayoutElement> Layout<W> {
             ws.activities = new_set.clone();
         }
 
-        // Patch each affected activity's view for the workspace's bound
-        // output. Track whether we dropped the last entry of the *active*
-        // activity's view on a connected monitor so the cross-field invariant
-        // can be reinstated below.
-        let mut dropped_active_view_entry = false;
+        // Patch each affected activity's view for the workspace's bound output. Track any
+        // view-entry drop on a connected monitor so the materializer can reinstate the dropped
+        // view via ensure_all_activity_views below.
+        let mut dropped_any_view_entry = false;
         if let Some(out_id) = out_id.as_ref() {
             let is_connected = self.monitors.iter().any(|m| &m.output_id() == out_id);
 
-            // Removes first — mirrors `remove_workspace_from_activity`'s
-            // single-entry drop vs `remove_at` branch. The active-activity
-            // drop-to-zero flag is set inside this loop.
+            // Removes first — mirrors `remove_workspace_from_activity`'s single-entry drop vs
+            // `remove_at` branch. The drop-to-zero flag fires for any activity (active or
+            // dormant) hitting the single-entry path on a connected output.
             for act_id in &to_remove {
-                let is_active_activity = *act_id == active_id;
                 let activity = self
                     .activities
                     .get_mut(*act_id)
@@ -5554,8 +5764,8 @@ impl<W: LayoutElement> Layout<W> {
                     if let Some(pos) = view.position_of(ws_id) {
                         if view.len() == 1 {
                             activity.views_mut().remove(out_id);
-                            if is_active_activity && is_connected {
-                                dropped_active_view_entry = true;
+                            if is_connected {
+                                dropped_any_view_entry = true;
                             }
                         } else {
                             view.remove_at(pos);
@@ -5583,10 +5793,10 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Reinstate active activity's view for the connected monitor we just
-        // emptied — mirrors the `remove_workspace_from_activity` recipe.
-        if dropped_active_view_entry {
-            self.ensure_active_views();
+        // Reinstate any dropped views via the materializer — mirrors the
+        // `remove_workspace_from_activity` recipe.
+        if dropped_any_view_entry {
+            self.ensure_all_activity_views();
         }
 
         #[cfg(debug_assertions)]
@@ -5768,7 +5978,7 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         // Delegate to set_workspace_activities. The delegate handles animation
-        // snap, view patching, and ensure_active_views. All three delegate
+        // snap, view patching, and ensure_all_activity_views. All three delegate
         // error classes are statically impossible here:
         //   - ActivityNotFound: ids came from the live pool.
         //   - EmptyActivityList: Activities is non-empty by type.
@@ -6218,6 +6428,26 @@ impl<W: LayoutElement> Layout<W> {
             );
         }
 
+        // Per-activity bookend invariant: every activity must hold a view entry for every
+        // connected monitor. Asserts the materializer keeps pace with every call site that
+        // creates an activity or mutates view membership.
+        let active_activity_id_for_check = self.activities.active_id();
+        for activity in self.activities.iter() {
+            if activity.id() == active_activity_id_for_check {
+                continue;
+            }
+            let act_id = activity.id();
+            let act_name = activity.name();
+            for mon in &self.monitors {
+                let out_id = OutputId::new(&mon.output);
+                assert!(
+                    activity.views().contains_key(&out_id),
+                    "activity {act_id:?} ({act_name:?}) is missing a view for connected \
+                     monitor {out_id:?}",
+                );
+            }
+        }
+
         let mut seen_workspace_id = HashSet::new();
         let mut seen_workspace_name = Vec::<String>::new();
 
@@ -6346,7 +6576,19 @@ impl<W: LayoutElement> Layout<W> {
                 monitor.overview_progress_value()
             );
 
-            monitor.verify_invariants(pool, self.active_view(&monitor.output_id()));
+            let mon_output_id = monitor.output_id();
+            let active_view = self.active_view(&mon_output_id);
+            let mut views_for_monitor: Vec<&WorkspaceView> = vec![active_view];
+            let active_activity_id = self.activities.active_id();
+            for activity in self.activities.iter() {
+                if activity.id() == active_activity_id {
+                    continue;
+                }
+                if let Some(view) = activity.views().get(&mon_output_id) {
+                    views_for_monitor.push(view);
+                }
+            }
+            monitor.verify_invariants(pool, &views_for_monitor);
 
             if idx == primary_idx {
                 for id in self.active_view(&monitor.output_id()).ids() {
@@ -6431,6 +6673,41 @@ impl<W: LayoutElement> Layout<W> {
                     );
                 }
                 saw_view_offset_gesture = has_view_offset_gesture;
+            }
+        }
+
+        // Disconnected-output bookend pass: per-activity views may carry entries keyed by an
+        // OutputId that no connected monitor matches (output cycled away while activity was
+        // dormant; future `Action::ForgetOutput` will let users prune these). Such "stale" views
+        // still hold workspaces and must satisfy the trailing-empty / EWAF leading-empty
+        // bookends. The EWAF flag uses the layout-root options, matching what
+        // `ensure_all_activity_views` uses when materializing a disconnected-output view (the
+        // per-monitor merged Options aren't available without a live monitor).
+        let connected_output_ids: HashSet<OutputId> = self
+            .monitors
+            .iter()
+            .map(|m| OutputId::new(&m.output))
+            .collect();
+        let root_ewaf = self.options.layout.empty_workspace_above_first;
+        for activity in self.activities.iter() {
+            let act_id = activity.id();
+            let act_name = activity.name();
+            for (out_id, view) in activity.views() {
+                if connected_output_ids.contains(out_id) {
+                    continue;
+                }
+                // Pool membership for stale-view ids: every id must still be a pool key (the
+                // pool-keys union assertion above already covers this, but a fresh assertion
+                // here pin-points which (activity, output) pair broke the invariant).
+                for (i, id) in view.ids().iter().enumerate() {
+                    assert!(
+                        pool.contains_key(id),
+                        "activity {act_id:?} ({act_name:?}) view for disconnected output \
+                         {out_id:?}: ids[{i}] must be a key in the workspace pool",
+                    );
+                }
+                assert!(view.active_position() < view.len());
+                assert_view_bookends(pool, view, root_ewaf, Some((&act_id, out_id)));
             }
         }
     }
@@ -6863,7 +7140,7 @@ impl<W: LayoutElement> Layout<W> {
     /// 1. **Cascade the active cursor** if the active activity is in the remove-set. The cascade
     ///    target is `previous_id()` when it is not itself in the remove-set; otherwise the first
     ///    declaration-order id not in the remove-set. Routed through [`Self::switch_activity`] so
-    ///    in-flight workspace-switch animations snap and `ensure_active_views` runs.
+    ///    in-flight workspace-switch animations snap and `ensure_all_activity_views` runs.
     /// 2. **Per target in the remove-set (declaration order), destroy every exclusive workspace** —
     ///    both named and unnamed — by dropping the id from every activity's per-output `views` (the
     ///    same retain-drop-or- shift recipe [`Self::remove_activity`] uses) and from
@@ -7054,7 +7331,7 @@ impl<W: LayoutElement> Layout<W> {
         // then pulls every disconnected workspace into the seed-active
         // activity's view at first-monitor-attach regardless of each
         // workspace's own `activities` tagging. On reload-drop-active, the
-        // cascade target's `ensure_active_views` cannot reclaim such an
+        // cascade target's `ensure_all_activity_views` cannot reclaim such an
         // orphan (its `output_id` is the sentinel, not the real output), so
         // without this rebind the orphan loses its only anchoring view.
         //
@@ -7104,7 +7381,7 @@ impl<W: LayoutElement> Layout<W> {
 
             // Refresh the sentinel `OutputId("")` if present: bind the orphan
             // to the real output it now lives on so future
-            // `ensure_active_views` filters can recognise it. Gated strictly
+            // `ensure_all_activity_views` filters can recognise it. Gated strictly
             // on the empty-string sentinel — preserves the documented
             // `bind_output` reclaim semantic for any other shape.
             {
@@ -7134,7 +7411,7 @@ impl<W: LayoutElement> Layout<W> {
                 .get_mut(&out_id)
                 .unwrap_or_else(|| {
                     unreachable!(
-                        "cascade target's view on {out_id:?} must exist post-ensure_active_views",
+                        "cascade target's view on {out_id:?} must exist post-ensure_all_activity_views",
                     )
                 });
             debug_assert!(
@@ -7144,7 +7421,7 @@ impl<W: LayoutElement> Layout<W> {
             );
             debug_assert!(
                 view.len() > 0,
-                "ensure_active_views guarantees view non-empty",
+                "ensure_all_activity_views guarantees view non-empty",
             );
             // When the cascade target's view was a fresh-branch singleton (len == 1
             // means only the trailing-empty bookend, per Monitor::verify_invariants
@@ -7227,6 +7504,12 @@ impl<W: LayoutElement> Layout<W> {
             // would-empty final state).
             let _ = self.activities.remove(target);
         }
+
+        // Removing activities may have caused `destroy_workspaces_cross_activity` to drop
+        // single-entry views in other activities (mirroring the `remove_activity` path); the
+        // materializer re-installs bookend views for every remaining activity on every
+        // connected monitor.
+        self.ensure_all_activity_views();
 
         #[cfg(debug_assertions)]
         self.verify_invariants();
@@ -7380,6 +7663,10 @@ impl<W: LayoutElement> Layout<W> {
                 .expect("id came from values() above — still live")
                 .activities = set;
         }
+
+        // Newly-added config-declared activities (or freshly-promoted ones) must hold a bookend
+        // view on every connected monitor — the per-activity bookend invariant.
+        self.ensure_all_activity_views();
 
         #[cfg(debug_assertions)]
         self.verify_invariants();
@@ -8065,7 +8352,7 @@ impl<W: LayoutElement> Layout<W> {
         // Target side diverges: inserts at `len-1` to preserve the
         // trailing-empty bookend that `ensure_view_for` materialized
         // (`set_workspace_activities` appends at `len` because its trailing
-        // `ensure_active_views` repairs the bookend afterward). Dormant
+        // `ensure_all_activity_views` repairs the bookend afterward). Dormant
         // activities lacking a target-side view are left absent —
         // `ensure_view_for` materializes lazily on the next switch.
         let source_out_id = self.monitors[current_idx].output_id();
