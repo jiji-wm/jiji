@@ -6938,6 +6938,485 @@ fn set_workspace_name_via_id_targets_non_active_monitor() {
 }
 
 #[test]
+fn set_workspace_name_dormant_only_view_via_id_appends_bookend() {
+    // Regression pin: when `wsid` is held only in a dormant activity's view of a
+    // connected monitor (no active-activity view contains it), the monitor lookup
+    // must still locate the hosting monitor and `dormant_view_bookend_fixup` must
+    // re-mint the trailing bookend on the dormant view. Without the fan-out, the
+    // active-view-only predicate returns `None` and the silent skip leaves the
+    // dormant view's trailing slot named — `verify_invariants` then trips at the
+    // next mutating refresh.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta_id = layout.create_activity("Beta".to_owned()).expect("create");
+    // Bootstrap beta's view by switching to it, then switch back so beta's view is dormant
+    // and seed is active. Beta's view at this point holds exactly its own bookend empty,
+    // tagged with `{beta}` only — not shared with seed.
+    layout.switch_activity(beta_id);
+    layout.switch_activity_previous();
+    assert_eq!(layout.active_activity_id(), seed_id);
+
+    let beta_view_before = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view materialized")
+        .ids()
+        .to_vec();
+    let w_target_id = *beta_view_before
+        .last()
+        .expect("beta view holds at least the bookend");
+    // Pin the fixture: seed's active view does NOT contain w_target_id (dormant-only).
+    let seed_view_before = layout.active_view(&mon_out).ids().to_vec();
+    assert!(
+        !seed_view_before.contains(&w_target_id),
+        "fixture: w_target lives only in beta's dormant view",
+    );
+    // Structural pin: w_target's workspace is tagged to beta only, confirming the
+    // dormant-only framing — seed does not own it.
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&w_target_id)
+            .expect("w_target is a pool key")
+            .activities,
+        HashSet::from([beta_id]),
+        "fixture: w_target workspace belongs to beta only",
+    );
+    let seed_len_before = seed_view_before.len();
+    let beta_len_before = beta_view_before.len();
+
+    layout.set_workspace_name(
+        "named".to_owned(),
+        Some(WorkspaceReference::Id(w_target_id.get())),
+    );
+
+    // Seed's active view is unchanged — w_target was never in it.
+    let seed_view_after = layout.active_view(&mon_out).ids().to_vec();
+    assert_eq!(
+        seed_view_after.len(),
+        seed_len_before,
+        "seed's active view length unchanged — w_target is dormant-only",
+    );
+    assert_eq!(
+        seed_view_after, seed_view_before,
+        "seed's active view ids unchanged",
+    );
+
+    // Beta's dormant view grew by exactly one fresh trailing empty after the now-named
+    // w_target.
+    let beta_view_after = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view live")
+        .ids()
+        .to_vec();
+    assert_eq!(
+        beta_view_after.len(),
+        beta_len_before + 1,
+        "dormant view grew by exactly one fresh trailing empty",
+    );
+    assert_eq!(
+        beta_view_after[beta_len_before - 1],
+        w_target_id,
+        "w_target stays at its old position; a fresh empty follows it",
+    );
+    let new_trailing_id = *beta_view_after.last().expect("trailing slot exists");
+    let new_trailing_ws = layout
+        .workspaces
+        .get(&new_trailing_id)
+        .expect("trailing id is a pool key");
+    assert!(
+        new_trailing_ws.name.is_none(),
+        "fresh trailing empty must be unnamed",
+    );
+    assert!(
+        !new_trailing_ws.has_windows(),
+        "fresh trailing empty must hold no windows",
+    );
+
+    // w_target itself now carries the new name.
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&w_target_id)
+            .expect("w_target live")
+            .name
+            .as_deref(),
+        Some("named"),
+        "w_target now carries the new name",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_name_under_ewaf_dormant_only_view_via_id_prepends_bookend() {
+    // EWAF mirror of the trailing-bookend dormant-only regression. With
+    // `empty_workspace_above_first` set, position 0 of every view is also a bookend slot.
+    // A workspace held only at position 0 of a dormant activity's view of a connected
+    // monitor — addressed via `WorkspaceReference::Id` — must still be located and
+    // patched by `dormant_view_bookend_fixup`, which prepends a fresh leading empty.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops_with_options(options, ops);
+    let seed_id = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta_id = layout.create_activity("Beta".to_owned()).expect("create");
+    layout.switch_activity(beta_id);
+    layout.switch_activity_previous();
+    assert_eq!(layout.active_activity_id(), seed_id);
+
+    // Beta's dormant view under EWAF has at least a leading bookend at position 0.
+    let beta_view_before = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view materialized")
+        .ids()
+        .to_vec();
+    // Rename target is the leading slot. Bootstrap minted len = 1 under EWAF (the
+    // single-entry shape is bookend-legal); to expose the leading-slot rename specifically
+    // we need len >= 3 with the target at position 0. Hand-roll beta's view via
+    // `test_override_activity_view` to fill the middle and trailing slots, leaving the
+    // existing bootstrap entry at position 0 as the rename target.
+    let w_target_id = beta_view_before[0];
+    let w_filler_mid = test_mint_empty_for(&mut layout, 0, beta_id);
+    let w_filler_trail = test_mint_empty_for(&mut layout, 0, beta_id);
+    test_override_activity_view(
+        &mut layout,
+        beta_id,
+        mon_out.clone(),
+        WorkspaceView::new(vec![w_target_id, w_filler_mid, w_filler_trail], 1),
+    );
+    layout.verify_invariants();
+
+    // Pin: seed's active view does NOT contain w_target_id.
+    let seed_view_before = layout.active_view(&mon_out).ids().to_vec();
+    assert!(
+        !seed_view_before.contains(&w_target_id),
+        "fixture: w_target lives only in beta's dormant view",
+    );
+    let beta_len_before = layout
+        .activities
+        .get(beta_id)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap()
+        .len();
+    let seed_len_before = seed_view_before.len();
+
+    layout.set_workspace_name(
+        "named".to_owned(),
+        Some(WorkspaceReference::Id(w_target_id.get())),
+    );
+
+    // Seed's active view unchanged.
+    let seed_view_after = layout.active_view(&mon_out).ids().to_vec();
+    assert_eq!(
+        seed_view_after.len(),
+        seed_len_before,
+        "seed's active view length unchanged",
+    );
+
+    // Beta's dormant view prepended a fresh leading empty.
+    let beta_view_after = layout
+        .activities
+        .get(beta_id)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap()
+        .ids()
+        .to_vec();
+    assert_eq!(
+        beta_view_after.len(),
+        beta_len_before + 1,
+        "dormant view grew by exactly one fresh leading empty under EWAF",
+    );
+    let new_leading_id = *beta_view_after.first().expect("leading slot exists");
+    assert_ne!(
+        new_leading_id, w_target_id,
+        "w_target is no longer beta's leading slot — a fresh empty was prepended",
+    );
+    let new_leading_ws = layout
+        .workspaces
+        .get(&new_leading_id)
+        .expect("leading id is a pool key");
+    assert!(
+        new_leading_ws.name.is_none(),
+        "fresh leading empty must be unnamed",
+    );
+    assert!(
+        !new_leading_ws.has_windows(),
+        "fresh leading empty must hold no windows",
+    );
+    assert_eq!(
+        beta_view_after[1], w_target_id,
+        "w_target is now at position 1 — shifted by the prepended leading empty",
+    );
+    // w_target itself now carries the new name.
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&w_target_id)
+            .expect("w_target live")
+            .name
+            .as_deref(),
+        Some("named"),
+        "w_target now carries the new name",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_name_dormant_view_on_non_active_monitor_via_id_appends_bookend() {
+    // Multi-monitor regression pin: fan-out must locate the correct mon_idx even when the
+    // workspace lives only in a dormant activity's view on a monitor that is NOT the active
+    // monitor. Without the fan-out, `active_monitor_idx` (pointing at M0) would be used, the
+    // lookup would fail, and the dormant view on M1 would be left with a named trailing slot.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    // M0 is active (first output added). Confirm we have two monitors.
+    assert_eq!(layout.monitors.len(), 2, "fixture: two monitors required");
+    let mon0_out = layout.monitors[0].output_id();
+    let mon1_out = layout.monitors[1].output_id();
+
+    let beta_id = layout.create_activity("Beta".to_owned()).expect("create");
+    // Bootstrap beta's view on M1 by focusing M1, switching to beta (materializes beta's
+    // view on M1), then switching back to seed so beta's view on M1 is dormant.
+    layout.focus_output(&layout.monitors[1].output.clone());
+    layout.switch_activity(beta_id);
+    layout.switch_activity_previous();
+    assert_eq!(layout.active_activity_id(), seed_id);
+
+    // Restore active monitor to M0 so active_monitor_idx != 1 during the rename.
+    layout.focus_output(&layout.monitors[0].output.clone());
+    assert_eq!(
+        layout.active_monitor_idx, 0,
+        "fixture: active monitor is M0 (idx 0)",
+    );
+
+    // w_target lives only in beta's dormant view on M1 — NOT in seed's view on M0 or M1.
+    let beta_view_m1_before = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon1_out)
+        .expect("beta view on M1 materialized")
+        .ids()
+        .to_vec();
+    let w_target_id = *beta_view_m1_before
+        .last()
+        .expect("beta's M1 view holds at least the bookend");
+    assert!(
+        !layout.active_view(&mon0_out).ids().contains(&w_target_id),
+        "fixture: w_target not in seed's M0 active view",
+    );
+    assert!(
+        !layout.active_view(&mon1_out).ids().contains(&w_target_id),
+        "fixture: w_target not in seed's M1 active view",
+    );
+    let beta_len_m1_before = beta_view_m1_before.len();
+
+    layout.set_workspace_name(
+        "named".to_owned(),
+        Some(WorkspaceReference::Id(w_target_id.get())),
+    );
+
+    // Beta's dormant view on M1 grew by exactly one fresh trailing empty after w_target.
+    let beta_view_m1_after = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon1_out)
+        .expect("beta view on M1 live")
+        .ids()
+        .to_vec();
+    assert_eq!(
+        beta_view_m1_after.len(),
+        beta_len_m1_before + 1,
+        "beta's M1 dormant view grew by exactly one fresh trailing empty",
+    );
+    assert_eq!(
+        beta_view_m1_after[beta_len_m1_before - 1],
+        w_target_id,
+        "w_target stays at its old position; a fresh empty follows it",
+    );
+    let new_trailing_id = *beta_view_m1_after.last().expect("trailing slot exists");
+    let new_trailing_ws = layout
+        .workspaces
+        .get(&new_trailing_id)
+        .expect("trailing id is a pool key");
+    assert!(
+        new_trailing_ws.name.is_none(),
+        "fresh trailing empty must be unnamed",
+    );
+    assert!(
+        !new_trailing_ws.has_windows(),
+        "fresh trailing empty must hold no windows",
+    );
+    // w_target itself now carries the new name.
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&w_target_id)
+            .expect("w_target live")
+            .name
+            .as_deref(),
+        Some("named"),
+        "w_target now carries the new name",
+    );
+    // Seed's M0 active view does not contain w_target (dormant-only on M1).
+    assert!(
+        !layout.active_view(&mon0_out).ids().contains(&w_target_id),
+        "seed's M0 active view still does not contain w_target",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_name_stale_keyed_dormant_view_via_id_silent_skips() {
+    // Pins the documented silent-skip contract for stale-keyed dormant views. A
+    // workspace held only in a dormant activity's view keyed by an OutputId that no
+    // connected monitor matches (output removed after the view was materialized) cannot
+    // receive a live mon_idx from the connected-monitor scan, so no bookend mint fires.
+    // The name-assign at ws.name.replace still runs (that line precedes the monitor
+    // lookup), but the per-view bookend repair is a no-op.
+    //
+    // A future widening that closed this case would grow the dormant stale-keyed view by
+    // a trailing/leading bookend; this assert catches that drift.
+    //
+    // w_target is placed at a non-bookend (middle) slot of beta's M1 view so that
+    // naming it does not violate the bookend invariant for the stale-keyed view — the
+    // bookend pass checks only first/last slots, leaving middle slots unconstrained.
+    // verify_invariants therefore passes cleanly, pinning the silent-skip without
+    // exercising the bookend-violation surface.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let _seed_id = layout.active_activity_id();
+
+    let beta_id = layout.create_activity("Beta".to_owned()).expect("create");
+    // Bootstrap beta's views on both monitors. Switch to beta (which materializes beta's
+    // active view on M0) then switch back so beta is dormant on both monitors.
+    layout.switch_activity(beta_id);
+    layout.switch_activity_previous();
+
+    // Capture M1's OutputId and output handle before removal.
+    let m1_out_id = layout.monitors[1].output_id();
+    let m1_output = layout.monitors[1].output.clone();
+
+    // Build a 3-slot beta-only view for M1: [filler_lead, w_target, filler_trail].
+    // w_target sits at the middle (non-bookend) slot, so naming it leaves first/last
+    // unchanged and verify_invariants passes after the silent skip.
+    let w_filler_lead = test_mint_empty_for(&mut layout, 1, beta_id);
+    let w_target_id = test_mint_empty_for(&mut layout, 1, beta_id);
+    let w_filler_trail = test_mint_empty_for(&mut layout, 1, beta_id);
+    test_override_activity_view(
+        &mut layout,
+        beta_id,
+        m1_out_id.clone(),
+        WorkspaceView::new(vec![w_filler_lead, w_target_id, w_filler_trail], 1),
+    );
+    // Confirm the fixture is invariant-clean before the removal.
+    layout.verify_invariants();
+
+    // Remove M1 — the multi-monitor branch evicts the active (seed) activity's view for
+    // M1 and processes its workspaces, but does NOT touch dormant activity views keyed
+    // by M1's OutputId. beta's M1 view [filler_lead, w_target, filler_trail] survives
+    // as a stale-keyed entry.
+    layout.remove_output(&m1_output);
+
+    // Precondition A: w_target is still a pool key (workspace exists in the pool).
+    assert!(
+        layout.workspaces.contains_key(&w_target_id),
+        "precondition: w_target must still be a pool key after M1 removal",
+    );
+    // Precondition B: no connected monitor matches M1's OutputId (the key is genuinely stale).
+    assert!(
+        !layout.monitors.iter().any(|m| m.output_id() == m1_out_id),
+        "precondition: no connected monitor matches M1's removed OutputId",
+    );
+    // Precondition C: beta's stale-keyed view survives as an entry under M1's OutputId.
+    let beta_m1_view_before = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&m1_out_id)
+        .expect("precondition: beta's stale-keyed M1 view must survive removal")
+        .ids()
+        .to_vec();
+    assert_eq!(
+        beta_m1_view_before,
+        vec![w_filler_lead, w_target_id, w_filler_trail],
+        "precondition: beta's stale-keyed view holds the expected 3-slot layout",
+    );
+
+    // Rename w_target via its ID.
+    layout.set_workspace_name(
+        "named".to_owned(),
+        Some(WorkspaceReference::Id(w_target_id.get())),
+    );
+
+    // ws.name.replace ran before the monitor lookup — the workspace carries the name.
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&w_target_id)
+            .expect("w_target live")
+            .name
+            .as_deref(),
+        Some("named"),
+        "ws.name.replace must run before the monitor scan; w_target carries the new name",
+    );
+
+    // Silent-skip pin: beta's stale-keyed M1 view is completely unchanged. No trailing or
+    // leading bookend was minted (no live mon_idx was found). A future widening that
+    // resolved case (b) would grow this view by 1; that drift trips this assert.
+    let beta_m1_view_after = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&m1_out_id)
+        .expect("beta's stale-keyed view still present after set_workspace_name")
+        .ids()
+        .to_vec();
+    assert_eq!(
+        beta_m1_view_after, beta_m1_view_before,
+        "silent-skip contract: stale-keyed dormant view is unchanged (no bookend minted)",
+    );
+
+    // verify_invariants passes: first and last slots of the stale-keyed view are still
+    // unnamed empties, satisfying the disconnected-output bookend pass.
+    layout.verify_invariants();
+}
+
+#[test]
 fn switch_activity_focus_follows_active_activity_view() {
     // `Layout::focus()` reads the active activity's view for the active monitor and
     // selects the window via that workspace's own active_column_idx / active_tile_idx.

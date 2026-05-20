@@ -9733,6 +9733,21 @@ impl<W: LayoutElement> Layout<W> {
     /// active activity's view for that output); every dormant activity's view
     /// of that same output is patched via `dormant_view_bookend_fixup`.
     ///
+    /// The monitor lookup itself fans out across every activity's views (not
+    /// just the active activity's), so a workspace held only in a dormant
+    /// activity's view of a connected monitor — reachable today only via
+    /// `WorkspaceReference::Id` — locates its hosting monitor and patches the
+    /// dormant view. In that dormant-only case the active view does not
+    /// contain `wsid`, so the active-view bookend mint conditional
+    /// (`add_top` / `add_bottom`) is unconditionally false and the inline
+    /// `add_workspace_{top,bottom}_on` calls no-op; `dormant_view_bookend_fixup`
+    /// then carries the full bookend repair.
+    ///
+    /// Workspaces reachable only via `Layout.disconnected_workspace_ids` or
+    /// held only at a bookend slot of a dormant activity's view keyed by an
+    /// `OutputId` no connected monitor matches still no-op here; their bookend
+    /// repair has no live `mon_idx` for `dormant_view_bookend_fixup`.
+    ///
     /// ## Asymmetry with `unset_workspace_name`
     ///
     /// `set_workspace_name` *adds* `name.is_some()` at a slot whose contract
@@ -9762,24 +9777,40 @@ impl<W: LayoutElement> Layout<W> {
 
         let wsid = ws.id();
 
-        // Locate the workspace's actual monitor — the active view of *some*
-        // connected output must contain `wsid`. Using `active_monitor_idx`
+        // Locate the workspace's actual monitor — some activity's view on
+        // some connected output must contain `wsid`. Using `active_monitor_idx`
         // here would silently no-op for a `WorkspaceReference::Id` that
-        // targets a workspace currently shown on a different output. Mirrors
-        // `unname_workspace_by_id`'s lookup shape.
+        // targets a workspace currently shown on a different output. The
+        // fan-out across every activity's views (not just the active
+        // activity's) also catches the dormant-only case: a workspace held
+        // only in a dormant activity's view of a connected monitor still
+        // locates its hosting monitor and reaches the per-view bookend repair
+        // below.
         //
-        // Returns `None` when (a) no monitors are connected (workspace lives
-        // in `disconnected_workspace_ids`), or (b) `wsid` is held only in a
-        // dormant activity's view — no active-activity view holds it. Both
-        // are silent-skip boundaries: the disconnected case remediates on
-        // reconnect via `Monitor::new`'s `with_merged_layout` path, while
-        // the dormant-only case waits for the next mutating touch of that
-        // workspace. Extending the lookup to fan out into dormant views is
-        // structural work deferred to the EWAF source-of-truth follow-up.
-        let mon_idx_opt = self
-            .monitors
-            .iter()
-            .position(|mon| self.active_view(&mon.output_id()).ids().contains(&wsid));
+        // Returns `None` when `wsid` belongs to neither the connected-monitor
+        // set nor any connected monitor's activity views. Two boundary cases
+        // share this no-live-mon_idx structural blocker:
+        //
+        // (a) Disconnected-pool entry: `wsid` reachable only via
+        //     `Layout.disconnected_workspace_ids`. Remediates on reconnect
+        //     via `Monitor::new`'s `with_merged_layout` materializer.
+        //
+        // (b) Stale-keyed dormant view: `wsid` held only at a bookend slot of
+        //     a dormant activity's view whose `OutputId` key matches no
+        //     connected monitor (output removed after the view was materialized).
+        //     Does not remediate on reconnect of the *original* output unless
+        //     that specific output returns; remains the deferred boundary,
+        //     requiring reconciliation of per-monitor EWAF override divergence
+        //     between layout-root validation and the reconnect materializer.
+        let activities = &self.activities;
+        let mon_idx_opt = self.monitors.iter().position(|mon| {
+            let out_id = mon.output_id();
+            activities.iter().any(|a| {
+                a.views()
+                    .get(&out_id)
+                    .is_some_and(|v| v.ids().contains(&wsid))
+            })
+        });
 
         if let Some(mon_idx) = mon_idx_opt {
             let monitor = &self.monitors[mon_idx];
@@ -9807,14 +9838,19 @@ impl<W: LayoutElement> Layout<W> {
             // the active activity (already patched above).
             //
             // The `wsid` lookup anchors to the workspace's *actual* monitor
-            // rather than `active_monitor_idx` so a `WorkspaceReference::Id`
-            // targeting a workspace on another connected monitor patches the
-            // correct view. The silent-skip cases — workspace reachable only
-            // via the disconnected pool, or held only in a dormant activity's
-            // view — are the deferred boundary tracked by the EWAF
-            // source-of-truth follow-up: `position` returns `None` and we
-            // silently skip; the next reconnect mints a clean view via
-            // `Monitor::new`.
+            // rather than `active_monitor_idx` and fans out across every
+            // activity's views, so a `WorkspaceReference::Id` targeting a
+            // workspace on another connected monitor, or held only in a
+            // dormant activity's view, still reaches the correct `mon_idx`
+            // and `dormant_view_bookend_fixup` carries the repair.
+            //
+            // Two remaining silent-skip cases share the no-live-mon_idx
+            // structural blocker and are handled by the `None` branch above:
+            // (a) disconnected-pool entry — remediates on reconnect via
+            //     `Monitor::new`; (b) stale-keyed dormant view (output
+            //     removed after materialization, `OutputId` no longer matched
+            //     by any connected monitor) — does not auto-remediate on
+            //     reconnect of that output unless the same output returns.
             self.dormant_view_bookend_fixup(wsid, mon_idx);
         }
     }
