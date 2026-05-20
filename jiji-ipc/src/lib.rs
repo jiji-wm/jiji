@@ -1774,17 +1774,18 @@ pub struct Activity {
 /// every `(activity, output)` pair the compositor currently tracks a view for.
 /// The reply is a flat `Vec`; clients group/filter as needed.
 ///
-/// **Source contract.** One entry per `(activity, output_id)` that exists as a
-/// key in `activity.views()`. Activities without a view for a given output
-/// (e.g. brand-new runtime activity that has not yet been materialized on a
-/// connected output) yield NO entry — the reply enumerates extant views, not
-/// every theoretical pair.
+/// **Source contract.** One entry per `(activity, output_id)` keyed by a
+/// currently-connected monitor's `OutputId`. Under partial disconnect,
+/// disconnected outputs no longer appear as view keys (the partial-disconnect
+/// migration drains them); only the fully-disconnected state can produce an
+/// empty reply (every activity's `views` map is empty). The `None` arm on
+/// `output_name` is reserved for forward compatibility and is not observable in
+/// steady state outside the fully-disconnected window.
 ///
 /// The two string output fields are not redundant: `output_id` is the stable
 /// cross-session join key (matches the key in `Activity.views`; survives
 /// disconnect/reconnect unchanged), while `output_name` is the per-connection
 /// connector name used for display and for joining against `Workspace.output`.
-/// `output_name` goes `None` when the output is currently disconnected.
 // `Default` is constructor scaffolding (FRU-eligible at any call site that
 // wants it), not a real wire value. `ActivityView::default()` produces a
 // sentinel `{ activity_id: 0, output_id: "", output_name: None,
@@ -1798,8 +1799,8 @@ pub struct ActivityView {
     /// Stable `OutputId.as_str()` handle (typically `"<make> <model> <serial>"`,
     /// fallback to connector). Survives disconnect/reconnect cycles unchanged.
     pub output_id: String,
-    /// Connector name (e.g. `"DP-1"`) when the output is currently connected;
-    /// `None` when the output is in the disconnected pool.
+    /// Connector name (e.g. `"DP-1"`) when the output is currently connected.
+    /// See the type-level doc for the `output_name: None` steady-state contract.
     pub output_name: Option<String>,
     /// `WorkspaceView.ids()` cloned, in view order. Always non-empty.
     pub workspace_ids: Vec<u64>,

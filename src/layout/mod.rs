@@ -61,8 +61,6 @@ pub use self::activity::{
     SetWorkspaceActivitiesError, SetWorkspaceStickyError, SwitchActivityError,
     ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
 };
-#[cfg(debug_assertions)]
-use self::monitor::assert_view_bookends;
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{Monitor, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
@@ -1289,6 +1287,15 @@ impl<W: LayoutElement> Layout<W> {
         // Materialize bookend views for every dormant activity on the newly-connected output —
         // the per-activity bookend invariant requires every activity to hold a view for every
         // connected monitor.
+        //
+        // On partial reconnect, dormant activities' views for `output_id` are materialized
+        // here via `ensure_all_activity_views` → `ensure_view_for`. The lift branch lifts
+        // every workspace in the pool whose `output_id()` matches and whose `activities()`
+        // contains the materializing activity — this reclaims workspaces that were
+        // system-migrated to primary on the partial disconnect (see `remove_output`'s
+        // dormant walk for the migration site). No new code path is required; the existing
+        // materializer call is now load-bearing for both first-monitor bootstrap and
+        // dormant-reclaim.
         self.ensure_all_activity_views();
     }
 
@@ -1349,6 +1356,9 @@ impl<W: LayoutElement> Layout<W> {
                         .map(|v| (activity.id(), v.ids().to_vec()))
                 })
                 .collect();
+            // Full-disconnect destination is a flat disconnected pool, not per-activity views,
+            // so activity attribution is not needed — diverges from the partial-disconnect walk
+            // below which carries act_id as part of its (act_id, ws_id) migration pairs.
             for (_act_id, ids) in to_visit {
                 for ws_id in ids {
                     if already_kept.contains(&ws_id) || already_doomed.contains(&ws_id) {
@@ -1418,6 +1428,120 @@ impl<W: LayoutElement> Layout<W> {
 
         let primary_idx = self.primary_idx;
         self.append_workspaces_to_monitor(primary_idx, workspace_ids);
+
+        // Partial-disconnect dormant walk: drain every dormant activity's view for the
+        // disconnecting output and migrate its named / window-bearing workspaces into the
+        // dormant activity's existing view for the primary monitor. Mirrors the
+        // full-disconnect walk in the `monitors.is_empty()` branch above, with two
+        // differences: the named / windowed survivors land in a dormant view on primary
+        // (not in the disconnected pool), and the unbind/bind step retargets their
+        // Smithay `output_enter` markers from the disconnecting output to primary. The
+        // workspace's own `output_id` field is left pointing at the disconnecting output
+        // (`Workspace::bind_output` only refreshes `output_id` when it already matches
+        // the bound output — see workspace.rs:602-607), so a future `add_output` for
+        // the same monitor reclaims them via `ensure_view_for`'s pool-tag lift branch.
+        let primary_output = self.monitors[primary_idx].output.clone();
+        let primary_output_id = OutputId::new(&primary_output);
+        let primary_options = self.monitors[primary_idx].options.clone();
+
+        let mut doomed_ids = doomed_ids;
+        // `already_doomed` deduplicates doom pushes across activities: a workspace shared by
+        // multiple dormant activities (e.g. `ws.activities = {A, B}`) appears in every activity's
+        // drained view; doom must be pushed exactly once because
+        // `destroy_workspaces_cross_activity` asserts the pool entry is present on each id it
+        // processes — a duplicate would cause a double-remove panic.
+        let mut already_doomed: HashSet<WorkspaceId> = doomed_ids.iter().copied().collect();
+        let mut migrate_to_primary: Vec<(ActivityId, WorkspaceId)> = Vec::new();
+
+        // Collect under `&mut self.activities` only; the `&mut self.workspaces` and
+        // `&mut self.activities` reborrows in the migration phase below need this borrow
+        // released first. The active activity's view for `output_id` was already removed
+        // via the `views_mut().remove(&output_id)` eviction on `activities.active_mut()`
+        // near the top of `remove_output` (before the `monitors.is_empty()` branch), so
+        // the `filter_map` here naturally yields no entry for the active activity — no
+        // defensive `active_id`-skip required.
+        let to_visit: Vec<(ActivityId, Vec<WorkspaceId>)> = self
+            .activities
+            .iter_mut()
+            .filter_map(|activity| {
+                activity
+                    .views_mut()
+                    .remove(&output_id)
+                    .map(|v| (activity.id(), v.ids().to_vec()))
+            })
+            .collect();
+
+        for (act_id, ids) in to_visit {
+            for ws_id in ids {
+                if already_doomed.contains(&ws_id) {
+                    continue;
+                }
+                let ws = self
+                    .workspaces
+                    .get(&ws_id)
+                    .expect("dormant view id must be a live pool key");
+                // Normalize the sentinel-output-id case (mirrors the full-disconnect walk):
+                // a workspace whose output_id is the empty-string sentinel (produced by
+                // `new_with_config_no_outputs` without an explicit `open_on_output`) was
+                // never bound to any real output — destroy it rather than migrate.
+                let is_sentinel_output_id = ws.output_id().is_some_and(|id| id.as_str().is_empty());
+                if is_sentinel_output_id {
+                    doomed_ids.push(ws_id);
+                    already_doomed.insert(ws_id);
+                    continue;
+                }
+                if !ws.has_windows_or_name() {
+                    doomed_ids.push(ws_id);
+                    already_doomed.insert(ws_id);
+                    continue;
+                }
+                // Each (act_id, ws_id) pair gets its own migrate entry — dormant activities
+                // have independent destination views, so a workspace shared across activities A
+                // and B must migrate into *both* A.views[primary] and B.views[primary].
+                migrate_to_primary.push((act_id, ws_id));
+            }
+        }
+
+        // Mutation phase — classification is complete, so we can reborrow workspaces and
+        // activities separately on each iteration without conflicting with the
+        // already-released `iter_mut` from the collect step.
+        for (act_id, ws_id) in migrate_to_primary {
+            let ws = self
+                .workspaces
+                .get_mut(&ws_id)
+                .expect("workspace id must be a key in the pool");
+            assert_eq!(
+                ws.output_id().cloned(),
+                Some(OutputId::new(&monitor.output)),
+                "dormant view migration: workspace output_id must reference the disconnecting \
+                 output before bind_output(&primary) preserves it",
+            );
+            ws.unbind_output(&monitor.output);
+            ws.bind_output(&primary_output);
+            ws.update_config(primary_options.clone());
+
+            let primary_view = self
+                .activities
+                .get_mut(act_id)
+                .expect("act_id sourced from filter_map; activity must still be live")
+                .views_mut()
+                .get_mut(&primary_output_id)
+                .expect(
+                    "dormant activity must hold a view for primary — \
+                     ensure_all_activity_views materialized it on primary's add_output",
+                );
+            let insert_pos = primary_view.len() - 1;
+            debug_assert!(
+                !primary_view.ids().contains(&ws_id),
+                "dormant view migration must not insert a duplicate id into this activity's \
+                 primary view — each (activity, workspace) pair reaches this insert at most \
+                 once: the source view was drained by the filter_map collect above, so the \
+                 same ws_id cannot recur within act_id's iter, and different act_ids write \
+                 to different views[primary_output_id] entries",
+            );
+            primary_view.insert(insert_pos, ws_id);
+        }
+
         Self::destroy_workspaces_cross_activity(
             &mut self.activities,
             &mut self.workspaces,
@@ -5121,6 +5245,58 @@ impl<W: LayoutElement> Layout<W> {
         // cmp_by_config_then_creation which requires is_config_declared on Workspace.
         tagged.sort_by_key(|id| id.get());
 
+        // Source-side dedup: every workspace we are about to lift into this fresh
+        // (activity_id, output_id) view may already appear in another view of the same
+        // activity. Typical case: the partial-disconnect walk in `remove_output` migrated
+        // these ids into another `(activity_id, other_output)` view with `output_id`
+        // preserved on the pool entry; this call is now materializing the
+        // reconnecting output's view via `ensure_all_activity_views`. Without this drop the
+        // workspace appears in both views and the primary-monitor "own monitor exists"
+        // invariant fires at `verify_invariants` on the next `switch_activity`.
+        //
+        // Diverges intentionally from `move_workspace_to_output_by_id`'s source-side drop
+        // pattern: that path collapses a single-entry view by removing the map entry
+        // (`activity.views_mut().remove(&source_out_id)`); here we never do that. The
+        // sibling view's trailing-empty bookend (and, under EWAF, the leading-empty
+        // bookend) must survive in place, since that view is the canonical per-activity
+        // bookend for `(activity_id, other_output)` and removing the map entry would
+        // violate the per-activity bookend invariant. A single-entry view consisting only
+        // of the trailing-empty bookend is structurally valid — `assert_view_bookends`
+        // accepts last==empty-unnamed at len=1 and EWAF's "1 or 3+" rule permits len=1.
+        // Empty case (fresh-mint path) has no lifted ids and therefore no dedup work.
+        if !tagged.is_empty() {
+            let activity = self
+                .activities
+                .get_mut(activity_id)
+                .expect("activity id must be a live key");
+            // Clone the keyset to release the inner shared borrow before taking the
+            // mutable borrow on each entry inside the loop — iterating `views().keys()`
+            // while calling `views_mut().get_mut(...)` would mix shared and mutable
+            // borrows of the same `HashMap`.
+            let other_output_ids: Vec<OutputId> = activity
+                .views()
+                .keys()
+                .filter(|oid| **oid != output_id)
+                .cloned()
+                .collect();
+            for other_out in &other_output_ids {
+                let view = activity
+                    .views_mut()
+                    .get_mut(other_out)
+                    .expect("collected key must still be present");
+                for ws_id in &tagged {
+                    if let Some(pos) = view.position_of(*ws_id) {
+                        debug_assert!(
+                            view.len() > 1,
+                            "sibling view must retain at least one bookend after dedup — \
+                             `tagged` must never contain a bookend of this view",
+                        );
+                        view.remove_at(pos);
+                    }
+                }
+            }
+        }
+
         let ewaf = mon_options.layout.empty_workspace_above_first;
 
         let view = if tagged.is_empty() {
@@ -6742,38 +6918,46 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Disconnected-output bookend pass: per-activity views may carry entries keyed by an
-        // OutputId that no connected monitor matches (output cycled away while activity was
-        // dormant; future `Action::ForgetOutput` will let users prune these). Such "stale" views
-        // still hold workspaces and must satisfy the trailing-empty / EWAF leading-empty
-        // bookends. The EWAF flag uses the layout-root options, matching what
-        // `ensure_all_activity_views` uses when materializing a disconnected-output view (the
-        // per-monitor merged Options aren't available without a live monitor).
+        // Partial-disconnect migration invariant: when any monitor is connected, every
+        // activity's `views` map is keyed exclusively by connected monitors' OutputIds.
+        // The partial-disconnect walk in `remove_output` drains dormant views for the
+        // disconnecting output and migrates their workspaces into the dormant view for
+        // primary, so a stale (disconnected-output) view key must never reach
+        // `verify_invariants` while at least one monitor remains.
+        //
+        // The carve-out for `monitors.is_empty()` covers the fully-disconnected window:
+        // `remove_output`'s full-disconnect branch clears every activity's views map
+        // before returning, so every map is empty in that state. This is the invariant
+        // that lets the `Request::ActivityViews` IPC contract claim `output_name: None`
+        // is unreachable in steady state.
         let connected_output_ids: HashSet<OutputId> = self
             .monitors
             .iter()
             .map(|m| OutputId::new(&m.output))
             .collect();
-        let root_ewaf = self.options.layout.empty_workspace_above_first;
-        for activity in self.activities.iter() {
-            let act_id = activity.id();
-            let act_name = activity.name();
-            for (out_id, view) in activity.views() {
-                if connected_output_ids.contains(out_id) {
-                    continue;
-                }
-                // Pool membership for stale-view ids: every id must still be a pool key (the
-                // pool-keys union assertion above already covers this, but a fresh assertion
-                // here pin-points which (activity, output) pair broke the invariant).
-                for (i, id) in view.ids().iter().enumerate() {
+        if !self.monitors.is_empty() {
+            for activity in self.activities.iter() {
+                let act_id = activity.id();
+                let act_name = activity.name();
+                for out_id in activity.views().keys() {
                     assert!(
-                        pool.contains_key(id),
-                        "activity {act_id:?} ({act_name:?}) view for disconnected output \
-                         {out_id:?}: ids[{i}] must be a key in the workspace pool",
+                        connected_output_ids.contains(out_id),
+                        "activity {act_id:?} ({act_name:?}) view keyed by {out_id:?} \
+                         has no matching connected monitor — partial-disconnect migration \
+                         must drain views for the disconnecting output",
                     );
                 }
-                assert!(view.active_position() < view.len());
-                assert_view_bookends(pool, view, root_ewaf, Some((&act_id, out_id)));
+            }
+        } else {
+            for activity in self.activities.iter() {
+                assert!(
+                    activity.views().is_empty(),
+                    "fully-disconnected state requires every activity's views map to be \
+                     empty; activity {:?} ({:?}) retains keys {:?}",
+                    activity.id(),
+                    activity.name(),
+                    activity.views().keys().collect::<Vec<_>>(),
+                );
             }
         }
     }
