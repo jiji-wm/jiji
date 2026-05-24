@@ -5707,31 +5707,86 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // Hoist split borrows explicitly so the mutation sequence is obvious
-        // and the closure arg in `entry().or_insert_with` would not capture an
-        // overlapping borrow.
-        let pool = &mut self.workspaces;
-        let activities = &mut self.activities;
+        // Patch ws.activities + the target activity's view in a tight scope so
+        // the split mutable borrows on `self.workspaces` / `self.activities`
+        // die before the bookend mint+fixup below needs `&mut self`.
+        let out_id = {
+            let pool = &mut self.workspaces;
+            let activities = &mut self.activities;
 
-        let ws = pool
-            .get_mut(&ws_id)
-            .expect("resolved ws_id must be a live pool key");
-        ws.activities.insert(activity_id);
-        let out_id = ws.output_id().cloned();
+            let ws = pool
+                .get_mut(&ws_id)
+                .expect("resolved ws_id must be a live pool key");
+            ws.activities.insert(activity_id);
+            let out_id = ws.output_id().cloned();
 
-        if let Some(out_id) = out_id {
-            if let Some(activity) = activities.get_mut(activity_id) {
-                if let Some(view) = activity.views_mut().get_mut(&out_id) {
-                    // Defensive: sketch uses the same `contains`
-                    // check before `insert`. Under the no-op early-exit above,
-                    // the view cannot already contain `ws_id` because
-                    // `ws.activities` didn't — the per-view uniqueness
-                    // invariant is derived from pool membership. The guard
-                    // stays as belt-and-braces for any future drift.
-                    if !view.ids().contains(&ws_id) {
-                        let pos = view.len();
-                        view.insert(pos, ws_id);
+            if let Some(out_id_ref) = out_id.as_ref() {
+                if let Some(activity) = activities.get_mut(activity_id) {
+                    if let Some(view) = activity.views_mut().get_mut(out_id_ref) {
+                        // Defensive: sketch uses the same `contains`
+                        // check before `insert`. Under the no-op early-exit above,
+                        // the view cannot already contain `ws_id` because
+                        // `ws.activities` didn't — the per-view uniqueness
+                        // invariant is derived from pool membership. The guard
+                        // stays as belt-and-braces for any future drift.
+                        if !view.ids().contains(&ws_id) {
+                            let pos = view.len();
+                            view.insert(pos, ws_id);
+                        }
                     }
+                }
+            }
+            out_id
+        };
+
+        // Per-activity bookend invariant: every (activity, connected output)
+        // view must end in an empty unnamed workspace. Appending `ws_id` only
+        // breaks the rule when `ws_id` itself is windowed or named — an empty
+        // unnamed workspace is already a valid bookend, so the entire repair
+        // block short-circuits in that case (matches the active-side
+        // `has_windows_or_name` check that gates the inline mint and prevents
+        // the dormant fixup from over-minting on empty-unnamed Adds).
+        //
+        // Silent-skip case: when `ws_id` is bound to an output that no live
+        // monitor matches (the workspace lives only in the disconnected pool),
+        // no active mint or dormant fixup runs here. The bookend rule is
+        // re-asserted on reconnect via `Monitor::new`'s materializer. Matches
+        // the `set_workspace_name` precedent — no warn!, no eager repair, no
+        // rendering happens against a disconnected output.
+        let ws_needs_repair = self
+            .workspaces
+            .get(&ws_id)
+            .expect("resolved ws_id must be a live pool key")
+            .has_windows_or_name();
+        if ws_needs_repair {
+            if let Some(out_id) = out_id {
+                let mon_idx_opt = self.monitors.iter().position(|m| m.output_id() == out_id);
+                if let Some(mon_idx) = mon_idx_opt {
+                    let active_id = self.activities.active_id();
+                    if activity_id == active_id {
+                        let needs_mint = self
+                            .activities
+                            .active()
+                            .views()
+                            .get(&out_id)
+                            .expect(
+                                "active activity must hold a view on every connected \
+                                 output (per-activity bookend invariant)",
+                            )
+                            .ids()
+                            .last()
+                            .is_some_and(|last_id| {
+                                self.workspaces
+                                    .get(last_id)
+                                    .expect("view id must be a key in the pool")
+                                    .has_windows_or_name()
+                            });
+                        if needs_mint {
+                            let (monitors, pool, view) = self.monitors_pool_view_mut(&out_id);
+                            Self::add_workspace_bottom_on(monitors, pool, view, mon_idx, active_id);
+                        }
+                    }
+                    self.dormant_view_bookend_fixup(ws_id, mon_idx);
                 }
             }
         }
@@ -5991,8 +6046,10 @@ impl<W: LayoutElement> Layout<W> {
         // view-entry drop on a connected monitor so the materializer can reinstate the dropped
         // view via ensure_all_activity_views below.
         let mut dropped_any_view_entry = false;
+        let mut bookend_mon_idx: Option<usize> = None;
         if let Some(out_id) = out_id.as_ref() {
-            let is_connected = self.monitors.iter().any(|m| &m.output_id() == out_id);
+            let mon_idx_opt = self.monitors.iter().position(|m| &m.output_id() == out_id);
+            let is_connected = mon_idx_opt.is_some();
 
             // Removes first — mirrors `remove_workspace_from_activity`'s single-entry drop vs
             // `remove_at` branch. The drop-to-zero flag fires for any activity (active or
@@ -6032,6 +6089,65 @@ impl<W: LayoutElement> Layout<W> {
                         view.insert(pos, ws_id);
                     }
                 }
+            }
+
+            // Stash mon_idx for the post-loop bookend repair. Done here so the
+            // shared borrow `out_id` and the `&mut self.activities` writes
+            // above stay disjoint from the `&mut self` reborrow below.
+            bookend_mon_idx = mon_idx_opt;
+        }
+
+        // Per-activity bookend invariant: every (activity, connected output)
+        // view must end in an empty unnamed workspace. The Add loop above may
+        // have placed `ws_id` at the trailing slot of any view that gained it
+        // — but only a windowed-or-named `ws_id` actually breaks the rule. An
+        // empty unnamed workspace is itself a valid bookend, so the entire
+        // repair block short-circuits in that case (prevents
+        // `dormant_view_bookend_fixup` from over-minting on empty-unnamed
+        // Adds). When the workspace IS windowed/named: mint a fresh empty
+        // into the active view inline (only when the active activity was
+        // itself added — a pure dormant-only Add leaves the active view
+        // untouched) and let `dormant_view_bookend_fixup` patch every dormant
+        // view that holds `ws_id` at a bookend slot.
+        //
+        // Silent-skip case: when `ws_id` is bound to an output that no live
+        // monitor matches (the workspace lives only in the disconnected pool),
+        // no active mint or dormant fixup runs here. The bookend rule is
+        // re-asserted on reconnect via `Monitor::new`'s materializer. Matches
+        // the `set_workspace_name` precedent — no warn!, no eager repair, no
+        // rendering happens against a disconnected output.
+        let ws_needs_repair = self
+            .workspaces
+            .get(&ws_id)
+            .expect("resolved ws_id must be a live pool key")
+            .has_windows_or_name();
+        if ws_needs_repair {
+            if let Some(mon_idx) = bookend_mon_idx {
+                let out_id = out_id.as_ref().expect("bookend_mon_idx implies out_id");
+                if to_add.contains(&active_id) {
+                    let needs_mint = self
+                        .activities
+                        .active()
+                        .views()
+                        .get(out_id)
+                        .expect(
+                            "active activity must hold a view on every connected output \
+                             (per-activity bookend invariant)",
+                        )
+                        .ids()
+                        .last()
+                        .is_some_and(|last_id| {
+                            self.workspaces
+                                .get(last_id)
+                                .expect("view id must be a key in the pool")
+                                .has_windows_or_name()
+                        });
+                    if needs_mint {
+                        let (monitors, pool, view) = self.monitors_pool_view_mut(out_id);
+                        Self::add_workspace_bottom_on(monitors, pool, view, mon_idx, active_id);
+                    }
+                }
+                self.dormant_view_bookend_fixup(ws_id, mon_idx);
             }
         }
 

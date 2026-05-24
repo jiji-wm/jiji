@@ -18081,3 +18081,763 @@ fn partial_disconnect_dooms_sentinel_output_id_dormant_workspace() {
 
     layout.verify_invariants();
 }
+
+// --- Activity-add Add-branch trailing-empty bookend repair --------------------
+//
+// Every (activity, connected-monitor) view must end in an empty unnamed
+// workspace. `set_workspace_activities` and `add_workspace_to_activity` may
+// append a windowed-or-named workspace to a target view; the Add path must mint
+// a fresh trailing empty inline (active view) and via
+// `dormant_view_bookend_fixup` (dormant views).
+
+/// Helper for activity-add tests: splice `ws_id` so it is tagged with `beta`
+/// alone, present in beta's dormant view only, and NOT in alpha's view. Uses
+/// direct view mutation rather than `test_override_activity_view` so the
+/// helper's pool GC does not strip `ws_id` (which is reachable via beta's view
+/// after the splice but was previously only in alpha's view, the GC's blind
+/// spot).
+#[track_caller]
+fn splice_into_dormant_view_only(
+    layout: &mut Layout<TestWindow>,
+    alpha: ActivityId,
+    beta: ActivityId,
+    mon_out: &OutputId,
+    ws_id: WorkspaceId,
+) {
+    // Put ws_id into beta's view first (no GC strike: beta's previous view
+    // did not contain ws_id, so nothing is dropped).
+    let mut beta_new_ids: Vec<WorkspaceId> = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(mon_out)
+        .expect("beta has materialized view on connected output")
+        .ids()
+        .to_vec();
+    beta_new_ids.insert(0, ws_id);
+    test_override_activity_view(
+        layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(beta_new_ids, 0),
+    );
+    // Then drop ws_id from alpha's view via direct mutation (no helper, no
+    // GC). ws_id stays in the pool because beta's view holds it.
+    let alpha_view = layout
+        .activities
+        .get_mut(alpha)
+        .expect("live")
+        .views_mut()
+        .get_mut(mon_out)
+        .expect("alpha has view");
+    let pos = alpha_view
+        .position_of(ws_id)
+        .expect("ws_id must be in alpha's view before splice");
+    alpha_view.remove_at(pos);
+    // Re-tag ws so its activities = {beta} only.
+    layout.workspaces.get_mut(&ws_id).expect("live").activities = std::iter::once(beta).collect();
+}
+
+#[test]
+fn set_workspace_activities_add_to_active_view_for_windowed_workspace_mints_trailing_empty() {
+    // Precondition: workspace ws (windowed) tagged {beta}, beta dormant, alpha
+    // active. The workspace is currently NOT in alpha's active view. Set ws
+    // to {alpha, beta} — to_add = {alpha}, active is in to_add. After the
+    // append alpha's view trailing entry is ws (windowed); the active-side
+    // mint must extend alpha's view with a fresh trailing empty.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let alpha_ids_before = layout.active_view(&mon_out).ids().to_vec();
+    let ws_id = *alpha_ids_before
+        .iter()
+        .find(|id| layout.workspaces.get(id).expect("live").has_windows())
+        .expect("AddWindow yields one windowed workspace in alpha's view");
+    splice_into_dormant_view_only(&mut layout, alpha, beta, &mon_out, ws_id);
+    layout.verify_invariants();
+
+    let alpha_len_before = layout.active_view(&mon_out).len();
+
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    // Alpha's view: grew by exactly 2 (ws appended + fresh trailing empty),
+    // trailing entry is a fresh empty unnamed workspace, ws sits at len-2.
+    let alpha_view = layout.active_view(&mon_out);
+    assert_eq!(
+        alpha_view.len(),
+        alpha_len_before + 2,
+        "active view must gain ws plus a freshly-minted trailing empty",
+    );
+    let trailing_id = *alpha_view.ids().last().expect("non-empty view");
+    let trailing = layout.workspaces.get(&trailing_id).expect("live");
+    assert!(
+        !trailing.has_windows_or_name(),
+        "trailing entry must be a fresh empty unnamed workspace",
+    );
+    assert_eq!(
+        alpha_view.ids().get(alpha_view.len() - 2),
+        Some(&ws_id),
+        "appended ws sits just before the freshly-minted trailing empty",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_add_to_active_view_for_named_workspace_mints_trailing_empty() {
+    // Same shape as the windowed case but with a named (no-window) workspace.
+    // `has_windows_or_name` gates on either condition; a named empty must
+    // still trigger the mint.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let alpha_ids_before = layout.active_view(&mon_out).ids().to_vec();
+    let ws_id = *alpha_ids_before
+        .iter()
+        .find(|id| layout.workspaces.get(id).expect("live").name().is_some())
+        .expect("AddNamedWorkspace yields one named workspace in alpha's view");
+    splice_into_dormant_view_only(&mut layout, alpha, beta, &mon_out, ws_id);
+    layout.verify_invariants();
+
+    let alpha_len_before = layout.active_view(&mon_out).len();
+
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    let alpha_view = layout.active_view(&mon_out);
+    assert_eq!(
+        alpha_view.len(),
+        alpha_len_before + 2,
+        "named workspace must trigger the active-side mint just like a windowed one",
+    );
+    let trailing = layout
+        .workspaces
+        .get(alpha_view.ids().last().expect("non-empty"))
+        .expect("live");
+    assert!(!trailing.has_windows_or_name());
+    assert_eq!(alpha_view.ids().get(alpha_view.len() - 2), Some(&ws_id));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_add_to_dormant_view_for_windowed_workspace_mints_trailing_empty() {
+    // Pure dormant-only Add: workspace ws (windowed) is currently tagged
+    // {alpha} with alpha active. Add beta only (alpha stays). to_add = {beta},
+    // active NOT in to_add. The active-side mint must NOT fire (alpha's view
+    // length unchanged); dormant_view_bookend_fixup must extend beta's view
+    // because ws ends up as a bookend slot of beta's appended view.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let alpha_ids_before = layout.active_view(&mon_out).ids().to_vec();
+    let ws_id = *alpha_ids_before
+        .iter()
+        .find(|id| layout.workspaces.get(id).expect("live").has_windows())
+        .expect("AddWindow yields a windowed workspace");
+    // Seed beta's dormant view: anything not containing ws_id (so the Add
+    // appends ws_id to beta's view as a trailing slot, breaking the
+    // trailing-empty rule until the fixup mints).
+    let beta_seed_id = *alpha_ids_before
+        .iter()
+        .find(|id| **id != ws_id)
+        .expect("alpha view has >= 2 entries");
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![beta_seed_id], 0),
+    );
+    layout.verify_invariants();
+
+    let alpha_view_before = layout.active_view(&mon_out).ids().to_vec();
+
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    // Active view (alpha) must be untouched — active was not in to_add.
+    assert_eq!(
+        layout.active_view(&mon_out).ids(),
+        alpha_view_before.as_slice(),
+        "active-side mint must NOT fire for a pure dormant-only Add",
+    );
+    // Beta's view: gained ws_id at the trailing slot, then the dormant fixup
+    // appended a fresh empty after it.
+    let beta_view = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&mon_out)
+        .expect("beta has view");
+    assert!(
+        beta_view.len() >= 3,
+        "beta view must be [seed, ws_id, fresh_empty]; got len {}",
+        beta_view.len(),
+    );
+    let beta_trailing = layout
+        .workspaces
+        .get(beta_view.ids().last().expect("non-empty"))
+        .expect("live");
+    assert!(!beta_trailing.has_windows_or_name());
+    assert_eq!(
+        beta_view.ids().get(beta_view.len() - 2),
+        Some(&ws_id),
+        "ws_id sits just before the freshly-minted dormant trailing empty",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn add_workspace_to_activity_active_branch_for_windowed_workspace_mints_trailing_empty() {
+    // Same shape as the active-view set test but driving through
+    // `add_workspace_to_activity` directly. ws (windowed) tagged {beta},
+    // alpha active. Add alpha to ws → active-side mint fires.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let alpha_ids_before = layout.active_view(&mon_out).ids().to_vec();
+    let ws_id = *alpha_ids_before
+        .iter()
+        .find(|id| layout.workspaces.get(id).expect("live").has_windows())
+        .expect("AddWindow yields a windowed workspace");
+    splice_into_dormant_view_only(&mut layout, alpha, beta, &mon_out, ws_id);
+    layout.verify_invariants();
+
+    let alpha_len_before = layout.active_view(&mon_out).len();
+
+    layout
+        .add_workspace_to_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(alpha.get()),
+        )
+        .expect("add must succeed");
+
+    let alpha_view = layout.active_view(&mon_out);
+    assert_eq!(
+        alpha_view.len(),
+        alpha_len_before + 2,
+        "active view must gain ws plus a freshly-minted trailing empty",
+    );
+    let trailing = layout
+        .workspaces
+        .get(alpha_view.ids().last().expect("non-empty"))
+        .expect("live");
+    assert!(!trailing.has_windows_or_name());
+    assert_eq!(alpha_view.ids().get(alpha_view.len() - 2), Some(&ws_id));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn add_workspace_to_activity_dormant_branch_for_named_workspace_mints_trailing_empty() {
+    // ws is named (no window) and tagged {alpha}, alpha active. Add beta to
+    // ws → dormant_view_bookend_fixup must repair beta's view since ws lands
+    // at beta's view trailing slot. Active-side mint must NOT fire (target is
+    // beta, not active).
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    // alpha (active) is referenced by `layout.active_view(...)` below; capture
+    // the id only when an assertion needs it.
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let alpha_ids_before = layout.active_view(&mon_out).ids().to_vec();
+    let ws_id = *alpha_ids_before
+        .iter()
+        .find(|id| layout.workspaces.get(id).expect("live").name().is_some())
+        .expect("AddNamedWorkspace yields one named workspace");
+    // Seed beta's dormant view with a single non-ws entry so the Add appends
+    // ws to beta's view as trailing.
+    let beta_seed_id = *alpha_ids_before
+        .iter()
+        .find(|id| **id != ws_id)
+        .expect("alpha view has >= 2 entries");
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![beta_seed_id], 0),
+    );
+    layout.verify_invariants();
+
+    let alpha_view_before = layout.active_view(&mon_out).ids().to_vec();
+
+    layout
+        .add_workspace_to_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("add must succeed");
+
+    // Active view (alpha) untouched.
+    assert_eq!(
+        layout.active_view(&mon_out).ids(),
+        alpha_view_before.as_slice(),
+        "active-side mint must NOT fire when target activity is dormant",
+    );
+    // Beta's view: gained ws_id at trailing slot, then a fresh empty appended.
+    let beta_view = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&mon_out)
+        .expect("beta has view");
+    assert!(
+        beta_view.len() >= 3,
+        "beta view must be [seed, ws_id, fresh_empty]"
+    );
+    let beta_trailing = layout
+        .workspaces
+        .get(beta_view.ids().last().expect("non-empty"))
+        .expect("live");
+    assert!(!beta_trailing.has_windows_or_name());
+    assert_eq!(beta_view.ids().get(beta_view.len() - 2), Some(&ws_id));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn move_workspace_to_activity_transitivity_for_windowed_workspace_mints_trailing_empty() {
+    // `move_workspace_to_activity` delegates to add then remove. Move a
+    // windowed workspace from alpha (active) to beta. The Add step's bookend
+    // repair must fire in beta's view; the Remove step then drops ws from
+    // alpha's view. Both views must end clean.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // Identify the windowed workspace in alpha's view.
+    let alpha_ids_before = layout.active_view(&mon_out).ids().to_vec();
+    let ws_id = *alpha_ids_before
+        .iter()
+        .find(|id| layout.workspaces.get(id).expect("live").has_windows())
+        .expect("AddWindow yields a windowed workspace");
+    // Seed beta's view so the Add step's intermediate state would otherwise
+    // leave ws at the trailing slot (no auto-bookend yet for beta).
+    let beta_seed_id = *alpha_ids_before
+        .iter()
+        .find(|id| **id != ws_id)
+        .expect("alpha view has >= 2 entries");
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![beta_seed_id], 0),
+    );
+    layout.verify_invariants();
+
+    layout
+        .move_workspace_to_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("move must succeed");
+
+    // Beta's view: contains ws_id then a fresh trailing empty.
+    let beta_view = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&mon_out)
+        .expect("beta has view");
+    assert!(
+        beta_view.ids().contains(&ws_id),
+        "Add half of move must have appended ws into beta's view",
+    );
+    assert_eq!(
+        beta_view.ids().get(beta_view.len() - 2),
+        Some(&ws_id),
+        "ws_id must land at len-2 slot (trailing slot before the fresh bookend)",
+    );
+    let beta_trailing = layout
+        .workspaces
+        .get(beta_view.ids().last().expect("non-empty"))
+        .expect("live");
+    assert!(
+        !beta_trailing.has_windows_or_name(),
+        "beta view must end in a fresh empty after the Add half's bookend repair",
+    );
+
+    // Alpha's view: ws_id dropped (Remove half), trailing entry still empty.
+    let alpha_view = layout.active_view(&mon_out);
+    assert!(
+        !alpha_view.ids().contains(&ws_id),
+        "Remove half of move must have dropped ws from alpha's view",
+    );
+    let alpha_trailing = layout
+        .workspaces
+        .get(alpha_view.ids().last().expect("non-empty"))
+        .expect("live");
+    assert!(!alpha_trailing.has_windows_or_name());
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_sticky_for_windowed_workspace_mints_trailing_empties_in_every_view() {
+    // 3-activity layout: alpha (active) + beta + gamma (both dormant). A
+    // windowed workspace ws currently tagged {alpha}. SetSticky delegates to
+    // `set_workspace_activities` with the full live-id set as the target —
+    // to_add = {beta, gamma} (dormant-only Add for ws). The active-side
+    // mint must NOT fire (active was already in the set); the dormant fixup
+    // must extend both beta's and gamma's views.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    let gamma = layout.create_activity("Gamma".to_owned()).expect("create");
+
+    let alpha_ids_before = layout.active_view(&mon_out).ids().to_vec();
+    let ws_id = *alpha_ids_before
+        .iter()
+        .find(|id| layout.workspaces.get(id).expect("live").has_windows())
+        .expect("AddWindow yields a windowed workspace");
+    // Seed beta + gamma's dormant views so the Add lands ws at the trailing
+    // slot in each.
+    let seed_id = *alpha_ids_before
+        .iter()
+        .find(|id| **id != ws_id)
+        .expect("alpha view has >= 2 entries");
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![seed_id], 0),
+    );
+    test_override_activity_view(
+        &mut layout,
+        gamma,
+        mon_out.clone(),
+        WorkspaceView::new(vec![seed_id], 0),
+    );
+    layout.verify_invariants();
+
+    let alpha_view_before = layout.active_view(&mon_out).ids().to_vec();
+
+    layout
+        .set_workspace_sticky(Some(WorkspaceReference::Id(ws_id.get())))
+        .expect("set sticky must succeed");
+
+    // Active view untouched (alpha already a member).
+    assert_eq!(
+        layout.active_view(&mon_out).ids(),
+        alpha_view_before.as_slice(),
+        "sticky-transition active-side mint must not fire when active already a member",
+    );
+    // Both dormant views grew a fresh trailing empty after ws.
+    for act in [beta, gamma] {
+        let view = layout
+            .activities
+            .get(act)
+            .expect("live")
+            .views()
+            .get(&mon_out)
+            .expect("dormant has view");
+        assert!(
+            view.ids().contains(&ws_id),
+            "Add must have appended ws into dormant view",
+        );
+        let trailing = layout
+            .workspaces
+            .get(view.ids().last().expect("non-empty"))
+            .expect("live");
+        assert!(
+            !trailing.has_windows_or_name(),
+            "dormant view must end in a fresh empty after the bookend repair",
+        );
+        assert_eq!(
+            view.ids().get(view.len() - 2),
+            Some(&ws_id),
+            "ws sits just before the freshly-minted dormant trailing empty",
+        );
+    }
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_add_for_empty_unnamed_workspace_does_not_mint() {
+    // Negative pin for the `has_windows_or_name` gate. ws is empty + unnamed
+    // (a valid bookend on its own). Add it to a dormant activity's view that
+    // currently holds a single entry. Beta's view grows by exactly 1
+    // (the append), not by 2 — the dormant fixup's `has_windows_or_name`
+    // check on the trailing entry returns false and no extra mint fires.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // The default alpha view holds a single empty unnamed bookend — perfect
+    // negative-test fixture.
+    let ws_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha view has a workspace");
+    let ws = layout.workspaces.get(&ws_id).expect("live");
+    assert!(
+        !ws.has_windows_or_name(),
+        "test fixture sanity: alpha's lone view entry must be empty unnamed",
+    );
+
+    // Seed beta's view with one entry (NOT ws_id) so the Add lands ws_id at
+    // the trailing slot.
+    let beta_seed = Workspace::new(
+        &layout.monitors[0].output,
+        std::iter::once(beta).collect(),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let beta_seed_id = beta_seed.id();
+    assert!(layout.workspaces.insert(beta_seed_id, beta_seed).is_none());
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![beta_seed_id], 0),
+    );
+    layout.verify_invariants();
+
+    let beta_len_before = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&mon_out)
+        .expect("view")
+        .len();
+    let alpha_len_before = layout.active_view(&mon_out).len();
+
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    // Beta gained exactly one entry (ws_id). No extra mint.
+    let beta_view = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&mon_out)
+        .expect("view");
+    assert_eq!(
+        beta_view.len(),
+        beta_len_before + 1,
+        "empty unnamed appended workspace must NOT trigger an extra dormant mint",
+    );
+    // Active view: alpha already held ws, no change.
+    assert_eq!(
+        layout.active_view(&mon_out).len(),
+        alpha_len_before,
+        "empty unnamed appended workspace must NOT trigger an extra active mint",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_add_targets_bound_output_not_active_monitor() {
+    // Multi-output independence pin for the Add-path bookend mint.
+    //
+    // Layout: two outputs, alpha active, workspace ws (named) bound to
+    // output 2 (the non-active monitor). Adding ws to a dormant activity beta
+    // must mint a trailing empty in beta's *output-2* view. A broken
+    // implementation that looked up the active monitor's index instead of
+    // ws's bound output would repair the wrong view (output 1) and leave
+    // output 2 without a bookend — `verify_invariants` would trip.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon0_out = layout.monitors[0].output_id();
+    let mon1_out = layout.monitors[1].output_id();
+
+    // Mint a named workspace bound to output 2 (monitor index 1).
+    // Use set_workspace_name on output-2's existing bookend to make it named.
+    let ws_id = layout
+        .active_view(&mon1_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("output-2 active view has a bookend workspace");
+    layout.set_workspace_name(
+        "important".to_owned(),
+        Some(WorkspaceReference::Id(ws_id.get())),
+    );
+    // set_workspace_name mints a fresh trailing empty on output-2's active
+    // view: view is now [ws_id, fresh_empty]. Verify.
+    assert!(
+        layout.active_view(&mon1_out).ids().len() >= 2,
+        "output-2 active view must have grown after set_workspace_name",
+    );
+    layout.verify_invariants();
+
+    // Create beta, seed its output-2 dormant view so ws_id lands at the
+    // trailing slot when appended.
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    let beta_seed_id = *layout
+        .active_view(&mon1_out)
+        .ids()
+        .iter()
+        .find(|id| **id != ws_id)
+        .expect("output-2 view has a second entry after name-mint");
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon1_out.clone(),
+        WorkspaceView::new(vec![beta_seed_id], 0),
+    );
+    layout.verify_invariants();
+
+    // Capture pre-call state.
+    let mon0_alpha_len_before = layout.active_view(&mon0_out).ids().len();
+    let mon0_beta_len_before = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&mon0_out)
+        .map_or(0, |v| v.len());
+
+    // Add beta to ws's activity set (ws was only in alpha; now alpha + beta).
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    // Output-2 beta view must have gained ws_id at len-2 and a fresh trailing
+    // empty at the last slot.
+    let beta_out2_view = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&mon1_out)
+        .expect("beta has an output-2 view");
+    let beta_trailing = layout
+        .workspaces
+        .get(beta_out2_view.ids().last().expect("non-empty"))
+        .expect("live");
+    assert!(
+        !beta_trailing.has_windows_or_name(),
+        "beta's output-2 view must end in a fresh empty after the Add-path repair",
+    );
+    assert_eq!(
+        beta_out2_view.ids().get(beta_out2_view.len() - 2),
+        Some(&ws_id),
+        "ws_id must sit at the len-2 slot of beta's output-2 view",
+    );
+
+    // Output-1 views must be untouched (ws is bound to output 2, not output 1).
+    assert_eq!(
+        layout.active_view(&mon0_out).ids().len(),
+        mon0_alpha_len_before,
+        "alpha's output-1 view must not grow",
+    );
+    if mon0_beta_len_before > 0 {
+        let beta_out1_len_after = layout
+            .activities
+            .get(beta)
+            .expect("live")
+            .views()
+            .get(&mon0_out)
+            .map_or(0, |v| v.len());
+        assert_eq!(
+            beta_out1_len_after, mon0_beta_len_before,
+            "beta's output-1 view must be untouched",
+        );
+    }
+
+    layout.verify_invariants();
+}
