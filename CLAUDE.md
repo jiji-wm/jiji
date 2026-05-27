@@ -16,6 +16,11 @@ This file covers **fork-specific coding conventions** that are enforced in revie
 - `cargo build --release` — sanity-check release profile after any `#[cfg(debug_assertions)]` edit.
 - `cargo +nightly fmt --all` — only when explicitly asked; never as a drive-by (it pollutes diffs).
 
+### Implementer discipline (read by jiji-rust-implementer)
+
+- **Report the test-bucket arithmetic.** `cargo test --all --exclude jiji-visual-tests` runs four buckets; report the count as `<unit> + <ipc> + <config> + <doc>` (e.g. `565 + 21 + 45 + 1`) and explain any delta vs. the spec's baseline. An unexplained delta is a stop-and-report condition.
+- **Maintain `verify_invariants`.** Any layout mutation must keep the invariant checks passing; new structural guarantees get a new assertion in the same commit.
+
 ## Code conventions (enforced in review)
 
 ### 1. Errors from invariants panic loudly
