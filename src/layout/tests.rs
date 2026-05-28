@@ -4703,6 +4703,43 @@ fn build_activities_ipc_mirrors_seed_state() {
 }
 
 #[test]
+fn build_activities_ipc_reports_max_seq_on_active() {
+    // The IPC projection must surface `last_active_seq` from the layout layer.
+    // After two activities are present and beta is active, the IPC entry for
+    // beta must carry a higher `last_active_seq` than the seed entry.
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+
+    let beta_activity = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta_activity.id();
+    test_insert_activity(&mut layout, beta_activity);
+    layout.switch_activity(beta_id);
+
+    let ipc = crate::ipc::server::build_activities_ipc(&layout);
+    assert_eq!(ipc.len(), 2);
+
+    let beta_entry = ipc.iter().find(|a| a.id == beta_id.get()).unwrap();
+    let seed_entry = ipc.iter().find(|a| a.id == seed_id.get()).unwrap();
+
+    assert!(
+        beta_entry.last_active_seq > seed_entry.last_active_seq,
+        "active beta must have higher last_active_seq ({}) than seed ({})",
+        beta_entry.last_active_seq,
+        seed_entry.last_active_seq,
+    );
+    assert!(
+        beta_entry.last_active_seq > 0,
+        "active beta last_active_seq must be non-zero",
+    );
+    assert!(
+        seed_entry.last_active_seq > 0,
+        "seed last_active_seq must be non-zero (stamped at construction)",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
 fn build_activity_views_ipc_projects_view_map_across_activities_and_outputs() {
     // Pin `build_activity_views_ipc` against the source contract: one entry per
     // extant `(activity, output_id)` view pair, with outer order = activity
@@ -4978,7 +5015,7 @@ fn backwards_compat_switch_activity_self_and_previous_are_noops_with_only_defaul
     layout.verify_invariants();
 
     // switch_activity_previous with no previous: no-op.
-    layout.switch_activity_previous();
+    layout.switch_activity_previous(1);
     assert_eq!(layout.active_activity_id(), default_id);
     assert_eq!(
         layout.activities.previous_id(),
@@ -5078,7 +5115,7 @@ fn layout_switch_activity_previous_no_op_when_no_previous() {
     let seed_id = layout.active_activity_id();
     assert_eq!(layout.activities.previous_id(), None);
 
-    layout.switch_activity_previous();
+    layout.switch_activity_previous(1);
 
     assert_eq!(layout.active_activity_id(), seed_id);
     assert_eq!(layout.activities.previous_id(), None);
@@ -5103,10 +5140,134 @@ fn layout_switch_activity_previous_toggles_active() {
     assert_eq!(layout.activities.previous_id(), Some(seed_id));
 
     // Toggle back — must land on seed_id with previous = Some(beta_id).
-    layout.switch_activity_previous();
+    layout.switch_activity_previous(1);
 
     assert_eq!(layout.active_activity_id(), seed_id);
     assert_eq!(layout.activities.previous_id(), Some(beta_id));
+    layout.verify_invariants();
+}
+
+#[test]
+fn layout_switch_activity_previous_depth_1_equals_immediate_previous() {
+    // depth=1 must behave identically to the original history-based toggle.
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+
+    layout.switch_activity(beta_id);
+    layout.switch_activity_previous(1);
+
+    assert_eq!(layout.active_activity_id(), seed_id);
+    layout.verify_invariants();
+}
+
+#[test]
+fn layout_switch_activity_previous_depth_2_jumps_two_back() {
+    // depth=2 must skip past `previous` and land on the activity before it.
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+
+    let gamma = super::activity::Activity::new_runtime("gamma".to_owned());
+    let gamma_id = gamma.id();
+    test_insert_activity(&mut layout, gamma);
+
+    // Switch order: seed → beta → gamma. MRU list: [gamma, beta, seed].
+    layout.switch_activity(beta_id);
+    layout.switch_activity(gamma_id);
+
+    // depth=2 must land on seed (position 2 in the MRU list).
+    layout.switch_activity_previous(2);
+    assert_eq!(layout.active_activity_id(), seed_id);
+    layout.verify_invariants();
+}
+
+#[test]
+fn layout_switch_activity_previous_depth_overflow_clamps_to_oldest_activated() {
+    // depth > (activated_count - 1) must clamp to the oldest-activated activity.
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+
+    // Switch: seed → beta. Only 2 activities have been activated; MRU: [beta, seed].
+    layout.switch_activity(beta_id);
+
+    // depth=100 overflows; must clamp to position 1 (seed, the oldest activated).
+    layout.switch_activity_previous(100);
+    assert_eq!(layout.active_activity_id(), seed_id);
+    layout.verify_invariants();
+}
+
+#[test]
+fn layout_switch_activity_previous_depth_overflow_clamps_to_oldest_not_second() {
+    // With 3 activated activities, overflow must land on the *oldest* (depth-2), not the
+    // second-most-recent (depth-1). This catches off-by-one errors in the clamp boundary.
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+
+    let gamma = super::activity::Activity::new_runtime("gamma".to_owned());
+    let gamma_id = gamma.id();
+    test_insert_activity(&mut layout, gamma);
+
+    // Activate in order: seed → beta → gamma.
+    // MRU after these switches: [gamma, beta, seed].
+    layout.switch_activity(beta_id);
+    layout.switch_activity(gamma_id);
+
+    // depth=100 overflows (activated_count=3, max valid idx=2); must land on seed (idx=2),
+    // not beta (idx=1).
+    layout.switch_activity_previous(100);
+    assert_eq!(
+        layout.active_activity_id(),
+        seed_id,
+        "overflow must clamp to oldest activated (seed), not second-most-recent (beta)",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn layout_switch_activity_previous_depth_1_single_activated_is_no_op() {
+    // Only one activity has been activated (the seed). depth=1 must be a pure no-op.
+    let mut layout = Layout::<TestWindow>::default();
+    let seed_id = layout.active_activity_id();
+
+    // Insert beta but never switch to it — beta's seq stays 0.
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    test_insert_activity(&mut layout, beta);
+
+    layout.switch_activity_previous(1);
+
+    assert_eq!(layout.active_activity_id(), seed_id);
+    layout.verify_invariants();
+}
+
+#[test]
+fn layout_switch_activity_previous_depth_0_is_no_op() {
+    // depth=0 names the current active — must be an explicit no-op regardless
+    // of pool state.
+    let mut layout = Layout::<TestWindow>::default();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+    layout.switch_activity(beta_id);
+
+    // Active is now beta; depth=0 must leave it unchanged.
+    layout.switch_activity_previous(0);
+    assert_eq!(layout.active_activity_id(), beta_id);
     layout.verify_invariants();
 }
 
@@ -6956,7 +7117,7 @@ fn set_workspace_name_dormant_only_view_via_id_appends_bookend() {
     // and seed is active. Beta's view at this point holds exactly its own bookend empty,
     // tagged with `{beta}` only — not shared with seed.
     layout.switch_activity(beta_id);
-    layout.switch_activity_previous();
+    layout.switch_activity_previous(1);
     assert_eq!(layout.active_activity_id(), seed_id);
 
     let beta_view_before = layout
@@ -7079,7 +7240,7 @@ fn set_workspace_name_under_ewaf_dormant_only_view_via_id_prepends_bookend() {
 
     let beta_id = layout.create_activity("Beta".to_owned()).expect("create");
     layout.switch_activity(beta_id);
-    layout.switch_activity_previous();
+    layout.switch_activity_previous(1);
     assert_eq!(layout.active_activity_id(), seed_id);
 
     // Beta's dormant view under EWAF has at least a leading bookend at position 0.
@@ -7207,7 +7368,7 @@ fn set_workspace_name_dormant_view_on_non_active_monitor_via_id_appends_bookend(
     // view on M1), then switching back to seed so beta's view on M1 is dormant.
     layout.focus_output(&layout.monitors[1].output.clone());
     layout.switch_activity(beta_id);
-    layout.switch_activity_previous();
+    layout.switch_activity_previous(1);
     assert_eq!(layout.active_activity_id(), seed_id);
 
     // Restore active monitor to M0 so active_monitor_idx != 1 during the rename.
@@ -7329,7 +7490,7 @@ fn switch_activity_focus_follows_active_activity_view() {
     );
     layout.verify_invariants();
 
-    layout.switch_activity_previous();
+    layout.switch_activity_previous(1);
     assert_eq!(layout.active_activity_id(), seed_id);
     assert_eq!(
         layout.focus().map(|w| *w.id()),
@@ -11722,6 +11883,7 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
             is_active: true,
             is_urgent: false,
             is_config_declared: false,
+            last_active_seq: 0,
         },
     );
     previous.insert(
@@ -11732,6 +11894,7 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
             is_active: false,
             is_urgent: false,
             is_config_declared: false,
+            last_active_seq: 0,
         },
     );
     previous.insert(
@@ -11742,6 +11905,7 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
             is_active: false,
             is_urgent: false,
             is_config_declared: false,
+            last_active_seq: 0,
         },
     );
     previous.insert(
@@ -11752,6 +11916,7 @@ fn diff_activity_lifecycle_multi_kind_ordering() {
             is_active: false,
             is_urgent: false,
             is_config_declared: false,
+            last_active_seq: 0,
         },
     );
 
@@ -11868,6 +12033,7 @@ fn diff_activity_lifecycle_newcomer_routes_to_created_not_renamed() {
             is_active: true,
             is_urgent: false,
             is_config_declared: false,
+            last_active_seq: 0,
         },
     );
     previous.insert(
@@ -11878,6 +12044,7 @@ fn diff_activity_lifecycle_newcomer_routes_to_created_not_renamed() {
             is_active: false,
             is_urgent: false,
             is_config_declared: false,
+            last_active_seq: 0,
         },
     );
 
@@ -18858,4 +19025,77 @@ fn set_workspace_activities_add_targets_bound_output_not_active_monitor() {
     }
 
     layout.verify_invariants();
+}
+
+#[test]
+fn move_window_to_pool_workspace_disconnected_output_returns_err() {
+    // Pins arm 3 of `move_window_to_pool_workspace`: a workspace that is
+    // parked in `disconnected_workspace_ids` (removed output, no remaining
+    // monitor to home it) must return `Err(MoveWindowToPoolError::TargetUnreachable)`.
+    //
+    // Setup: single output + two activities. Alpha has a window. Name one of
+    // beta's bookend workspaces so it survives a full-disconnect as a named
+    // workspace in `disconnected_workspace_ids`. Remove the only output —
+    // monitors become empty and beta-ws retains `output_id() = Some(old-id)`.
+    // Call `move_window_to_pool_workspace` in the monitor-less window: arm 3
+    // fires before the source-side detach (which would panic on empty monitors)
+    // and returns `TargetUnreachable`.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    // Create beta activity with views on all connected outputs.
+    let beta_act = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta = beta_act.id();
+    test_insert_activity(&mut layout, beta_act);
+    layout.verify_invariants();
+
+    // Name beta's bookend workspace so it survives the full-disconnect (named
+    // workspaces are kept in `disconnected_workspace_ids`; unnamed empties are
+    // doomed and destroyed).
+    let out1 = layout.monitors[0].output_id();
+    let beta_ws_id = {
+        let bv = layout
+            .activities
+            .get(beta)
+            .expect("beta must exist")
+            .views()
+            .get(&out1)
+            .expect("beta has a view on output-1")
+            .clone();
+        *bv.ids().first().expect("beta view has at least one entry")
+    };
+    layout.set_workspace_name(
+        "beta-ws".to_owned(),
+        Some(WorkspaceReference::Id(beta_ws_id.get())),
+    );
+    layout.verify_invariants();
+
+    // Full-disconnect: remove the only output. beta-ws parks in
+    // `disconnected_workspace_ids` with its `output_id()` still naming
+    // the removed output.
+    let out1_output = layout.monitors[0].output().clone();
+    layout.remove_output(&out1_output);
+    assert!(
+        layout.monitors.is_empty(),
+        "layout must be monitor-less after full-disconnect"
+    );
+    assert!(
+        layout.disconnected_workspace_ids.contains(&beta_ws_id),
+        "beta-ws must be in disconnected pool after full-disconnect"
+    );
+
+    // In the monitor-less state, arm 3 must fire and return TargetUnreachable
+    // before the source-side detach (which would panic on empty monitors).
+    let result = layout.move_window_to_pool_workspace(None, beta_ws_id.get(), ActivateWindow::No);
+    assert_eq!(
+        result,
+        Err(MoveWindowToPoolError::TargetUnreachable),
+        "a workspace parked in disconnected_workspace_ids must surface as \
+         TargetUnreachable — arm-3 regression pin (disconnected-output sub-case)",
+    );
 }

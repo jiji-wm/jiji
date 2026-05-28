@@ -624,6 +624,7 @@ mod tests {
             is_config_declared,
             is_active,
             is_urgent,
+            last_active_seq: 0,
         }
     }
 

@@ -399,7 +399,7 @@ pub enum Action {
     RenameActivity(ActivityReference, String),
     #[knuffel(skip)]
     SwitchActivity(ActivityReference),
-    SwitchActivityPrevious,
+    SwitchActivityPrevious(#[knuffel(argument, default = 1u32)] u32),
     #[knuffel(skip)]
     AddWorkspaceToActivity(Option<WorkspaceReference>, ActivityReference),
     #[knuffel(skip)]
@@ -740,7 +740,9 @@ impl From<jiji_ipc::Action> for Action {
                 Self::RenameActivity(activity.into(), name)
             }
             jiji_ipc::Action::SwitchActivity { activity } => Self::SwitchActivity(activity.into()),
-            jiji_ipc::Action::SwitchActivityPrevious {} => Self::SwitchActivityPrevious,
+            jiji_ipc::Action::SwitchActivityPrevious { depth } => {
+                Self::SwitchActivityPrevious(depth)
+            }
             jiji_ipc::Action::AddWorkspaceToActivity {
                 workspace,
                 activity,
@@ -1197,6 +1199,32 @@ impl FromStr for Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parse an `Action` from a KDL node string (the node name is the action
+    /// name; the document is a single-node wrapper).
+    fn parse_action(kdl: &str) -> Action {
+        knuffel::parse::<Vec<Action>>("test.kdl", kdl)
+            .map_err(miette::Report::new)
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("expected exactly one action node")
+    }
+
+    #[test]
+    fn switch_activity_previous_bare_defaults_to_depth_one() {
+        // Bare `switch-activity-previous;` (legacy KDL form without an argument)
+        // must parse to `SwitchActivityPrevious(1)`.
+        let action = parse_action("switch-activity-previous");
+        assert_eq!(action, Action::SwitchActivityPrevious(1));
+    }
+
+    #[test]
+    fn switch_activity_previous_explicit_depth_parses() {
+        // Explicit depth argument round-trips.
+        let action = parse_action("switch-activity-previous 3");
+        assert_eq!(action, Action::SwitchActivityPrevious(3));
+    }
 
     #[test]
     fn parse_xf86_screensaver() {

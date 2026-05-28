@@ -1519,6 +1519,17 @@ impl State {
                 // pool workspace and honors `focus:true` via the same
                 // activation flow as `Action::FocusWindow`.
                 if let WorkspaceReference::Id(raw) = reference {
+                    // Gate the hard-block check before any mutating call when
+                    // `focus:true` requests an activity switch. Mirrors the
+                    // `Action::FocusWindow` precedent (input/mod.rs:1017-1046)
+                    // which checks `is_activity_switch_hard_blocked` before
+                    // acting, so an in-flight gesture cannot observe a moved
+                    // window with no matching focus change.
+                    if focus {
+                        if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
+                            return Err(block.into());
+                        }
+                    }
                     let activate = if focus {
                         ActivateWindow::Smart
                     } else {
@@ -1556,13 +1567,16 @@ impl State {
                         Ok(MoveWindowToPoolOutcome::DelegateToActiveView) => {
                             // Fall through to the existing path below.
                         }
-                        Ok(MoveWindowToPoolOutcome::MovedDormant { target_ws_id }) => {
+                        Ok(MoveWindowToPoolOutcome::NothingToMove) => {
+                            // Empty bookend slot — no tile to move. No activity
+                            // switch, no focus change; reply Handled so the CLI
+                            // does not print a false-error line.
+                            return Ok(DoActionOutcome::Handled);
+                        }
+                        Ok(MoveWindowToPoolOutcome::MovedDormant {
+                            ws_id: target_ws_id,
+                        }) => {
                             if focus {
-                                if let Some(block) =
-                                    self.niri.layout.is_activity_switch_hard_blocked()
-                                {
-                                    return Err(block.into());
-                                }
                                 let target_activity = self
                                     .niri
                                     .layout
@@ -1655,11 +1669,12 @@ impl State {
                         .find(|(_, ws)| ws.has_window(win_id))?
                         .1
                         .id();
-                    Some((
-                        mapped.window.clone(),
-                        ws_id,
-                        mapped.get_last_focused_activity(),
-                    ))
+                    let focus_hint = if focus {
+                        mapped.get_last_focused_activity()
+                    } else {
+                        None
+                    };
+                    Some((mapped.window.clone(), ws_id, focus_hint))
                 });
                 let Some((window, source_ws_id, focus_hint)) = resolved else {
                     debug!(
@@ -1701,6 +1716,16 @@ impl State {
 
                 if source_is_active_view {
                     if let WorkspaceReference::Id(raw) = reference {
+                        // Gate the hard-block check before any mutating call
+                        // when `focus:true` requests an activity switch. Mirrors
+                        // the `Action::FocusWindow` precedent and the None arm
+                        // above.
+                        if focus {
+                            if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked()
+                            {
+                                return Err(block.into());
+                            }
+                        }
                         let activate = if focus {
                             ActivateWindow::Smart
                         } else {
@@ -1714,13 +1739,20 @@ impl State {
                             Ok(MoveWindowToPoolOutcome::DelegateToActiveView) => {
                                 // Fall through to the existing path below.
                             }
-                            Ok(MoveWindowToPoolOutcome::MovedDormant { target_ws_id }) => {
+                            Ok(MoveWindowToPoolOutcome::NothingToMove) => {
+                                // The `Some(window)` arm always finds the window
+                                // (caller verified presence); `NothingToMove` is
+                                // unreachable on this arm by construction.
+                                unreachable!(
+                                    "move_window_to_pool_workspace: Some(window) arm \
+                                     always has a tile to remove; NothingToMove \
+                                     is only possible on the None arm"
+                                )
+                            }
+                            Ok(MoveWindowToPoolOutcome::MovedDormant {
+                                ws_id: target_ws_id,
+                            }) => {
                                 if focus {
-                                    if let Some(block) =
-                                        self.niri.layout.is_activity_switch_hard_blocked()
-                                    {
-                                        return Err(block.into());
-                                    }
                                     let target_activity = self
                                         .niri
                                         .layout
@@ -1966,7 +1998,7 @@ impl State {
                     }
                 }
             }
-            Action::SwitchActivityPrevious => {
+            Action::SwitchActivityPrevious(depth) => {
                 if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
                     debug!(
                         "switch_activity_previous: hard-blocked by {block:?}, ignoring \
@@ -1974,7 +2006,7 @@ impl State {
                     );
                     return Err(block.into());
                 }
-                self.niri.layout.switch_activity_previous();
+                self.niri.layout.switch_activity_previous(depth);
                 self.maybe_warp_cursor_to_focus();
                 self.niri.layer_shell_on_demand_focus = None;
                 self.niri.queue_redraw_all();

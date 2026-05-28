@@ -218,6 +218,12 @@ impl ActivityId {
 /// active activity the key domain equals the connected monitors' `OutputId`s; inactive activities
 /// carry a dormant snapshot across activity switches. The Layout-level invariant is enforced in
 /// `Layout::verify_invariants`.
+///
+/// `last_active_seq` records the [`Activities::activation_counter`] value at the time this
+/// activity last became active. `0` means never activated (only possible for non-seed activities
+/// that have not yet been switched to this session). The seed activity is stamped `1` at pool
+/// construction. Higher values indicate more-recent activation; clients sort descending for MRU
+/// order.
 #[derive(Debug)]
 pub struct Activity {
     id: ActivityId,
@@ -226,6 +232,10 @@ pub struct Activity {
     /// Per-output workspace views. For the active activity, the key domain equals connected
     /// monitors' `OutputId`s; for inactive activities this is a dormant snapshot. See struct doc.
     views: HashMap<OutputId, WorkspaceView>,
+    /// Monotonic activation sequence number. Set to the pool's `activation_counter` value each
+    /// time this activity becomes active via [`Activities::set_active`]. `0` = not yet activated
+    /// this session. The seed is initialized to `1`; subsequent flips stamp `>= 2`.
+    last_active_seq: u64,
 }
 
 impl Activity {
@@ -235,6 +245,7 @@ impl Activity {
             name,
             is_config_declared: false,
             views: HashMap::new(),
+            last_active_seq: 0,
         }
     }
 
@@ -244,7 +255,16 @@ impl Activity {
             name,
             is_config_declared: true,
             views: HashMap::new(),
+            last_active_seq: 0,
         }
+    }
+
+    /// Returns the monotonic activation sequence number for this activity.
+    ///
+    /// `0` means the activity has not been activated this session. Higher values
+    /// indicate more-recent activation; sort descending for MRU order.
+    pub fn last_active_seq(&self) -> u64 {
+        self.last_active_seq
     }
 
     pub fn id(&self) -> ActivityId {
@@ -706,6 +726,9 @@ impl std::error::Error for ReloadActivityRemovalError {}
 /// - Each stored `Activity`'s `id` equals its key in `map` (enforced by private `Activity.id` +
 ///   construction-only id minting; inserts go through `map.insert(activity.id, activity)`
 ///   exclusively).
+/// - `activation_counter` starts at `1` and is incremented on every real flip in
+///   [`Self::set_active`]. The seed activity's `last_active_seq` is initialized to `1` at
+///   construction time, so the first real flip stamps `2` — no seq value is ever reused.
 #[derive(Debug)]
 // No `is_empty` — `Activities` is never empty by construction.
 #[allow(clippy::len_without_is_empty)]
@@ -713,13 +736,23 @@ pub struct Activities {
     map: IndexMap<ActivityId, Activity>,
     active: ActivityId,
     previous: Option<ActivityId>,
+    /// Monotonically increasing counter bumped on every real activity flip. Starts at `1`;
+    /// the seed activity's `last_active_seq` is set to `1` at construction. Each subsequent
+    /// real flip increments this first, then stamps the new active activity.
+    activation_counter: u64,
 }
 
 impl Activities {
     /// Seed with the first (default) activity. After construction,
-    /// `active_id() == seed.id` and `previous_id() == None`. Mirrors
+    /// `active_id() == seed.id`, `previous_id() == None`, and the seed
+    /// holds `last_active_seq == 1`. Mirrors
     /// [`WorkspaceView::new`]'s non-empty-by-construction discipline.
-    pub fn new(seed: Activity) -> Self {
+    pub fn new(mut seed: Activity) -> Self {
+        // Start the counter at 1 and stamp the seed so it always holds the maximum
+        // seq in a fresh pool. The first real flip will bump the counter to 2 and
+        // stamp the target — no seq value is ever shared between two activities.
+        let activation_counter = 1;
+        seed.last_active_seq = activation_counter;
         let active = seed.id;
         let mut map = IndexMap::new();
         map.insert(seed.id, seed);
@@ -727,6 +760,7 @@ impl Activities {
             map,
             active,
             previous: None,
+            activation_counter,
         }
     }
 
@@ -958,9 +992,11 @@ impl Activities {
     /// `Layout::switch_activity`.
     ///
     /// No-op fast-path: if `target == active_id()`, returns immediately
-    /// without touching `previous`. Otherwise `previous = Some(old_active)`
-    /// and `active = target`; since `target != old_active` in that branch,
-    /// the `previous != active` distinctness invariant is re-established.
+    /// without touching `previous` or `activation_counter`. Otherwise:
+    /// `activation_counter` is incremented, `target.last_active_seq` is
+    /// stamped with the new counter value, `previous = Some(old_active)`, and
+    /// `active = target`; since `target != old_active` in that branch, the
+    /// `previous != active` distinctness invariant is re-established.
     ///
     /// Panics (debug only) if `target` is not a live key in `map`.
     pub(super) fn set_active(&mut self, target: ActivityId) {
@@ -971,6 +1007,11 @@ impl Activities {
         if target == self.active {
             return;
         }
+        self.activation_counter += 1;
+        self.map
+            .get_mut(&target)
+            .expect("set_active target must be a live key in the map")
+            .last_active_seq = self.activation_counter;
         self.previous = Some(self.active);
         self.active = target;
         debug_assert!(
@@ -1144,6 +1185,10 @@ impl Activities {
             "Activities::remove: cannot empty the pool (len == 1)",
         );
 
+        // No recency cleanup needed: `shift_remove` drops the entry entirely,
+        // so its `last_active_seq` is gone with it. The remaining activities'
+        // seq values stay valid — they are compared relative to each other and
+        // `activation_counter` is never reset, so no renumbering is needed.
         let activity = self
             .map
             .shift_remove(&id)
@@ -1152,6 +1197,27 @@ impl Activities {
             self.previous = None;
         }
         activity
+    }
+
+    /// Returns activity ids sorted by `last_active_seq` descending (most-recently-activated
+    /// first).
+    ///
+    /// Ties (both activities have the same `last_active_seq`) are broken by declaration order —
+    /// `IndexMap` iteration is insertion order, and `sort_by` is stable, so equal-seq entries
+    /// preserve their relative insertion order. In practice this only occurs when multiple
+    /// activities share `seq == 0` (never activated this session); the active activity always
+    /// holds the unique maximum seq, so it is always `result[0]`.
+    ///
+    /// Declaration order is not reordered for recency: the `IndexMap` pool remains in
+    /// insertion order; recency is computed on read via this method.
+    pub fn recency_ordered(&self) -> Vec<ActivityId> {
+        let mut ids = Vec::from_iter(self.map.keys().copied());
+        ids.sort_by(|&a, &b| {
+            let seq_a = self.map[&a].last_active_seq;
+            let seq_b = self.map[&b].last_active_seq;
+            seq_b.cmp(&seq_a)
+        });
+        ids
     }
 
     #[cfg(debug_assertions)]
@@ -1172,6 +1238,36 @@ impl Activities {
                 Some(self.active),
                 "Activities.previous must not equal active (distinctness invariant)",
             );
+        }
+
+        // Recency invariant: the active activity always holds the maximum last_active_seq
+        // (guaranteed by the monotonically-increasing counter in `set_active`; newest stamp
+        // wins), so it must be first in the recency-ordered list.
+        {
+            let ordered = self.recency_ordered();
+            assert_eq!(
+                ordered.first().copied(),
+                Some(self.active),
+                "active must hold max last_active_seq (ordered[0] == active)",
+            );
+        }
+
+        // Corollary: when `previous` is set and at least two activities carry a non-zero seq
+        // (i.e., have been activated at least once this session), the entry with the
+        // second-highest seq must equal `previous`. The assertion catches any future mutation
+        // path that forgets to stamp.
+        if self.previous.is_some() {
+            let activated_count = self.map.values().filter(|a| a.last_active_seq > 0).count();
+            if activated_count >= 2 {
+                let ordered = self.recency_ordered();
+                // ordered[0] == active (max seq); ordered[1] == previous (second-highest seq).
+                assert_eq!(
+                    ordered.get(1).copied(),
+                    self.previous,
+                    "second-highest last_active_seq entry must equal previous \
+                     (Activities recency invariant)",
+                );
+            }
         }
     }
 }
@@ -1587,5 +1683,144 @@ mod tests {
         assert!(acts.iter().all(|a| a.is_config_declared()));
         assert_eq!(acts.active().name(), "Work");
         assert_eq!(acts.previous_id(), None);
+    }
+
+    // --- Recency stamping tests ---
+
+    fn activity(name: &str) -> Activity {
+        Activity::new_runtime(name.to_owned())
+    }
+
+    #[test]
+    fn seed_has_seq_one_and_counter_one() {
+        let seed = activity("seed");
+        let pool = Activities::new(seed);
+        // Seed must be stamped with seq = 1 (same as activation_counter at construction).
+        assert_eq!(pool.active().last_active_seq(), 1);
+        assert_eq!(pool.activation_counter, 1);
+        assert_eq!(pool.previous_id(), None);
+    }
+
+    #[test]
+    fn set_active_real_flip_bumps_counter_and_stamps_target() {
+        let seed = activity("seed");
+        let seed_id = seed.id();
+        let mut pool = Activities::new(seed);
+
+        let beta = activity("beta");
+        let beta_id = beta.id();
+        pool.insert(beta);
+
+        // Beta starts with seq = 0.
+        assert_eq!(pool.map[&beta_id].last_active_seq, 0);
+        assert_eq!(pool.activation_counter, 1);
+
+        pool.set_active(beta_id);
+        assert_eq!(pool.activation_counter, 2);
+        assert_eq!(pool.map[&beta_id].last_active_seq, 2);
+        // Seed seq unchanged.
+        assert_eq!(pool.map[&seed_id].last_active_seq, 1);
+    }
+
+    #[test]
+    fn set_active_no_op_does_not_bump_counter_or_seq() {
+        let seed = activity("seed");
+        let seed_id = seed.id();
+        let mut pool = Activities::new(seed);
+
+        // No-op: switching to the already-active activity.
+        pool.set_active(seed_id);
+        assert_eq!(pool.activation_counter, 1);
+        assert_eq!(pool.map[&seed_id].last_active_seq, 1);
+    }
+
+    #[test]
+    fn active_always_holds_max_seq() {
+        let seed = activity("seed");
+        let seed_id = seed.id();
+        let mut pool = Activities::new(seed);
+
+        let beta = activity("beta");
+        let beta_id = beta.id();
+        pool.insert(beta);
+
+        // Switch seed → beta → seed → beta. At each step, the active entry holds max seq.
+        pool.set_active(beta_id);
+        assert_eq!(pool.map[&beta_id].last_active_seq, pool.activation_counter);
+
+        pool.set_active(seed_id);
+        assert_eq!(pool.map[&seed_id].last_active_seq, pool.activation_counter);
+
+        pool.set_active(beta_id);
+        assert_eq!(pool.map[&beta_id].last_active_seq, pool.activation_counter);
+    }
+
+    #[test]
+    fn recency_ordered_descending_with_stable_declaration_fallback() {
+        // 4-activity sub-test: alpha (seed, seq=1), beta (seq=0), gamma (seq=3),
+        // delta (seq=2). Sequence of switches: seed→gamma, seed→gamma→delta.
+        let alpha = activity("alpha");
+        let alpha_id = alpha.id();
+        let mut pool = Activities::new(alpha);
+
+        let beta = activity("beta");
+        let beta_id = beta.id();
+        pool.insert(beta);
+
+        let gamma = activity("gamma");
+        let gamma_id = gamma.id();
+        pool.insert(gamma);
+
+        let delta = activity("delta");
+        let delta_id = delta.id();
+        pool.insert(delta);
+
+        // Switch: alpha → gamma → alpha → delta → gamma.
+        pool.set_active(gamma_id); // gamma seq=2
+        pool.set_active(alpha_id); // alpha seq=3
+        pool.set_active(delta_id); // delta seq=4
+        pool.set_active(gamma_id); // gamma seq=5
+
+        // Expected MRU order: gamma(5) > delta(4) > alpha(3) > beta(0).
+        let ordered = pool.recency_ordered();
+        assert_eq!(ordered, vec![gamma_id, delta_id, alpha_id, beta_id]);
+
+        // Pin seq-0 stable tie-break: insert two more activities that are never activated.
+        let mut pool2 = Activities::new(activity("a"));
+        let a_id = pool2.active_id();
+        let b = activity("b");
+        let b_id = b.id();
+        pool2.insert(b);
+        let c = activity("c");
+        let c_id = c.id();
+        pool2.insert(c);
+        // b and c both have seq=0. Stable sort must preserve insertion order: b before c.
+        let ordered2 = pool2.recency_ordered();
+        assert_eq!(ordered2[0], a_id, "seed (seq=1) is first");
+        // b and c both have seq=0; stable sort preserves their insertion order.
+        assert_eq!(ordered2[1], b_id, "b inserted before c, same seq=0");
+        assert_eq!(ordered2[2], c_id, "c inserted after b, same seq=0");
+    }
+
+    #[test]
+    fn verify_invariants_holds_after_normal_flip_sequence() {
+        let seed = activity("seed");
+        let mut pool = Activities::new(seed);
+
+        let beta = activity("beta");
+        let beta_id = beta.id();
+        pool.insert(beta);
+
+        let seed_id = pool.active_id();
+
+        // After each flip, verify_invariants must pass.
+        pool.set_active(beta_id);
+        pool.verify_invariants();
+
+        pool.set_active(seed_id);
+        pool.verify_invariants();
+
+        pool.set_active(beta_id);
+        pool.verify_invariants();
     }
 }

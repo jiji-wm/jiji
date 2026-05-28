@@ -971,6 +971,7 @@ fn to_ipc_activity<W: LayoutElement>(
         is_config_declared: a.is_config_declared(),
         is_active: a.id() == active_id,
         is_urgent: layout.activity_is_urgent(a.id()),
+        last_active_seq: a.last_active_seq(),
     }
 }
 

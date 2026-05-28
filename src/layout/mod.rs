@@ -5633,16 +5633,53 @@ impl<W: LayoutElement> Layout<W> {
         self.ensure_view_for(activity_id, output_id.clone(), Some(&output), &options);
     }
 
-    /// Switch to the previously-active activity (history-based toggle).
+    /// Switch to a recently-active activity at recency position `depth`.
     ///
-    /// Early-returns when no previous activity has been recorded. Otherwise
-    /// delegates to [`Self::switch_activity`], which supplies the no-op
-    /// fast-path and live-id validation. History-based, not sequential.
-    pub(crate) fn switch_activity_previous(&mut self) {
-        let Some(prev) = self.activities.previous_id() else {
+    /// `depth = 0` names the currently-active activity — explicit no-op, returns immediately.
+    /// `depth = 1` (the legacy default) switches to the previously-active activity.
+    /// `depth = N` switches to the activity at recency position N in the MRU list computed by
+    /// [`Activities::recency_ordered`]. If `depth` exceeds the number of activated activities
+    /// minus one, it is clamped to the oldest-activated activity (no error is returned).
+    ///
+    /// Activities with `last_active_seq == 0` (never activated this session) are excluded from
+    /// the reachable target set; the clamp always lands on an activity that has been activated
+    /// at least once.
+    pub(crate) fn switch_activity_previous(&mut self, depth: u32) {
+        // depth = 0 means "current active" by definition — nothing to do.
+        if depth == 0 {
             return;
-        };
-        self.switch_activity(prev);
+        }
+        let ordered = self.activities.recency_ordered();
+        let activated_count = ordered
+            .iter()
+            .filter(|&&id| {
+                self.activities
+                    .get(id)
+                    .expect("recency_ordered ids must be live keys in the pool")
+                    .last_active_seq()
+                    > 0
+            })
+            .count();
+        // Fewer than 2 activated activities means there is no other activated activity to
+        // switch to — toggling on a pristine pool (only the seed ever stamped) must not
+        // error, mirroring the pre-depth no-previous early-return.
+        if activated_count <= 1 {
+            return;
+        }
+        // Clamp depth to the index of the oldest-activated entry in the ordered list.
+        let idx = depth.min(activated_count.saturating_sub(1) as u32) as usize;
+        let target = ordered[idx];
+        // depth >= 1 (checked above) + activated_count >= 2 (checked above) guarantees
+        // idx >= 1, so target is never ordered[0] (the active activity, which holds the
+        // maximum last_active_seq by the recency invariant).
+        if target == self.activities.active_id() {
+            unreachable!(
+                "activated_count >= 2 and depth >= 1 guarantee idx >= 1; \
+                 ordered[0] is always the active activity by the max-seq invariant, \
+                 so ordered[idx] cannot equal active_id()"
+            );
+        }
+        self.switch_activity(target);
     }
 
     /// Create a fresh runtime activity with `name`, returning its id.

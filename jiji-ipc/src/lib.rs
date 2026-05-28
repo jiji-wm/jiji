@@ -1083,10 +1083,19 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-NAME"))]
         activity: ActivityReferenceArg,
     },
-    /// Switch to the previously active activity (toggle between last two).
-    /// This is history-based, not sequential — activities represent named
-    /// contexts, not a linear sequence.
-    SwitchActivityPrevious {},
+    /// Switch to a recently-active activity by recency depth.
+    ///
+    /// `depth = 1` (the default) switches to the previously-active activity, equivalent to
+    /// the former history-based toggle. `depth = N` switches to the activity at recency position
+    /// N (0 = currently active, 1 = previously active, 2 = one before that, …). The compositor
+    /// clamps `depth` to the oldest-activated activity rather than returning an error; a legacy
+    /// `{}` (bare form, no depth field) deserializes to `depth = 1`.
+    SwitchActivityPrevious {
+        /// Recency position to switch to. `0` is the current active (no-op). Default `1`.
+        #[serde(default = "default_switch_activity_previous_depth")]
+        #[cfg_attr(feature = "clap", arg(default_value_t = 1))]
+        depth: u32,
+    },
     /// Add a workspace to an activity.
     ///
     /// The workspace is appended to the activity's ordered workspace list on
@@ -1245,6 +1254,11 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
         workspace: Option<WorkspaceReferenceArg>,
     },
+}
+
+// Used by #[serde(default)] on SwitchActivityPrevious.
+fn default_switch_activity_previous_depth() -> u32 {
+    1
 }
 
 /// Change in window or column size.
@@ -1766,6 +1780,13 @@ pub struct Activity {
     /// workspace belonging to this activity has an urgent window. See
     /// [`Event::ActivityUrgencyChanged`] for the change-notification form.
     pub is_urgent: bool,
+    /// Opaque monotonic activation sequence number.
+    ///
+    /// Incremented each time this activity becomes the active one. `0` means the activity has
+    /// not been activated this session (only possible for activities that were created but never
+    /// switched to). Higher values indicate more-recent activation; sort descending to obtain
+    /// MRU order. The active activity always holds the unique maximum value across all activities.
+    pub last_active_seq: u64,
 }
 
 /// Per-(activity, output) workspace ordering.
@@ -2684,12 +2705,13 @@ mod tests {
             is_config_declared: true,
             is_active: true,
             is_urgent: false,
+            last_active_seq: 3,
         };
 
         let json = serde_json::to_string(&activity).expect("serialize Activity");
         assert_eq!(
             json,
-            r#"{"id":42,"name":"work","is_config_declared":true,"is_active":true,"is_urgent":false}"#
+            r#"{"id":42,"name":"work","is_config_declared":true,"is_active":true,"is_urgent":false,"last_active_seq":3}"#
         );
         let parsed: Activity = serde_json::from_str(&json).expect("deserialize Activity");
         assert_eq!(parsed, activity);
@@ -2777,6 +2799,52 @@ mod tests {
     }
 
     #[test]
+    fn switch_activity_previous_depth_default_one_roundtrip() {
+        // Legacy bare form `{"SwitchActivityPrevious":{}}` must deserialize to depth=1.
+        let parsed: Action = serde_json::from_str(r#"{"SwitchActivityPrevious":{}}"#)
+            .expect("deserialize bare SwitchActivityPrevious");
+        assert_eq!(
+            serde_json::to_string(&parsed).expect("re-serialize bare form"),
+            r#"{"SwitchActivityPrevious":{"depth":1}}"#,
+        );
+
+        // Explicit depth=3 round-trip.
+        let parsed3: Action = serde_json::from_str(r#"{"SwitchActivityPrevious":{"depth":3}}"#)
+            .expect("deserialize depth=3");
+        assert_eq!(
+            serde_json::to_string(&parsed3).expect("re-serialize depth=3"),
+            r#"{"SwitchActivityPrevious":{"depth":3}}"#,
+        );
+    }
+
+    /// Pin the clap CLI surface for `switch-activity-previous`.
+    ///
+    /// `depth` is a positional argument with `default_value_t = 1`. This test
+    /// catches regressions where the field is accidentally promoted to a named
+    /// flag (`--depth`) or the default is changed.
+    #[cfg(feature = "clap")]
+    #[test]
+    fn switch_activity_previous_clap_surface() {
+        use clap::Parser;
+
+        // No positional arg — depth must default to 1.
+        let parsed = Action::try_parse_from(["jiji", "switch-activity-previous"])
+            .expect("parse switch-activity-previous with no depth");
+        assert!(
+            matches!(parsed, Action::SwitchActivityPrevious { depth: 1 }),
+            "default depth must be 1, got {parsed:?}",
+        );
+
+        // Explicit positional depth=3.
+        let parsed3 = Action::try_parse_from(["jiji", "switch-activity-previous", "3"])
+            .expect("parse switch-activity-previous with depth=3");
+        assert!(
+            matches!(parsed3, Action::SwitchActivityPrevious { depth: 3 }),
+            "explicit depth=3 must parse, got {parsed3:?}",
+        );
+    }
+
+    #[test]
     fn activity_view_json_round_trip() {
         // Pin the wire form of `ActivityView` for both the connected case
         // (`output_name: Some(_)`) and the disconnected case (`output_name:
@@ -2818,6 +2886,7 @@ mod tests {
                     is_config_declared: true,
                     is_active: true,
                     is_urgent: false,
+                    last_active_seq: 1,
                 },
                 Activity {
                     id: 2,
@@ -2825,6 +2894,7 @@ mod tests {
                     is_config_declared: false,
                     is_active: false,
                     is_urgent: true,
+                    last_active_seq: 0,
                 },
             ],
         };
@@ -2832,7 +2902,7 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialize Event::ActivitiesChanged");
         assert_eq!(
             json,
-            r#"{"ActivitiesChanged":{"activities":[{"id":1,"name":"work","is_config_declared":true,"is_active":true,"is_urgent":false},{"id":2,"name":"personal","is_config_declared":false,"is_active":false,"is_urgent":true}]}}"#
+            r#"{"ActivitiesChanged":{"activities":[{"id":1,"name":"work","is_config_declared":true,"is_active":true,"is_urgent":false,"last_active_seq":1},{"id":2,"name":"personal","is_config_declared":false,"is_active":false,"is_urgent":true,"last_active_seq":0}]}}"#
         );
         let parsed: Event =
             serde_json::from_str(&json).expect("deserialize Event::ActivitiesChanged");
@@ -2963,12 +3033,13 @@ mod tests {
                 is_config_declared: false,
                 is_active: false,
                 is_urgent: false,
+                last_active_seq: 0,
             },
         };
         let json = serde_json::to_string(&event).expect("serialize Event::ActivityCreated");
         assert_eq!(
             json,
-            r#"{"ActivityCreated":{"activity":{"id":7,"name":"Work","is_config_declared":false,"is_active":false,"is_urgent":false}}}"#
+            r#"{"ActivityCreated":{"activity":{"id":7,"name":"Work","is_config_declared":false,"is_active":false,"is_urgent":false,"last_active_seq":0}}}"#
         );
         let parsed: Event =
             serde_json::from_str(&json).expect("deserialize Event::ActivityCreated");

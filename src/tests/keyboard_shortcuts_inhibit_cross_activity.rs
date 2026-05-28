@@ -348,7 +348,7 @@ fn inhibitor_reactivated_on_switch_activity_previous() {
     // Now switch back to alpha via `SwitchActivityPrevious`. Inhibitor
     // should reactivate through the sweep hook at that arm.
     f.niri_state()
-        .do_action_inner(Action::SwitchActivityPrevious {}, false)
+        .do_action_inner(Action::SwitchActivityPrevious(1), false)
         .expect(
             "SwitchActivityPrevious must succeed: previous_id set after the prior switch, \
              no hard-block in effect",
