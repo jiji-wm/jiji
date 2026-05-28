@@ -7647,6 +7647,16 @@ fn do_action_error_display_matches_wire_contract() {
         format!("{}", DoActionError::WindowNotFound { id: 42 }),
         "window not found: id=42",
     );
+    // Cross-activity `move-window` target-unreachable token. Replaces the
+    // pre-fix silent `Response::Handled` (false-success line in the CLI)
+    // for unknown ids and disconnected-output targets.
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::MoveWindowTargetUnreachable { ws_id: 7 }
+        ),
+        "workspace not reachable for move: id=7",
+    );
     // Workspace-activity assignment tokens — plain lowercase, no
     // payload interpolation. Outer variants delegate to the wrapped inner
     // enum's `Display`; the envelope test confirms byte-identity and
@@ -7901,6 +7911,14 @@ fn do_action_error_envelope_matches_wire_contract() {
         (
             DoActionError::WindowNotFound { id: 0 },
             "window not found: id=0",
+        ),
+        (
+            DoActionError::MoveWindowTargetUnreachable { ws_id: 7 },
+            "workspace not reachable for move: id=7",
+        ),
+        (
+            DoActionError::MoveWindowTargetUnreachable { ws_id: 0 },
+            "workspace not reachable for move: id=0",
         ),
         (
             DoActionError::AddWorkspaceToActivity(AddWorkspaceToActivityError::ActivityNotFound),

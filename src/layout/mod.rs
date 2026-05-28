@@ -552,7 +552,7 @@ pub(crate) fn format_activity_switch_block_err(block: ActivitySwitchBlock) -> St
 /// fails the outer pin tests in addition to the inner enum's own pin tests.
 ///
 /// Do **not** add `#[non_exhaustive]` or `_` wildcards to the cohort match
-/// arms at `ipc/server.rs:339-349` and `ipc/server.rs:671-684` —
+/// arms at `ipc/server.rs:478-489` and `ipc/server.rs:824-835` —
 /// exhaustiveness checks on those arms are the load-bearing parity guard
 /// ensuring the drain-walk and insert-idle arms stay in sync.
 #[derive(Debug, PartialEq, Eq)]
@@ -565,6 +565,12 @@ pub(crate) enum DoActionError {
     /// does not resolve to any pool-owned window. Terminal error — the
     /// waiter is signalled immediately, never parked.
     WindowNotFound { id: u64 },
+    /// `Action::MoveWindowToWorkspace { reference: Id(_), .. }` resolved to a
+    /// workspace id that names nothing movable: either the id is absent from
+    /// the workspace pool, or the workspace is bound to an output that is
+    /// not currently connected. Terminal error — replaces the pre-fix silent
+    /// `Response::Handled` (which surfaced as a CLI false-success line).
+    MoveWindowTargetUnreachable { ws_id: u64 },
     /// `Action::CreateActivity` validation failed. Wraps the layout-side
     /// [`CreateActivityError`]. Terminal error.
     CreateActivity(CreateActivityError),
@@ -664,6 +670,9 @@ impl fmt::Display for DoActionError {
         match self {
             Self::ActivitySwitchBlocked(block) => write!(f, "{block}"),
             Self::WindowNotFound { id } => write!(f, "window not found: id={id}"),
+            Self::MoveWindowTargetUnreachable { ws_id } => {
+                write!(f, "workspace not reachable for move: id={ws_id}")
+            }
             // Outer variants wrapping a layout-side `*Error` delegate to the
             // inner enum's `Display`. The inner enum's tokens are the source
             // of truth for the wire string; `format_do_action_error` returns
@@ -804,6 +813,40 @@ pub struct RemovedTile<W: LayoutElement> {
     is_full_width: bool,
     /// Whether the tile was floating.
     is_floating: bool,
+}
+
+/// Outcome of [`Layout::move_window_to_pool_workspace`] for the in-pool
+/// resolution path. See that method's rustdoc for the four-arm dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MoveWindowToPoolOutcome {
+    /// Target resolves into some monitor's active-activity view. The caller
+    /// must fall through to the existing index-based path
+    /// ([`Layout::move_to_workspace`] / [`Layout::move_to_output`]) — the
+    /// pool entry point intentionally declines to handle the in-view case so
+    /// it cannot double-activate.
+    DelegateToActiveView,
+    /// Cross-activity move completed. The resolved target pool id is
+    /// returned so the caller can drive the `focus:true` activation flow
+    /// (pick a target activity that contains this workspace; switch into it;
+    /// focus the moved window).
+    MovedDormant { ws_id: WorkspaceId },
+    /// The source workspace had no focused tile to move (e.g. the active slot
+    /// is an empty bookend). Caller should treat this as a no-op: no activity
+    /// switch, no focus change.
+    NothingToMove,
+}
+
+/// Failure mode for [`Layout::move_window_to_pool_workspace`]. Surfaces to IPC
+/// as [`DoActionError::MoveWindowTargetUnreachable`], replacing the pre-fix
+/// silent `Response::Handled` that the CLI had been printing as a false-success
+/// line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MoveWindowToPoolError {
+    /// Target is not movable-to: either `target_raw_id` does not resolve to
+    /// any pool key, or the target workspace's `output_id` does not name a
+    /// currently connected monitor (parked in `disconnected_workspace_ids` or
+    /// bound to an output that never reconnected this session).
+    TargetUnreachable,
 }
 
 /// Whether to activate a newly added window.
@@ -4738,6 +4781,218 @@ impl<W: LayoutElement> Layout<W> {
             &mut self.workspaces,
             ids_to_destroy,
         );
+    }
+
+    /// Move a window to a workspace addressed by raw pool id, including
+    /// workspaces that belong only to a dormant activity.
+    ///
+    /// Dispatch shape (the four arms — by *target* locality only; the caller
+    /// is responsible for filtering out the dormant-*source* case before
+    /// invocation, since this entry point assumes the source workspace is the
+    /// active one for `window: None` or live under the active view for
+    /// `window: Some(_)`). Arms are numbered by execution order:
+    ///
+    /// 1. (arm 1 — unknown id) `target_raw_id` does not resolve to any pool key →
+    ///    `Err(MoveWindowToPoolError::TargetUnreachable)`.
+    /// 2. (arm 2 — active view) Target is in some monitor's active-activity view →
+    ///    `Ok(MoveWindowToPoolOutcome::DelegateToActiveView)`. The caller falls through to the
+    ///    existing [`Self::move_to_workspace`] / [`Self::move_to_output`] index path so the
+    ///    in-activity move keeps its established semantics (smart activation, cursor warp, redraw).
+    ///    Adding cross-activity activation here would double-activate on `focus:true`.
+    /// 3. (arm 3 — disconnected output) Target resolves to a workspace whose `output_id` is not
+    ///    currently connected (no live monitor) → `Err(MoveWindowToPoolError::TargetUnreachable)`.
+    /// 4. (arm 4 — dormant cross-activity) Target is dormant and bound to a connected output →
+    ///    perform the cross-activity move: detach the tile from its source workspace (always the
+    ///    active workspace for `window: None`, the workspace holding the named window for `window:
+    ///    Some(_)`), insert it into the target pool workspace's `ScrollingSpace` via
+    ///    [`Workspace::add_tile`], and run [`Self::dormant_view_bookend_fixup`] so a landing on the
+    ///    target activity's trailing-empty bookend mints a fresh one. Returns
+    ///    `Ok(MoveWindowToPoolOutcome::MovedDormant { ws_id })` carrying the resolved pool id so
+    ///    the caller can drive the `focus:true` activation flow (which mirrors the
+    ///    `Action::FocusWindow` arm against the moved window).
+    ///
+    /// `activate` controls whether the moved tile is the active tile in its
+    /// new column. The dormant-view fixup runs unconditionally because the
+    /// bookend invariant is a structural property, not a focus property.
+    ///
+    /// In debug builds a `verify_invariants` assertion runs immediately
+    /// after the source-side detach (before the destination attach) to catch
+    /// a vacated-bookend regression class for free.
+    pub(crate) fn move_window_to_pool_workspace(
+        &mut self,
+        window: Option<&W::Id>,
+        target_raw_id: u64,
+        activate: ActivateWindow,
+    ) -> Result<MoveWindowToPoolOutcome, MoveWindowToPoolError> {
+        let target_ws_id = self.resolve_workspace_id(target_raw_id).ok_or_else(|| {
+            debug!(
+                "move_window_to_pool_workspace: TargetUnreachable: unknown pool id \
+                 ({target_raw_id})"
+            );
+            MoveWindowToPoolError::TargetUnreachable
+        })?;
+
+        // Arm 2: target is in some monitor's active view — defer to the
+        // index-based path (caller falls through).
+        for mon in &self.monitors {
+            if self
+                .active_view(&mon.output_id())
+                .position_of(target_ws_id)
+                .is_some()
+            {
+                return Ok(MoveWindowToPoolOutcome::DelegateToActiveView);
+            }
+        }
+
+        // Arm 3: target bound to no connected output.
+        let target_output_id = self
+            .workspaces
+            .get(&target_ws_id)
+            .expect("resolve_workspace_id succeeded, so the id must be a pool key")
+            .output_id()
+            .ok_or_else(|| {
+                debug!(
+                    "move_window_to_pool_workspace: TargetUnreachable: workspace has no \
+                     bound output (ws_id={target_raw_id})"
+                );
+                MoveWindowToPoolError::TargetUnreachable
+            })?
+            .clone();
+        let target_mon_idx = self
+            .monitors
+            .iter()
+            .position(|mon| mon.output_id() == target_output_id)
+            .ok_or_else(|| {
+                debug!(
+                    "move_window_to_pool_workspace: TargetUnreachable: output not in \
+                     connected monitors (ws_id={target_raw_id})"
+                );
+                MoveWindowToPoolError::TargetUnreachable
+            })?;
+
+        // Source-side detach. For `window: None` the source is the active
+        // workspace's focused tile (matches the existing `move_to_workspace`
+        // active-position contract). For `window: Some(_)` the caller has
+        // already guaranteed the window lives in the active view (via the
+        // dormant-source filter); locate it on whichever monitor's active
+        // view contains it.
+        let source_mon_idx = if let Some(window) = window {
+            let views = self.activities.active().views();
+            let pool = &self.workspaces;
+            self.monitors
+                .iter()
+                .position(|mon| {
+                    let view = views
+                        .get(&OutputId::new(&mon.output))
+                        .expect("connected output must have a view in the active activity");
+                    mon.has_window(pool, view, window)
+                })
+                .expect(
+                    "caller filters dormant-source: the named window must be on the active view",
+                )
+        } else {
+            self.active_monitor_idx
+        };
+
+        let source_output = self.monitors[source_mon_idx].output.clone();
+        let source_mon_out_id = self.monitors[source_mon_idx].output_id();
+
+        let removed = {
+            let pool = &mut self.workspaces;
+            let view = self
+                .activities
+                .active()
+                .views()
+                .get(&source_mon_out_id)
+                .expect("connected output must have a view in the active activity");
+            let source_pos = if let Some(window) = window {
+                view.ids()
+                    .iter()
+                    .position(|id| {
+                        pool.get(id)
+                            .expect("view id must be a key in the pool")
+                            .has_window(window)
+                    })
+                    .expect("source-window monitor lookup above guarantees presence")
+            } else {
+                view.active_position()
+            };
+            let source_ws_id = view.ids()[source_pos];
+            let workspace = pool
+                .get_mut(&source_ws_id)
+                .expect("view id must be a key in the pool");
+            if let Some(window) = window {
+                workspace.remove_tile(Some(&source_output), window, Transaction::new())
+            } else {
+                let Some(removed) =
+                    workspace.remove_active_tile(Some(&source_output), Transaction::new())
+                else {
+                    // Source workspace had no tile to move (e.g. focused slot is
+                    // an empty bookend). Nothing to do — not a target error.
+                    return Ok(MoveWindowToPoolOutcome::NothingToMove);
+                };
+                removed
+            }
+        };
+
+        // Mid-detach invariant assert: source side is now vacated, destination
+        // not yet populated. Catches a regression in the source-side bookend
+        // maintenance.
+        #[cfg(debug_assertions)]
+        self.verify_invariants();
+
+        // Destination attach into the dormant pool workspace. The handler
+        // passes `Smart` only when `focus:true` was requested, so collapse
+        // `Smart` to `Yes` — the moved tile becomes the active tile in its
+        // new column under the destination activity, matching the in-activity
+        // `move_to_workspace` post-move smart-activation outcome.
+        let target_output = self.monitors[target_mon_idx].output.clone();
+        let activate = match activate {
+            ActivateWindow::Smart | ActivateWindow::Yes => ActivateWindow::Yes,
+            ActivateWindow::No => ActivateWindow::No,
+        };
+
+        {
+            let target_ws = self
+                .workspaces
+                .get_mut(&target_ws_id)
+                .expect("target_ws_id must remain a pool key across the detach scope");
+            target_ws.add_tile(
+                Some(&target_output),
+                removed.tile,
+                WorkspaceAddWindowTarget::Auto,
+                activate,
+                removed.width,
+                removed.is_full_width,
+                removed.is_floating,
+            );
+        }
+
+        // Maintain the per-activity bookend invariant on the destination
+        // dormant view.
+        self.dormant_view_bookend_fixup(target_ws_id, target_mon_idx);
+
+        // Source-side trailing-empty cleanup, mirroring the in-activity
+        // `move_to_workspace_on` post-step. The hoist-then-destructure shape
+        // matches the borrow-order discipline at every other split-borrow site.
+        let ids_to_destroy = {
+            let mon_out = self.monitors[source_mon_idx].output_id();
+            let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+            if monitors[source_mon_idx].workspace_switch.is_none() {
+                Self::clean_up_workspaces_on(monitors, pool, view, source_mon_idx)
+            } else {
+                Vec::new()
+            }
+        };
+        Self::destroy_workspaces_cross_activity(
+            &mut self.activities,
+            &mut self.workspaces,
+            ids_to_destroy,
+        );
+
+        Ok(MoveWindowToPoolOutcome::MovedDormant {
+            ws_id: target_ws_id,
+        })
     }
 
     pub fn move_column_to_workspace_up(&mut self, activate: bool) {

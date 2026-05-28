@@ -48,7 +48,9 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
-use crate::layout::{ActivateWindow, DoActionError, DoActionOutcome, LayoutElement};
+use crate::layout::{
+    ActivateWindow, DoActionError, DoActionOutcome, LayoutElement, MoveWindowToPoolOutcome,
+};
 use crate::niri::{CastTarget, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
@@ -1489,19 +1491,10 @@ impl State {
                 // focused tile) and target ids; if they match, emit a typed
                 // `NoOp(AlreadyOnTarget)` on the wire rather than falling
                 // through to the layout-mutator's silent equality
-                // short-circuit. This check runs before
-                // `find_output_and_workspace_index` because `move_to_output`
-                // and `move_to_workspace` have different equality-short-circuit
-                // shapes: without the early gate the IPC outcome was
-                // non-deterministic across those branches for a move-to-self.
-                // The `None` cases (no active monitor; if the active workspace
-                // is empty there is no focused tile but `active_workspace()`
-                // still returns `Some` so the NoOp fires without a window being
-                // moved — this matches the pre-existing silent-drop path;
-                // reference doesn't resolve to a workspace in the active
-                // activity's view) fall through to the existing
-                // `find_output_and_workspace_index` no-op path so behavior is
-                // unchanged for any case where we wouldn't have moved.
+                // short-circuit. The `resolve_workspace_reference_to_id` `Id`
+                // arm is pool-wide, so a cross-activity self-move (target id
+                // names the same workspace the focused tile already lives on,
+                // viewed via a dormant activity) is also caught here.
                 let source_ws_id = self.niri.layout.active_workspace().map(|ws| ws.id().get());
                 let target_ws_id = self
                     .niri
@@ -1513,6 +1506,91 @@ impl State {
                         }));
                     }
                 }
+
+                // Cross-activity dispatch for `Id`-reference moves. The CLI
+                // sends `Id` for cross-activity routes (focus-drift guard);
+                // `Name` / `Index` continue to follow the existing
+                // active-view-scoped path, which silently drops on misses.
+                //
+                // For the `Id` reference the four-arm classifier below
+                // either errors (unknown target / disconnected output),
+                // delegates back to the existing index path (target is in an
+                // active view), or moves the focused tile into a dormant
+                // pool workspace and honors `focus:true` via the same
+                // activation flow as `Action::FocusWindow`.
+                if let WorkspaceReference::Id(raw) = reference {
+                    let activate = if focus {
+                        ActivateWindow::Smart
+                    } else {
+                        ActivateWindow::No
+                    };
+                    // Capture the focused tile's last-focused-activity hint
+                    // before the move; the hint informs the focus:true target
+                    // activity pick and may shift after the detach.
+                    let focus_hint = if focus {
+                        self.niri
+                            .layout
+                            .active_workspace()
+                            .and_then(|ws| ws.active_window())
+                            .and_then(|w| w.get_last_focused_activity())
+                    } else {
+                        None
+                    };
+                    // Snapshot the focused window before the move so the
+                    // `focus:true` follow-up can re-focus it under the
+                    // newly-active activity.
+                    let focused_window = if focus {
+                        self.niri
+                            .layout
+                            .active_workspace()
+                            .and_then(|ws| ws.active_window())
+                            .map(|w| w.window.clone())
+                    } else {
+                        None
+                    };
+                    match self
+                        .niri
+                        .layout
+                        .move_window_to_pool_workspace(None, raw, activate)
+                    {
+                        Ok(MoveWindowToPoolOutcome::DelegateToActiveView) => {
+                            // Fall through to the existing path below.
+                        }
+                        Ok(MoveWindowToPoolOutcome::MovedDormant { target_ws_id }) => {
+                            if focus {
+                                if let Some(block) =
+                                    self.niri.layout.is_activity_switch_hard_blocked()
+                                {
+                                    return Err(block.into());
+                                }
+                                let target_activity = self
+                                    .niri
+                                    .layout
+                                    .pick_activity_for_hidden_window(target_ws_id, focus_hint);
+                                if target_activity != self.niri.layout.active_activity_id() {
+                                    self.niri.layout.switch_activity(target_activity);
+                                    self.niri.layer_shell_on_demand_focus = None;
+                                    self.niri
+                                        .refresh_keyboard_shortcut_inhibitors_after_activity_switch(
+                                        );
+                                }
+                                if let Some(window) = focused_window.as_ref() {
+                                    self.focus_window(window);
+                                } else {
+                                    self.maybe_warp_cursor_to_focus();
+                                }
+                            } else {
+                                self.maybe_warp_cursor_to_focus();
+                            }
+                            self.niri.queue_redraw_all();
+                            return Ok(DoActionOutcome::Handled);
+                        }
+                        Err(_) => {
+                            return Err(DoActionError::MoveWindowTargetUnreachable { ws_id: raw });
+                        }
+                    }
+                }
+
                 if let Some((mut output, index)) =
                     self.niri.find_output_and_workspace_index(reference)
                 {
@@ -1562,9 +1640,7 @@ impl State {
                 // resolving the target. Unknown window id preserves the
                 // pre-existing silent exit-0 as `Ok(Handled)`: no source
                 // workspace id is known, so no `AlreadyOnTarget { workspace_id
-                // }` payload is constructible. Dormant-activity targets fall
-                // through to the existing silent-drop path via
-                // `find_output_and_workspace_index` returning `None`.
+                // }` payload is constructible.
                 let resolved = self
                     .niri
                     .layout
@@ -1578,15 +1654,18 @@ impl State {
                         .workspaces_all()
                         .find(|(_, ws)| ws.has_window(win_id))?
                         .1
-                        .id()
-                        .get();
-                    Some((mapped.window.clone(), ws_id))
+                        .id();
+                    Some((
+                        mapped.window.clone(),
+                        ws_id,
+                        mapped.get_last_focused_activity(),
+                    ))
                 });
-                let Some((window, source_ws_id)) = resolved else {
+                let Some((window, source_ws_id, focus_hint)) = resolved else {
                     debug!(
                         window_id = id,
                         "MoveWindowToWorkspaceById: window_id not found in pool; \
-                         preserving silent exit-0 (cross-activity move-by-id semantics not yet landed)"
+                         preserving silent exit-0"
                     );
                     return Ok(DoActionOutcome::Handled);
                 };
@@ -1595,12 +1674,85 @@ impl State {
                     .niri
                     .resolve_workspace_reference_to_id(reference.clone());
                 if let Some(tgt) = target_ws_id {
-                    if source_ws_id == tgt {
+                    if source_ws_id.get() == tgt {
                         return Ok(DoActionOutcome::NoOp(NoOpReason::AlreadyOnTarget {
-                            workspace_id: source_ws_id,
+                            workspace_id: source_ws_id.get(),
                         }));
                     }
                 }
+
+                // Dormant-source filter. The cross-activity pool entry point
+                // assumes its source is live under the active view; if the
+                // named window is on a dormant workspace, take the existing
+                // fall-through (the layout-side `move_to_workspace` walk
+                // emits its own `warn!` and clean-returns), which yields
+                // `Ok(Handled)` — distinct from the new `Err` for unreachable
+                // targets, so the `Err` never misattributes the dormant-source
+                // case. This preserves the regression test pinned at
+                // `move_window_to_workspace_by_id_reaches_hidden_activity_window_without_panic`.
+                let source_is_active_view = self
+                    .niri
+                    .layout
+                    .activities()
+                    .active()
+                    .views()
+                    .values()
+                    .any(|view| view.ids().contains(&source_ws_id));
+
+                if source_is_active_view {
+                    if let WorkspaceReference::Id(raw) = reference {
+                        let activate = if focus {
+                            ActivateWindow::Smart
+                        } else {
+                            ActivateWindow::No
+                        };
+                        match self.niri.layout.move_window_to_pool_workspace(
+                            Some(&window),
+                            raw,
+                            activate,
+                        ) {
+                            Ok(MoveWindowToPoolOutcome::DelegateToActiveView) => {
+                                // Fall through to the existing path below.
+                            }
+                            Ok(MoveWindowToPoolOutcome::MovedDormant { target_ws_id }) => {
+                                if focus {
+                                    if let Some(block) =
+                                        self.niri.layout.is_activity_switch_hard_blocked()
+                                    {
+                                        return Err(block.into());
+                                    }
+                                    let target_activity = self
+                                        .niri
+                                        .layout
+                                        .pick_activity_for_hidden_window(target_ws_id, focus_hint);
+                                    if target_activity != self.niri.layout.active_activity_id() {
+                                        self.niri.layout.switch_activity(target_activity);
+                                        self.niri.layer_shell_on_demand_focus = None;
+                                        self.niri
+                                            .refresh_keyboard_shortcut_inhibitors_after_activity_switch(
+                                            );
+                                    }
+                                    self.focus_window(&window);
+                                } else {
+                                    let new_focus = self.niri.layout.focus();
+                                    if new_focus.is_some_and(|w| w.window == window) {
+                                        self.maybe_warp_cursor_to_focus();
+                                    }
+                                }
+                                self.niri.queue_redraw_all();
+                                return Ok(DoActionOutcome::Handled);
+                            }
+                            Err(_) => {
+                                return Err(DoActionError::MoveWindowTargetUnreachable {
+                                    ws_id: raw,
+                                });
+                            }
+                        }
+                    }
+                }
+                // else: dormant source. Existing fall-through into the
+                // active-view-scoped path will hit `move_to_workspace`'s
+                // `warn!`/clean-return for this case (silent `Ok(Handled)`).
 
                 if let Some((output, index)) = self.niri.find_output_and_workspace_index(reference)
                 {

@@ -3688,33 +3688,28 @@ impl Niri {
     }
 
     /// Resolve a [`WorkspaceReference`] to the raw `u64` id of the workspace
-    /// it names, if the reference resolves in the active activity's view.
+    /// it names.
     ///
-    /// Resolution semantics per arm — mirrors [`Self::find_output_and_workspace_index`] for `Id`
-    /// and `Name`; tightens `Index` to require the index actually exist in the active monitor's
-    /// view (rather than the unconditional `saturating_sub(1)` that
-    /// `find_output_and_workspace_index` performs against the full workspace list):
-    ///   - `Id(raw)` composes `Layout::resolve_workspace_id` (pool-wide) with
-    ///     `Layout::find_workspace_by_id` (active-view + disconnected-pool scoped). Workspaces
-    ///     exclusive to a dormant activity yield `None`.
+    /// Resolution semantics per arm:
+    ///   - `Id(raw)` looks the id up across the **entire workspace pool**, including workspaces
+    ///     exclusive to a dormant activity and workspaces bound to a disconnected output. This is
+    ///     the asymmetry with [`Self::find_output_and_workspace_index`]: the `Id` arm there remains
+    ///     active-view-scoped (legacy callers depend on that), while this resolver is pool-wide so
+    ///     the move-window dispatch can detect cross-activity self-moves and route cross-activity
+    ///     targets to the dormant-aware mover.
     ///   - `Name(s)` resolves via `Layout::find_workspace_by_name` (active-view + disconnected-pool
     ///     scoped); workspaces exclusive to a dormant activity yield `None`.
     ///   - `Index(i)` indexes the active monitor's active-activity view; returns `None` if the
     ///     monitor pool is empty or the index is out of bounds.
     ///
     /// Used by the `Action::MoveWindowToWorkspace` /
-    /// `Action::MoveWindowToWorkspaceById` arms to compare the resolved target
-    /// workspace against the moved window's source workspace, so a true
-    /// move-to-self can short-circuit with a typed `NoOp` reply on the wire
-    /// instead of falling through to the silent equality short-circuit at the
-    /// layout-mutator layer.
+    /// `Action::MoveWindowToWorkspaceById` arms both to compare the resolved
+    /// target workspace against the moved window's source workspace (so a true
+    /// move-to-self short-circuits with a typed `NoOp`) and to drive the
+    /// cross-activity dispatch.
     pub fn resolve_workspace_reference_to_id(&self, reference: WorkspaceReference) -> Option<u64> {
         match reference {
-            WorkspaceReference::Id(raw) => {
-                let ws_id = self.layout.resolve_workspace_id(raw)?;
-                let (_, ws) = self.layout.find_workspace_by_id(ws_id)?;
-                Some(ws.id().get())
-            }
+            WorkspaceReference::Id(raw) => self.layout.resolve_workspace_id(raw).map(|id| id.get()),
             WorkspaceReference::Name(name) => self
                 .layout
                 .find_workspace_by_name(&name)

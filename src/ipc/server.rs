@@ -485,7 +485,8 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
             | Err(err @ DoActionError::SwitchActivity(_))
             | Err(err @ DoActionError::ToggleWorkspaceSticky(_))
             | Err(err @ DoActionError::SetWorkspaceSticky(_))
-            | Err(err @ DoActionError::UnsetWorkspaceSticky(_)) => {
+            | Err(err @ DoActionError::UnsetWorkspaceSticky(_))
+            | Err(err @ DoActionError::MoveWindowTargetUnreachable { .. }) => {
                 // Terminal errors. Same shape as `WindowNotFound`:
                 // forward and advance the walk — do not re-block.
                 let _ = waiter.tx.send_blocking(Err(err));
@@ -830,7 +831,8 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                     | Err(err @ DoActionError::SwitchActivity(_))
                     | Err(err @ DoActionError::ToggleWorkspaceSticky(_))
                     | Err(err @ DoActionError::SetWorkspaceSticky(_))
-                    | Err(err @ DoActionError::UnsetWorkspaceSticky(_)) => {
+                    | Err(err @ DoActionError::UnsetWorkspaceSticky(_))
+                    | Err(err @ DoActionError::MoveWindowTargetUnreachable { .. }) => {
                         let _ = tx.send_blocking(Err(err));
                     }
                 }
