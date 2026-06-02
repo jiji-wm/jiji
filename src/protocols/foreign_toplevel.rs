@@ -90,6 +90,14 @@ impl ForeignToplevelManagerState {
     }
 }
 
+/// Quietly note a pool window encountered during [`refresh`] whose toplevel has no
+/// committed state yet. The pool-wide iteration surfaces windows in dormant activities
+/// and dead-client tiles awaiting reap, so an uncommitted toplevel is an expected
+/// transient here rather than an error — it must not spam the log at error severity.
+fn skip_uncommitted_toplevel() {
+    trace!("skipping pool window without committed toplevel state");
+}
+
 pub fn refresh(state: &mut State) {
     let _span = tracy_client::span!("foreign_toplevel::refresh");
 
@@ -122,7 +130,7 @@ pub fn refresh(state: &mut State) {
         let wl_surface = toplevel.wl_surface();
         with_toplevel_role_and_current(toplevel, |role, cur| {
             let Some(cur) = cur else {
-                error!("mapped must have had initial commit");
+                skip_uncommitted_toplevel();
                 return;
             };
 
@@ -148,7 +156,7 @@ pub fn refresh(state: &mut State) {
         let wl_surface = toplevel.wl_surface();
         with_toplevel_role_and_current(toplevel, |role, cur| {
             let Some(cur) = cur else {
-                error!("mapped must have had initial commit");
+                skip_uncommitted_toplevel();
                 return;
             };
 
@@ -666,4 +674,51 @@ macro_rules! delegate_foreign_toplevel {
             smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1: ()
         ] => $crate::protocols::foreign_toplevel::ForeignToplevelManagerState);
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use tracing::subscriber::with_default;
+    use tracing::Level;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::Layer;
+
+    use super::skip_uncommitted_toplevel;
+
+    /// Counts only `ERROR`-level events, so a test can assert that exercising a code
+    /// path emits nothing at error severity.
+    struct ErrorCounter(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for ErrorCounter {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            if *event.metadata().level() == Level::ERROR {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_pool_window_without_committed_state_emits_no_error() {
+        // The pool-wide refresh iteration hits windows whose toplevel has no committed
+        // state yet (dormant activities, dead-client tiles awaiting reap). That branch
+        // must skip quietly: the original `error!` here spammed the log millions of
+        // lines per boot once refresh widened to the full pool. Pin the severity by
+        // capturing tracing events while exercising the skip and asserting zero errors.
+        let errors = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(ErrorCounter(Arc::clone(&errors)));
+
+        with_default(subscriber, || {
+            skip_uncommitted_toplevel();
+        });
+
+        assert_eq!(
+            errors.load(Ordering::Relaxed),
+            0,
+            "skipping an uncommitted pool toplevel must not log at ERROR severity",
+        );
+    }
 }
