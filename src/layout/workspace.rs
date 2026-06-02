@@ -1880,18 +1880,24 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
-        // This logic is consistent with tiles_with_render_positions().
-        if self.is_floating_visible() {
-            if let Some(rv) = self
-                .floating
-                .tiles_with_render_positions()
-                .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
-            {
-                return Some(rv);
+        // Hit precedence matches render stacking: the active layer is on top, so
+        // a click resolves to it first. A click on a still-visible sliver of the
+        // inactive layer hits (and, via activation, raises) it.
+        let floating_under = || {
+            if self.is_floating_visible() {
+                self.floating
+                    .tiles_with_render_positions()
+                    .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
+            } else {
+                None
             }
-        }
+        };
 
-        self.scrolling.window_under(pos)
+        if self.floating_is_active() {
+            floating_under().or_else(|| self.scrolling.window_under(pos))
+        } else {
+            self.scrolling.window_under(pos).or_else(floating_under)
+        }
     }
 
     pub fn resize_edges_under(&self, pos: Point<f64, Logical>) -> Option<ResizeEdge> {

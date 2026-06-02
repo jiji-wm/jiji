@@ -1358,16 +1358,30 @@ impl<W: LayoutElement> Monitor<W> {
 
             let xray_pos = XrayPos::new(geo.loc, zoom);
 
-            ws.render_floating(ctx.r(), xray_pos, focus_ring, push!());
-
-            if let Some(loc) = insert_hint_render_loc {
-                if loc.workspace == InsertWorkspace::Existing(ws.id()) {
-                    self.insert_hint_element
-                        .render(ctx.renderer, loc.location, push!());
-                }
+            // The active layer renders on top, so that raising the tiling layer
+            // (e.g. switching focus to it) brings tiled windows in front of
+            // floating ones — not only the other way around. The insert hint
+            // belongs to the tiling layer and stays immediately above it.
+            macro_rules! render_insert_hint {
+                () => {
+                    if let Some(loc) = insert_hint_render_loc {
+                        if loc.workspace == InsertWorkspace::Existing(ws.id()) {
+                            self.insert_hint_element
+                                .render(ctx.renderer, loc.location, push!());
+                        }
+                    }
+                };
             }
 
-            ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
+            if ws.floating_is_active() {
+                ws.render_floating(ctx.r(), xray_pos, focus_ring, push!());
+                render_insert_hint!();
+                ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
+            } else {
+                render_insert_hint!();
+                ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
+                ws.render_floating(ctx.r(), xray_pos, focus_ring, push!());
+            }
         }
     }
 
