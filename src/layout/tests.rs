@@ -6479,6 +6479,270 @@ fn move_column_to_workspace_into_shared_trailing_bookend_appends_dormant_bookend
 }
 
 #[test]
+fn remove_window_reaps_tile_from_dormant_activity() {
+    // A window living exclusively in a dormant-activity workspace on a connected output
+    // is present in the pool but in neither remove_window's active-view loop nor its
+    // disconnected loop. Without the dormant-reap arm its tile leaks. Drive the leak:
+    // open a window into beta while beta is active, switch away to alpha so beta goes
+    // dormant still holding the window, then remove it and assert the pool is clean.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    layout.switch_activity(beta);
+
+    // Open a window into beta's active view.
+    let win_id = 7usize;
+    let win = TestWindow::new(TestWindowParams::new(win_id));
+    layout.add_window(
+        win,
+        AddWindowTarget::Auto,
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::Smart,
+    );
+    assert!(
+        layout.workspaces.values().any(|ws| ws.has_window(&win_id)),
+        "window must be present after add",
+    );
+
+    // Switch back to alpha — beta is now dormant but still holds the window.
+    layout.switch_activity(alpha);
+    layout.verify_invariants();
+
+    let removed = layout.remove_window(&win_id, Transaction::new());
+    assert!(
+        removed.is_some(),
+        "remove_window must locate the window in the dormant activity's view",
+    );
+    assert!(
+        !layout.workspaces.values().any(|ws| ws.has_window(&win_id)),
+        "no residual tile for the window may remain anywhere in the pool",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_window_reaps_dormant_tile_after_partial_disconnect() {
+    // Regression: the dormant-reap arm must resolve the monitor from the *view-keyed*
+    // output, not from `ws.output_id()`. A partial disconnect (RemoveOutput with monitors
+    // still non-empty) migrates a window-bearing dormant workspace into the dormant
+    // activity's view on the primary monitor but deliberately leaves the workspace's
+    // `output_id` pointing at the now-gone output (the reclaim-on-reconnect tag). If the
+    // arm trusted `output_id()` it would find no connected monitor and panic. Drive that
+    // exact state: open a window into beta on output2, switch away to alpha, disconnect
+    // output2 (output1 survives), then remove the window — must not panic.
+    let mut layout = check_ops([Op::AddOutput(1), Op::AddOutput(2)]);
+    let alpha = layout.active_activity_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    layout.switch_activity(beta);
+
+    // Land the window on beta's view for output2 by making output2 the active monitor.
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .expect("output2 connected");
+    layout.focus_output(&output2);
+
+    let win_id = 11usize;
+    let win = TestWindow::new(TestWindowParams::new(win_id));
+    layout.add_window(
+        win,
+        AddWindowTarget::Auto,
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::Smart,
+    );
+    assert!(
+        layout.workspaces.values().any(|ws| ws.has_window(&win_id)),
+        "window must be present after add",
+    );
+
+    // Switch to alpha so beta goes dormant while still holding the window.
+    layout.switch_activity(alpha);
+    layout.verify_invariants();
+
+    // Partial disconnect: output1 survives, so this migrates beta's window-bearing dormant
+    // workspace onto output1's view while leaving its `output_id` pointing at output2.
+    Op::RemoveOutput(2).apply(&mut layout);
+    assert!(
+        !layout.monitors.is_empty(),
+        "partial disconnect must leave output1 connected",
+    );
+    layout.verify_invariants();
+
+    // The pre-fix arm panicked here on a `.expect` against the stale output_id.
+    let removed = layout.remove_window(&win_id, Transaction::new());
+    assert!(
+        removed.is_some(),
+        "remove_window must locate the window via the migrated dormant view",
+    );
+    assert!(
+        !layout.workspaces.values().any(|ws| ws.has_window(&win_id)),
+        "no residual tile for the window may remain anywhere in the pool",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_window_from_shared_dormant_workspace_does_not_reclaim() {
+    // The reclaim step is guarded by `activity_count == 1`. A workspace shared across two
+    // activities must survive the removal of its last window so the other activity's view
+    // is not left dangling. Share W between alpha and beta, make a third activity gamma
+    // active so W is dormant, add a window to W, then remove it: the tile is reaped but W
+    // stays in the pool and remains referenced by both alpha's and beta's views.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    let gamma = layout.create_activity("Gamma".to_owned()).expect("create");
+
+    let w_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .first()
+        .copied()
+        .expect("alpha has a workspace");
+
+    // Share W into beta as well — W now appears in both alpha's and beta's views.
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(w_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    // Land a window into W while it is still on alpha's active view.
+    let win_id = 12usize;
+    let win = TestWindow::new(TestWindowParams::new(win_id));
+    layout.add_window(
+        win,
+        AddWindowTarget::Workspace(w_id),
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::Smart,
+    );
+
+    // Switch to gamma: W is now dormant (not in gamma's active view) while still shared.
+    layout.switch_activity(gamma);
+    layout.verify_invariants();
+
+    let removed = layout.remove_window(&win_id, Transaction::new());
+    assert!(removed.is_some(), "the shared dormant tile must be reaped");
+    assert!(
+        layout.workspaces.contains_key(&w_id),
+        "a workspace shared by >1 activity must not be reclaimed when emptied",
+    );
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .position_of(w_id)
+            .is_some(),
+        "beta's view must still reference the shared workspace",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_window_from_dormant_ewaf_keeps_len3_view() {
+    // EWAF boundary: reclaiming an empty middle entry must not leave a length-2 view
+    // (EWAF requires 1 or 3+). Build a dormant 3-entry view [leading, window_ws, trailing]
+    // under empty_workspace_above_first, drop the window, and assert window_ws is NOT
+    // reclaimed (which would leave len==2) and the invariant holds.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut layout = check_ops_with_options(options, [Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // Seed beta's dormant view as [leading_bookend, window_ws, trailing_bookend]: three
+    // fresh empty workspaces, the middle one window-bearing.
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let ws = Workspace::new(
+            &layout.monitors[0].output,
+            HashSet::from([beta]),
+            layout.clock.clone(),
+            layout.monitors[0].options.clone(),
+        );
+        let id = ws.id();
+        assert!(
+            layout.workspaces.insert(id, ws).is_none(),
+            "fresh id must be unique",
+        );
+        ids.push(id);
+    }
+    let window_ws = ids[1];
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(ids.clone(), 0),
+    );
+    layout.verify_invariants();
+
+    let win_id = 13usize;
+    let win = TestWindow::new(TestWindowParams::new(win_id));
+    layout.add_window(
+        win,
+        AddWindowTarget::Workspace(window_ws),
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::Smart,
+    );
+
+    let removed = layout.remove_window(&win_id, Transaction::new());
+    assert!(removed.is_some(), "the dormant tile must be reaped");
+    assert!(
+        layout.workspaces.contains_key(&window_ws),
+        "reclaiming the middle entry would leave an EWAF-forbidden length-2 view",
+    );
+    assert_eq!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .len(),
+        3,
+        "beta's view must keep all three entries",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
 fn move_column_to_workspace_up_into_shared_trailing_bookend_appends_dormant_bookend() {
     // Source must be at position > 0 for `_up` to do anything. Move-column-down with
     // `activate = true` first to grow the view to `[W_target(empty), W_src(has window, active at

@@ -2249,6 +2249,111 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        // Reap a dead-client tile from a dormant-activity view. A window living
+        // exclusively in a non-active activity's workspace on a connected output is
+        // present in the pool but in neither the active-view loop above (which only
+        // walks each monitor's active view) nor the disconnected loop (which only
+        // fires when no monitors are connected). Without this arm its tile leaks.
+        //
+        // Resolve ids/output under a shared borrow first, then mutate, per the
+        // pool-then-monitors borrow-split recipe.
+        let dormant_hit = self
+            .workspaces
+            .iter()
+            .find(|(_, ws)| ws.has_window(window))
+            .map(|(id, ws)| (*id, ws.activities().len()));
+
+        if let Some((id, activity_count)) = dormant_hit {
+            // Resolve the monitor and owning view from the *view-keyed* output, NOT from
+            // `ws.output_id()`. A partial disconnect (`remove_output` with monitors still
+            // non-empty) migrates a window-bearing dormant workspace into the dormant
+            // activity's view on the primary monitor but deliberately leaves the
+            // workspace's `output_id` field pointing at the now-disconnected output (the
+            // reclaim-on-reconnect tag; `bind_output` refreshes `output_id` only when it
+            // already matches the bound output). So `ws.output_id()` can name a gone
+            // output here even though the view itself lives on a connected monitor.
+            // Scanning the activity views for the one holding `id` yields the keyed output,
+            // which the migration guarantees is connected — that is the assumption the
+            // `.expect`s below rely on, making them genuinely unreachable.
+            let output_id = self
+                .activities
+                .iter()
+                .flat_map(|activity| activity.views().iter())
+                .find(|(_, view)| view.position_of(id).is_some())
+                .map(|(out, _)| out.clone())
+                .expect("a dormant-view window's workspace must live in some activity view");
+            let mon_idx = self
+                .monitors
+                .iter()
+                .position(|mon| mon.output_id() == output_id)
+                .expect("a dormant view's keyed output must be a connected monitor");
+
+            let removed = {
+                let mon_output = self.monitors[mon_idx].output.clone();
+                let ws = self
+                    .workspaces
+                    .get_mut(&id)
+                    .expect("pool scan just located this id");
+                ws.remove_tile(Some(&mon_output), window, transaction)
+            };
+
+            // Optionally reclaim the now-empty dormant workspace, mirroring the cleanup
+            // the other two arms perform. An empty unnamed *middle* workspace in a dormant
+            // view violates no invariant (the "no empty middle" rule is active-view-only),
+            // so reclaiming is best-effort: only drop the workspace when it is safe to
+            // remove from its owning view without breaking that view's bookend invariant,
+            // which `assert_view_bookends` checks on every view including dormant ones.
+            let ws_empty = !self
+                .workspaces
+                .get(&id)
+                .expect("pool scan just located this id")
+                .has_windows_or_name();
+
+            if ws_empty && activity_count == 1 {
+                let ewaf = self.monitors[mon_idx]
+                    .options
+                    .layout
+                    .empty_workspace_above_first;
+
+                // The workspace is exclusive to one activity, so it appears in exactly one
+                // view (per-view uniqueness, one output binding). Locate that view and
+                // reclaim only when `id` is a non-bookend, non-degenerate entry. Reaching
+                // this arm means the workspace is dormant — the active-view loop above
+                // already handled every window on an active view.
+                let owning_view = self
+                    .activities
+                    .iter()
+                    .filter_map(|activity| activity.views().get(&output_id))
+                    .find(|view| view.position_of(id).is_some());
+
+                let safe_to_reclaim = owning_view.is_some_and(|view| {
+                    let pos = view
+                        .position_of(id)
+                        .expect("filtered to views containing id");
+                    let len = view.len();
+                    let is_trailing = pos + 1 == len;
+                    let is_leading = pos == 0;
+                    if is_trailing {
+                        return false;
+                    }
+                    if ewaf {
+                        // Leading is a bookend under EWAF, and a middle drop must not leave
+                        // a length-2 view (EWAF requires 1 or 3+).
+                        !is_leading && len > 3
+                    } else {
+                        true
+                    }
+                });
+
+                if safe_to_reclaim {
+                    let pool = &mut self.workspaces;
+                    Self::destroy_workspaces_cross_activity(&mut self.activities, pool, [id]);
+                }
+            }
+
+            return Some(removed);
+        }
+
         None
     }
 
