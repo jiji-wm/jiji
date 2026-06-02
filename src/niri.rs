@@ -3694,9 +3694,9 @@ impl Niri {
     ///   - `Id(raw)` looks the id up across the **entire workspace pool**, including workspaces
     ///     exclusive to a dormant activity and workspaces bound to a disconnected output. This is
     ///     the asymmetry with [`Self::find_output_and_workspace_index`]: the `Id` arm there remains
-    ///     active-view-scoped (legacy callers depend on that), while this resolver is pool-wide so
-    ///     the move-window dispatch can detect cross-activity self-moves and route cross-activity
-    ///     targets to the dormant-aware mover.
+    ///     active-view + disconnected-pool scoped (legacy callers depend on that), while this
+    ///     resolver is fully pool-wide so the move-window dispatch can detect cross-activity
+    ///     self-moves and route cross-activity targets to the dormant-aware mover.
     ///   - `Name(s)` resolves via `Layout::find_workspace_by_name` (active-view + disconnected-pool
     ///     scoped); workspaces exclusive to a dormant activity yield `None`.
     ///   - `Index(i)` indexes the active monitor's active-activity view; returns `None` if the
