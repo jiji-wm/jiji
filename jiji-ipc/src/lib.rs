@@ -1623,8 +1623,8 @@ pub enum Transform {
 /// Toplevel window.
 // `Default` is constructor scaffolding (FRU-eligible at any call site that wants
 // it), not a real wire value. `Window::default()` produces a sentinel
-// `{ id: 0, title: None, app_id: None, pid: None, workspace_id: None,
-// is_focused: false, is_floating: false, is_urgent: false,
+// `{ id: 0, title: None, app_id: None, app_tag: None, pid: None,
+// workspace_id: None, is_focused: false, is_floating: false, is_urgent: false,
 // layout: WindowLayout::default(), focus_timestamp: None }` that no live
 // window ever has — never ship `Default` values to clients.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -1639,9 +1639,19 @@ pub struct Window {
     /// generated for each new window.
     pub id: u64,
     /// Title, if set.
+    ///
+    /// When an external tool (e.g. a Firefox extension) embeds a machine tag,
+    /// the raw title has the form `<U+2063><tag><U+2063><real title>` — an
+    /// invisible-separator-bracketed prefix. That prefix is stripped before
+    /// this field is populated; only the clean, user-facing title is exposed
+    /// here. See `app_tag` for the extracted tag value.
     pub title: Option<String>,
     /// Application ID, if set.
     pub app_id: Option<String>,
+    /// Machine tag smuggled into the window title by an external tool (e.g. a
+    /// Firefox extension), parsed out of the raw title at IPC-build time. `None`
+    /// for the common case of a window with no tag.
+    pub app_tag: Option<String>,
     /// Process ID that created the Wayland connection for this window, if known.
     ///
     /// Currently, windows created by xdg-desktop-portal-gnome will have a `None` PID, but this may

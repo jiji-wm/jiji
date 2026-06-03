@@ -897,6 +897,10 @@ fn print_window(window: &Window) {
         println!("  App ID: (unset)");
     }
 
+    if let Some(app_tag) = &window.app_tag {
+        println!("  App Tag: \"{app_tag}\"");
+    }
+
     println!(
         "  Is floating: {}",
         if window.is_floating { "yes" } else { "no" }

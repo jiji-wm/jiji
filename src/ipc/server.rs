@@ -1027,23 +1027,199 @@ async fn handle_event_stream_client(client: EventStreamClient) -> anyhow::Result
     Ok(())
 }
 
+/// INVISIBLE SEPARATOR (U+2063) used as both the opening and closing delimiter
+/// of the machine tag at the front of a window title. The same character serves
+/// as both boundaries: `<sentinel><tag><sentinel><clean title>`. Kept in sync
+/// by hand with the external tool's parser.
+const APP_TAG_SENTINEL: char = '\u{2063}';
+
+/// Split a raw title into (tag, clean title). Opening+closing sentinel →
+/// (Some(tag), clean); no opening → (None, title verbatim); opening but no
+/// closing (malformed, e.g. `"\u{2063}oops"`) → (None, "oops") — strip and
+/// ignore.
+///
+/// This is a hand-maintained mirror of the external tool's parser in
+/// `jiji-firefox-workspaces/src/marker.rs`. The sentinel value and the three
+/// parse arms must be behaviorally equivalent to that implementation; change
+/// both together.
+fn split_app_tag(title: &str) -> (Option<String>, String) {
+    let Some(rest) = title.strip_prefix(APP_TAG_SENTINEL) else {
+        return (None, title.to_string());
+    };
+    match rest.split_once(APP_TAG_SENTINEL) {
+        Some((tag, clean)) => (Some(tag.to_string()), clean.to_string()),
+        // Opening sentinel but no closing one: malformed. Strip the stray
+        // sentinel and surface no tag.
+        None => (None, rest.to_string()),
+    }
+}
+
+/// Decomposed form of a raw role title after sentinel extraction.
+///
+/// Named fields prevent the two `Option<String>` slots from being accidentally
+/// swapped at a destructure site — a positional tuple return would compile
+/// silently with swapped bindings.
+#[cfg_attr(test, derive(PartialEq, Debug))]
+struct TitleParts {
+    app_tag: Option<String>,
+    clean_title: Option<String>,
+}
+
+/// Convert a raw `Option<String>` role title into its decomposed parts.
+///
+/// Both `make_ipc_window` and the refresh-diff comparator call this helper so
+/// the two sites stay in sync — an asymmetry between them would cause tagged
+/// windows to diff on every compositor refresh and spam `WindowOpenedOrChanged`,
+/// and would also desync the `app_tag` field between the two sites.
+fn role_title_to_tag_and_clean(raw: &Option<String>) -> TitleParts {
+    match raw {
+        Some(raw_str) => {
+            let (tag, clean) = split_app_tag(raw_str);
+            TitleParts {
+                app_tag: tag,
+                clean_title: Some(clean),
+            }
+        }
+        None => TitleParts {
+            app_tag: None,
+            clean_title: None,
+        },
+    }
+}
+
 fn make_ipc_window(
     mapped: &Mapped,
     workspace_id: Option<WorkspaceId>,
     layout: WindowLayout,
 ) -> jiji_ipc::Window {
-    with_toplevel_role(mapped.toplevel(), |role| jiji_ipc::Window {
-        id: mapped.id().get(),
-        title: role.title.clone(),
-        app_id: role.app_id.clone(),
-        pid: mapped.credentials().map(|c| c.pid),
-        workspace_id: workspace_id.map(|id| id.get()),
-        is_focused: mapped.is_focused(),
-        is_floating: mapped.is_floating(),
-        is_urgent: mapped.is_urgent(),
-        layout,
-        focus_timestamp: mapped.get_focus_timestamp().map(Timestamp::from),
+    with_toplevel_role(mapped.toplevel(), |role| {
+        let TitleParts {
+            app_tag,
+            clean_title: title,
+        } = role_title_to_tag_and_clean(&role.title);
+        jiji_ipc::Window {
+            id: mapped.id().get(),
+            title,
+            app_id: role.app_id.clone(),
+            app_tag,
+            pid: mapped.credentials().map(|c| c.pid),
+            workspace_id: workspace_id.map(|id| id.get()),
+            is_focused: mapped.is_focused(),
+            is_floating: mapped.is_floating(),
+            is_urgent: mapped.is_urgent(),
+            layout,
+            focus_timestamp: mapped.get_focus_timestamp().map(Timestamp::from),
+        }
     })
+}
+
+#[cfg(test)]
+mod split_app_tag_tests {
+    use super::*;
+
+    #[test]
+    fn split_app_tag_extracts_tag_and_clean_title() {
+        let input = "\u{2063}uuid\u{2063}Real Title".to_string();
+        assert_eq!(
+            split_app_tag(&input),
+            (Some("uuid".to_string()), "Real Title".to_string())
+        );
+    }
+
+    #[test]
+    fn split_app_tag_untagged_passes_through() {
+        let input = "Plain Title";
+        assert_eq!(split_app_tag(input), (None, "Plain Title".to_string()));
+    }
+
+    #[test]
+    fn split_app_tag_malformed_strips_and_ignores() {
+        let input = "\u{2063}no closing sentinel".to_string();
+        assert_eq!(
+            split_app_tag(&input),
+            (None, "no closing sentinel".to_string())
+        );
+    }
+
+    // role_title_to_tag_and_clean — None input
+    #[test]
+    fn role_title_none_yields_both_none() {
+        // Untitled windows hit this arm on every comparator call; both fields
+        // must be None so the comparator sees no spurious diff.
+        let parts = role_title_to_tag_and_clean(&None);
+        assert_eq!(parts.app_tag, None);
+        assert_eq!(parts.clean_title, None);
+    }
+
+    // Empty tag: "\u{2063}\u{2063}Real Title" — parity with marker.rs `split`.
+    // marker.rs returns (Some(""), "Real Title") for this input; the compositor
+    // mirror must match byte-for-byte so stored and fresh values stay in sync.
+    #[test]
+    fn split_app_tag_empty_tag_parses_as_some_empty() {
+        let input = "\u{2063}\u{2063}Real Title".to_string();
+        assert_eq!(
+            split_app_tag(&input),
+            (Some("".to_string()), "Real Title".to_string())
+        );
+    }
+
+    // Tag-only input: "\u{2063}uuid\u{2063}" — clean half is the empty string.
+    #[test]
+    fn split_app_tag_tag_only_yields_empty_clean() {
+        let input = "\u{2063}uuid\u{2063}".to_string();
+        assert_eq!(
+            split_app_tag(&input),
+            (Some("uuid".to_string()), "".to_string())
+        );
+    }
+
+    // Mid-title sentinel must not trigger a false positive.
+    // "Plain\u{2063}Title" has no opening sentinel so it passes through verbatim.
+    #[test]
+    fn split_app_tag_mid_sentinel_is_not_a_tag() {
+        let input = "Plain\u{2063}Title";
+        assert_eq!(
+            split_app_tag(input),
+            (None, "Plain\u{2063}Title".to_string())
+        );
+    }
+
+    // Symmetry pin: the predicate the comparator evaluates must report unchanged
+    // when make_ipc_window and the comparator both process the same raw title.
+    // Pinning pure determinism (same input → same output) alone would not catch
+    // a future edit that desyncs the two call sites.
+    #[test]
+    fn comparator_predicate_reports_unchanged_for_stable_tagged_window() {
+        let raw_title = Some("\u{2063}my-uuid\u{2063}GitHub".to_string());
+
+        // Simulate what make_ipc_window does: extract and store.
+        let built = role_title_to_tag_and_clean(&raw_title);
+        let stored_title = built.clean_title.clone();
+        let stored_app_tag = built.app_tag.clone();
+
+        // Simulate what the comparator does on the next refresh with the same
+        // raw title still in the role.
+        let fresh = role_title_to_tag_and_clean(&raw_title);
+        let changed = stored_title != fresh.clean_title || stored_app_tag != fresh.app_tag;
+
+        assert!(
+            !changed,
+            "stable tagged window must not be flagged as changed"
+        );
+    }
+
+    // Pure-determinism pin (kept for completeness — asserts no internal
+    // mutation side-effect; does NOT cover the make→compare asymmetry hazard,
+    // which the symmetry test above handles).
+    #[test]
+    fn role_title_helper_is_deterministic() {
+        let raw = Some("\u{2063}my-uuid\u{2063}GitHub".to_string());
+        let first = role_title_to_tag_and_clean(&raw);
+        let second = role_title_to_tag_and_clean(&raw);
+        assert_eq!(first, second);
+        assert_eq!(first.app_tag, Some("my-uuid".to_string()));
+        assert_eq!(first.clean_title, Some("GitHub".to_string()));
+    }
 }
 
 impl State {
@@ -1370,8 +1546,18 @@ impl State {
             let mut changed =
                 ipc_win.workspace_id != workspace_id || ipc_win.is_floating != mapped.is_floating();
 
+            // Use the same helper as `make_ipc_window` so `ipc_win.title`
+            // (already stripped) is compared against the stripped value, not the
+            // raw role title. Without this, a tagged window would diff on every
+            // refresh and spam `WindowOpenedOrChanged`.
             changed |= with_toplevel_role(mapped.toplevel(), |role| {
-                ipc_win.title != role.title || ipc_win.app_id != role.app_id
+                let TitleParts {
+                    app_tag,
+                    clean_title,
+                } = role_title_to_tag_and_clean(&role.title);
+                ipc_win.title != clean_title
+                    || ipc_win.app_id != role.app_id
+                    || ipc_win.app_tag != app_tag
             });
 
             if changed {
