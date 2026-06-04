@@ -527,9 +527,9 @@ pub enum Action {
     FocusWorkspaceDown {},
     /// Focus the workspace above.
     FocusWorkspaceUp {},
-    /// Focus a workspace by reference (index or name).
+    /// Focus a workspace by reference (id, index, or name).
     FocusWorkspace {
-        /// Reference (index or name) of the workspace to focus.
+        /// Reference (id, index, or name) of the workspace to focus.
         #[cfg_attr(feature = "clap", arg())]
         reference: WorkspaceReferenceArg,
         /// If present, scope the lookup to workspaces that belong to this
@@ -1302,7 +1302,8 @@ pub enum PositionChange {
 /// - `id:<N>` — stable workspace id (a `u64`). The `id:` prefix is reserved: a workspace whose name
 ///   literally starts with `id:` is not addressable by name through the CLI (it remains accessible
 ///   by index or by id).
-/// - `<N>` (bare non-negative integer fitting in a `u8`) — positional index.
+/// - `<N>` (bare non-negative integer fitting in a `u8`, i.e. 0–255) — positional index. Negative
+///   integers and values above 255 are rejected as errors, not treated as names.
 /// - anything else — workspace name (case-insensitive match at the layout level).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -2878,6 +2879,39 @@ mod tests {
         );
     }
 
+    /// Pin the clap CLI surface for `focus-workspace --activity`.
+    ///
+    /// Guards against the `id:N` dispatch routing through `FromStr` and the
+    /// `--activity` flag being accidentally dropped or renamed. This is also
+    /// the only test that exercises `id:` through clap's `FromStr` dispatch.
+    #[cfg(feature = "clap")]
+    #[test]
+    fn focus_workspace_activity_clap_surface() {
+        use clap::Parser;
+
+        let parsed =
+            Action::try_parse_from(["jiji", "focus-workspace", "id:42", "--activity", "Work"])
+                .expect("focus-workspace id:42 --activity Work must parse");
+        match parsed {
+            Action::FocusWorkspace {
+                reference,
+                activity,
+            } => {
+                assert_eq!(
+                    reference,
+                    WorkspaceReferenceArg::Id(42),
+                    "id:42 must parse to Id(42)",
+                );
+                assert_eq!(
+                    activity,
+                    Some(ActivityReferenceArg::Name("Work".to_owned())),
+                    "non-numeric activity name must parse to Name(\"Work\")",
+                );
+            }
+            other => panic!("expected FocusWorkspace, got {other:?}"),
+        }
+    }
+
     #[test]
     fn activity_view_json_round_trip() {
         // Pin the wire form of `ActivityView` for both the connected case
@@ -3367,6 +3401,12 @@ mod tests {
         assert!(
             "300".parse::<WorkspaceReferenceArg>().is_err(),
             "bare index >255 must be rejected",
+        );
+
+        // Negative integers are not treated as names; they are rejected.
+        assert!(
+            "-1".parse::<WorkspaceReferenceArg>().is_err(),
+            "negative integers must be rejected, not treated as names",
         );
     }
 

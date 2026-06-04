@@ -1925,6 +1925,8 @@ impl State {
                     }
                 }
             }
+            // Keybind path: activity-scoped lookup is not handled here; the
+            // IPC dispatch route resolves the activity scope instead.
             Action::FocusWorkspace(reference, _activity) => {
                 if let Some((mut output, index)) =
                     self.niri.find_output_and_workspace_index(reference)

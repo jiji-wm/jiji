@@ -1219,6 +1219,21 @@ mod tests {
     }
 
     #[test]
+    fn focus_workspace_with_activity_property_parses() {
+        // `focus-workspace 1 activity="Work"` must parse to
+        // `FocusWorkspace(WorkspaceReference::Index(1), Some(ActivityReference::Name("Work")))`.
+        // This guards against knuffel silently dropping the `activity` property.
+        let action = parse_action(r#"focus-workspace 1 activity="Work""#);
+        assert_eq!(
+            action,
+            Action::FocusWorkspace(
+                WorkspaceReference::Index(1),
+                Some(ActivityReference::Name("Work".to_owned())),
+            ),
+        );
+    }
+
+    #[test]
     fn switch_activity_previous_bare_defaults_to_depth_one() {
         // Bare `switch-activity-previous;` (legacy KDL form without an argument)
         // must parse to `SwitchActivityPrevious(1)`.
