@@ -8296,6 +8296,27 @@ fn do_action_error_display_matches_wire_contract() {
         ),
         "workspace not found",
     );
+    // Activity-scoped workspace resolution tokens. Both variants are terminal
+    // errors that share the same IPC forwarding path as the sticky cohort.
+    use super::FocusWorkspaceInActivityError;
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::FocusWorkspaceInActivity(
+                FocusWorkspaceInActivityError::WorkspaceNotInActivity
+            )
+        ),
+        "workspace does not belong to the given activity",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::FocusWorkspaceInActivity(
+                FocusWorkspaceInActivityError::IndexUnsupported
+            )
+        ),
+        "index references are not supported with --activity; use a name or id:N",
+    );
 }
 
 #[test]
@@ -8311,10 +8332,10 @@ fn do_action_error_envelope_matches_wire_contract() {
     // The `WindowNotFound` case pins the new envelope.
     use super::{
         format_do_action_error, ActivitySwitchBlock, AddWorkspaceToActivityError,
-        CreateActivityError, DoActionError, MoveWorkspaceToActivityError, RemoveActivityError,
-        RemoveWorkspaceFromActivityError, RenameActivityError, SetWorkspaceActivitiesError,
-        SetWorkspaceStickyError, SwitchActivityError, ToggleWorkspaceStickyError,
-        UnsetWorkspaceStickyError,
+        CreateActivityError, DoActionError, FocusWorkspaceInActivityError,
+        MoveWorkspaceToActivityError, RemoveActivityError, RemoveWorkspaceFromActivityError,
+        RenameActivityError, SetWorkspaceActivitiesError, SetWorkspaceStickyError,
+        SwitchActivityError, ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
     };
     for (err, expected) in [
         (
@@ -8463,6 +8484,19 @@ fn do_action_error_envelope_matches_wire_contract() {
             DoActionError::UnsetWorkspaceSticky(UnsetWorkspaceStickyError::WorkspaceNotFound),
             "workspace not found",
         ),
+        // Activity-scoped workspace resolution rows.
+        (
+            DoActionError::FocusWorkspaceInActivity(
+                FocusWorkspaceInActivityError::WorkspaceNotInActivity,
+            ),
+            "workspace does not belong to the given activity",
+        ),
+        (
+            DoActionError::FocusWorkspaceInActivity(
+                FocusWorkspaceInActivityError::IndexUnsupported,
+            ),
+            "index references are not supported with --activity; use a name or id:N",
+        ),
     ] {
         assert_eq!(format_do_action_error(err), expected);
     }
@@ -8578,6 +8612,135 @@ fn resolve_workspace_id_finds_dormant_activity_workspace() {
         chain.is_none(),
         "two-filter chain must propagate `None` once active-view scope is enforced",
     );
+}
+
+#[test]
+fn resolve_workspace_in_activity_scopes_correctly() {
+    // Exercise the full scope contract of `resolve_workspace_in_activity`:
+    // id-match, name-match (case-insensitive), cross-activity miss,
+    // dormant-workspace resolve, and the Index-unsupported guard.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create Beta must succeed");
+
+    // Grab the named workspace — it belongs to Alpha (the active activity
+    // at creation time) and is not yet in Beta.
+    let ws1_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"ws1".to_owned()))
+        .map(|ws| ws.id())
+        .expect("ws1 must exist after AddNamedWorkspace");
+
+    // Id-form: ws1 belongs to Alpha → resolves; Beta doesn't contain it.
+    assert_eq!(
+        layout.resolve_workspace_in_activity(alpha, &WorkspaceReference::Id(ws1_id.get()),),
+        Ok(ws1_id),
+        "id-form must resolve within the owning activity",
+    );
+    assert_eq!(
+        layout.resolve_workspace_in_activity(beta, &WorkspaceReference::Id(ws1_id.get()),),
+        Err(super::FocusWorkspaceInActivityError::WorkspaceNotInActivity),
+        "id present in pool but not in Beta must return WorkspaceNotInActivity",
+    );
+
+    // Name-form (case-insensitive).
+    assert_eq!(
+        layout.resolve_workspace_in_activity(alpha, &WorkspaceReference::Name("WS1".to_owned())),
+        Ok(ws1_id),
+        "name-form must be case-insensitive",
+    );
+    assert_eq!(
+        layout.resolve_workspace_in_activity(alpha, &WorkspaceReference::Name("ws1".to_owned())),
+        Ok(ws1_id),
+        "lowercase name must also resolve",
+    );
+    // Name-form cross-activity miss: ws1 belongs to Alpha, not Beta.
+    assert_eq!(
+        layout.resolve_workspace_in_activity(beta, &WorkspaceReference::Name("ws1".to_owned())),
+        Err(super::FocusWorkspaceInActivityError::WorkspaceNotInActivity),
+        "name-form: workspace present in pool but not in Beta must return WorkspaceNotInActivity",
+    );
+
+    // Dormant-activity workspace: mint a workspace tagged only to Beta and
+    // confirm the pool-wide scan sees it even though Beta is dormant.
+    let beta_ws = Workspace::<TestWindow>::new_no_outputs(
+        HashSet::from([beta]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let beta_ws_id = beta_ws.id();
+    layout.workspaces.insert(beta_ws_id, beta_ws);
+
+    assert_eq!(
+        layout.resolve_workspace_in_activity(beta, &WorkspaceReference::Id(beta_ws_id.get()),),
+        Ok(beta_ws_id),
+        "dormant-activity workspace must resolve under its owning activity",
+    );
+
+    // Index-form must always return IndexUnsupported regardless of activity.
+    assert_eq!(
+        layout.resolve_workspace_in_activity(alpha, &WorkspaceReference::Index(0)),
+        Err(super::FocusWorkspaceInActivityError::IndexUnsupported),
+        "Index references must be rejected with IndexUnsupported",
+    );
+}
+
+#[test]
+fn resolve_workspace_in_activity_sticky_resolves_everywhere() {
+    // A sticky workspace is tagged with every activity; it must therefore
+    // resolve under any activity id, not just the one that was active when
+    // the workspace was created.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create Beta must succeed");
+
+    // Mark ws1 as sticky. `toggle_workspace_sticky` by reference adds
+    // ws1 to every activity's set (via `set_workspace_activities`).
+    layout
+        .toggle_workspace_sticky(Some(WorkspaceReference::Name("ws1".to_owned())))
+        .expect("toggle sticky must succeed on a known workspace");
+
+    let ws1_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"ws1".to_owned()))
+        .map(|ws| ws.id())
+        .expect("ws1 must remain in pool after toggle");
+
+    // A sticky workspace must resolve under both activities.
+    assert_eq!(
+        layout.resolve_workspace_in_activity(alpha, &WorkspaceReference::Id(ws1_id.get())),
+        Ok(ws1_id),
+        "sticky ws1 must resolve under Alpha",
+    );
+    assert_eq!(
+        layout.resolve_workspace_in_activity(beta, &WorkspaceReference::Id(ws1_id.get())),
+        Ok(ws1_id),
+        "sticky ws1 must resolve under Beta",
+    );
+
+    layout.verify_invariants();
 }
 
 #[test]

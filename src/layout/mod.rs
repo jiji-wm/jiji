@@ -605,6 +605,15 @@ pub(crate) enum DoActionError {
     /// `Action::UnsetWorkspaceSticky` failed. Wraps the layout-side
     /// [`UnsetWorkspaceStickyError`]. Terminal error.
     UnsetWorkspaceSticky(UnsetWorkspaceStickyError),
+    /// `Action::FocusWorkspace { activity: Some(_), .. }` resolved to a
+    /// workspace that is not in the requested activity, or the caller used a
+    /// positional index (unsupported in activity-scoped lookup). Terminal
+    /// error — never parked on the blocked-waiter queue.
+    // The dispatch arm that constructs this variant is wired in a later commit;
+    // the variant is already present in both terminal-error match lists in
+    // ipc/server.rs so the exhaustiveness guard compiles now.
+    #[allow(dead_code)]
+    FocusWorkspaceInActivity(FocusWorkspaceInActivityError),
 }
 
 impl From<ActivitySwitchBlock> for DoActionError {
@@ -688,6 +697,7 @@ impl fmt::Display for DoActionError {
             Self::ToggleWorkspaceSticky(e) => e.fmt(f),
             Self::SetWorkspaceSticky(e) => e.fmt(f),
             Self::UnsetWorkspaceSticky(e) => e.fmt(f),
+            Self::FocusWorkspaceInActivity(e) => e.fmt(f),
         }
     }
 }
@@ -848,6 +858,42 @@ pub(crate) enum MoveWindowToPoolError {
     /// bound to an output that never reconnected this session).
     TargetUnreachable,
 }
+
+/// Error returned by [`Layout::resolve_workspace_in_activity`] when the
+/// workspace cannot be found within the given activity's scope.
+///
+/// This is a terminal error: the IPC dispatch sites must forward it
+/// immediately rather than parking it on the blocked-waiter queue.
+// The dispatch arm that produces this error is wired in a later commit;
+// the enum and its Display impl are scaffolding for that work.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FocusWorkspaceInActivityError {
+    /// No workspace in the pool both matches the reference and belongs to the
+    /// given activity. This includes the case where the reference matches no
+    /// workspace anywhere in the pool (total miss), as well as the case where
+    /// a matching workspace exists but is assigned to a different activity.
+    WorkspaceNotInActivity,
+    /// Positional index references are not supported for activity-scoped
+    /// lookup; use a name or the `id:N` form instead.
+    IndexUnsupported,
+}
+
+impl fmt::Display for FocusWorkspaceInActivityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WorkspaceNotInActivity => {
+                write!(f, "workspace does not belong to the given activity")
+            }
+            Self::IndexUnsupported => write!(
+                f,
+                "index references are not supported with --activity; use a name or id:N"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FocusWorkspaceInActivityError {}
 
 /// Whether to activate a newly added window.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -6878,6 +6924,50 @@ impl<W: LayoutElement> Layout<W> {
             .values()
             .find(|ws| ws.id().get() == raw)
             .map(|ws| ws.id())
+    }
+
+    /// Resolve a workspace reference scoped to a specific activity.
+    ///
+    /// Scans the pool for workspaces that both match `reference` and belong to
+    /// `activity` (via [`Workspace::activities`]). The scan is pool-wide, so
+    /// workspaces belonging to dormant activities also resolve — the caller is
+    /// responsible for any further active-view filtering.
+    ///
+    /// # Errors
+    ///
+    /// - [`FocusWorkspaceInActivityError::IndexUnsupported`] — positional indices are not
+    ///   meaningful for activity-scoped lookup; callers must use `WorkspaceReference::Name` or
+    ///   `WorkspaceReference::Id`.
+    /// - [`FocusWorkspaceInActivityError::WorkspaceNotInActivity`] — no pool workspace matches the
+    ///   reference within the given activity's membership set.
+    // The call site for this method lives in the dispatch arm wired in a
+    // later commit. The allow suppresses the dead_code lint on the scaffolding.
+    #[allow(dead_code)]
+    pub(crate) fn resolve_workspace_in_activity(
+        &self,
+        activity: ActivityId,
+        reference: &WorkspaceReference,
+    ) -> Result<WorkspaceId, FocusWorkspaceInActivityError> {
+        if matches!(reference, WorkspaceReference::Index(_)) {
+            return Err(FocusWorkspaceInActivityError::IndexUnsupported);
+        }
+        self.workspaces
+            .values()
+            .find(|ws| {
+                ws.activities().contains(&activity)
+                    && match reference {
+                        WorkspaceReference::Id(raw) => ws.id().get() == *raw,
+                        WorkspaceReference::Name(name) => ws
+                            .name
+                            .as_ref()
+                            .is_some_and(|n| n.eq_ignore_ascii_case(name)),
+                        WorkspaceReference::Index(_) => {
+                            unreachable!("index arm guarded above")
+                        }
+                    }
+            })
+            .map(|ws| ws.id())
+            .ok_or(FocusWorkspaceInActivityError::WorkspaceNotInActivity)
     }
 
     /// Resolve an [`ActivityReferenceArg`] to an [`ActivityId`] if the pool

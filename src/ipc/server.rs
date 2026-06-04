@@ -486,7 +486,8 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
             | Err(err @ DoActionError::ToggleWorkspaceSticky(_))
             | Err(err @ DoActionError::SetWorkspaceSticky(_))
             | Err(err @ DoActionError::UnsetWorkspaceSticky(_))
-            | Err(err @ DoActionError::MoveWindowTargetUnreachable { .. }) => {
+            | Err(err @ DoActionError::MoveWindowTargetUnreachable { .. })
+            | Err(err @ DoActionError::FocusWorkspaceInActivity(_)) => {
                 // Terminal errors. Same shape as `WindowNotFound`:
                 // forward and advance the walk — do not re-block.
                 let _ = waiter.tx.send_blocking(Err(err));
@@ -816,9 +817,9 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                         // and the drain site would never re-dispatch.
                         let _ = tx.send_blocking(Err(DoActionError::WindowNotFound { id }));
                     }
-                    // Terminal errors from workspace-activity
-                    // assignment actions. Same rationale as `WindowNotFound`:
-                    // no hard-block condition, do not park — forward to the
+                    // Terminal errors — no hard-block condition applies;
+                    // forward immediately without parking. Same rationale as
+                    // `WindowNotFound`: do not park — forward to the
                     // waiter so the IPC envelope is produced on the main
                     // dispatch path.
                     Err(err @ DoActionError::AddWorkspaceToActivity(_))
@@ -832,7 +833,8 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                     | Err(err @ DoActionError::ToggleWorkspaceSticky(_))
                     | Err(err @ DoActionError::SetWorkspaceSticky(_))
                     | Err(err @ DoActionError::UnsetWorkspaceSticky(_))
-                    | Err(err @ DoActionError::MoveWindowTargetUnreachable { .. }) => {
+                    | Err(err @ DoActionError::MoveWindowTargetUnreachable { .. })
+                    | Err(err @ DoActionError::FocusWorkspaceInActivity(_)) => {
                         let _ = tx.send_blocking(Err(err));
                     }
                 }
