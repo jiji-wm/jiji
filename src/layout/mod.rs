@@ -609,10 +609,6 @@ pub(crate) enum DoActionError {
     /// workspace that is not in the requested activity, or the caller used a
     /// positional index (unsupported in activity-scoped lookup). Terminal
     /// error — never parked on the blocked-waiter queue.
-    // The dispatch arm that constructs this variant is wired in a later commit;
-    // the variant is already present in both terminal-error match lists in
-    // ipc/server.rs so the exhaustiveness guard compiles now.
-    #[allow(dead_code)]
     FocusWorkspaceInActivity(FocusWorkspaceInActivityError),
 }
 
@@ -864,9 +860,6 @@ pub(crate) enum MoveWindowToPoolError {
 ///
 /// This is a terminal error: the IPC dispatch sites must forward it
 /// immediately rather than parking it on the blocked-waiter queue.
-// The dispatch arm that produces this error is wired in a later commit;
-// the enum and its Display impl are scaffolding for that work.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FocusWorkspaceInActivityError {
     /// No workspace in the pool both matches the reference and belongs to the
@@ -6940,9 +6933,6 @@ impl<W: LayoutElement> Layout<W> {
     ///   `WorkspaceReference::Id`.
     /// - [`FocusWorkspaceInActivityError::WorkspaceNotInActivity`] — no pool workspace matches the
     ///   reference within the given activity's membership set.
-    // The call site for this method lives in the dispatch arm wired in a
-    // later commit. The allow suppresses the dead_code lint on the scaffolding.
-    #[allow(dead_code)]
     pub(crate) fn resolve_workspace_in_activity(
         &self,
         activity: ActivityId,

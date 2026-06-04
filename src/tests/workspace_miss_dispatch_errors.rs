@@ -18,9 +18,9 @@ use jiji_config::{Action, ActivityReference, WorkspaceReference};
 
 use super::fixture::{config_with_two_activities, Fixture};
 use crate::layout::{
-    DoActionError, DoActionOutcome, MoveWorkspaceToActivityError, SetWorkspaceActivitiesError,
-    SetWorkspaceStickyError, SwitchActivityError, ToggleWorkspaceStickyError,
-    UnsetWorkspaceStickyError,
+    DoActionError, DoActionOutcome, FocusWorkspaceInActivityError, MoveWorkspaceToActivityError,
+    SetWorkspaceActivitiesError, SetWorkspaceStickyError, SwitchActivityError,
+    ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
 };
 
 /// A workspace id that is guaranteed not to resolve in any test fixture.
@@ -302,6 +302,55 @@ fn switch_activity_not_found_returns_err() {
         result,
         Err(DoActionError::SwitchActivity(SwitchActivityError::NotFound)),
         "SwitchActivity with a bogus activity id must surface \
+         Err(SwitchActivity(NotFound))",
+    );
+}
+
+// --- I1: FocusWorkspace-with-activity dispatch coverage ---
+
+#[test]
+fn focus_workspace_in_activity_workspace_not_in_activity_returns_err() {
+    let mut f = Fixture::with_config(config_with_two_activities(&[], &[]));
+    f.add_output(1, (1920, 1080));
+
+    // Resolve an existing activity name but supply a bogus workspace id that
+    // belongs to no activity — exercises the workspace-resolve fail path.
+    let result = f.niri_state().do_action_inner(
+        Action::FocusWorkspace(
+            WorkspaceReference::Id(BOGUS_WS_ID),
+            Some(ActivityReference::Name("alpha".to_owned())),
+        ),
+        false,
+    );
+
+    assert_eq!(
+        result,
+        Err(DoActionError::FocusWorkspaceInActivity(
+            FocusWorkspaceInActivityError::WorkspaceNotInActivity,
+        )),
+        "FocusWorkspace with a valid activity but a bogus workspace id must surface \
+         Err(FocusWorkspaceInActivity(WorkspaceNotInActivity))",
+    );
+}
+
+#[test]
+fn focus_workspace_in_activity_activity_not_found_returns_err() {
+    let mut f = Fixture::with_config(config_with_two_activities(&[], &[]));
+    f.add_output(1, (1920, 1080));
+
+    // ActivityId is a monotonic counter — u64::MAX will not be minted before exit.
+    let result = f.niri_state().do_action_inner(
+        Action::FocusWorkspace(
+            WorkspaceReference::Index(1),
+            Some(ActivityReference::Id(u64::MAX)),
+        ),
+        false,
+    );
+
+    assert_eq!(
+        result,
+        Err(DoActionError::SwitchActivity(SwitchActivityError::NotFound)),
+        "FocusWorkspace with a bogus activity id must surface \
          Err(SwitchActivity(NotFound))",
     );
 }

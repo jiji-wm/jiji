@@ -1925,10 +1925,75 @@ impl State {
                     }
                 }
             }
-            // Keybind path: activity-scoped lookup is not handled here; the
-            // IPC dispatch route resolves the activity scope instead.
-            Action::FocusWorkspace(reference, _activity) => {
-                if let Some((mut output, index)) =
+            Action::FocusWorkspace(reference, activity) => {
+                if let Some(activity_ref) = activity {
+                    // Resolve-everything-first: no observable state change
+                    // (activity switch, workspace focus, cursor warp, redraw)
+                    // until activity-resolve, hard-block, and workspace-resolve
+                    // have all passed. A mid-sequence failure would otherwise
+                    // strand the user in a switched-but-no-target state.
+                    let arg: ActivityReferenceArg = activity_ref.into();
+                    let Some(activity_id) = self.niri.layout.resolve_activity_ref(&arg) else {
+                        warn!("focus_workspace: activity not found: {arg:?}");
+                        return Err(DoActionError::SwitchActivity(
+                            crate::layout::SwitchActivityError::NotFound,
+                        ));
+                    };
+                    let needs_switch = activity_id != self.niri.layout.active_activity_id();
+                    if needs_switch {
+                        if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
+                            debug!("focus_workspace: activity switch hard-blocked by {block:?}");
+                            return Err(block.into());
+                        }
+                    }
+                    let ws_id = self
+                        .niri
+                        .layout
+                        .resolve_workspace_in_activity(activity_id, &reference)
+                        .map_err(DoActionError::FocusWorkspaceInActivity)?;
+
+                    // Only now mutate: switch activity, then reconcile inhibitor
+                    // visibility with the new active set.
+                    if needs_switch {
+                        self.niri.layout.switch_activity(activity_id);
+                        self.niri
+                            .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
+                    }
+
+                    // The workspace is in the active activity now; reuse the
+                    // existing output-aware focus path (warp included; redraw
+                    // is unconditional below).
+                    if let Some((mut output, index)) = self
+                        .niri
+                        .find_output_and_workspace_index(WorkspaceReference::Id(ws_id.get()))
+                    {
+                        if let Some(active) = self.niri.layout.active_output() {
+                            if output.as_ref() == Some(active) {
+                                output = None;
+                            }
+                        }
+                        if let Some(output) = output {
+                            self.niri.layout.focus_output(&output);
+                            self.niri.layout.switch_workspace(index);
+                            if !self.maybe_warp_cursor_to_focus_centered() {
+                                self.move_cursor_to_output(&output);
+                            }
+                        } else {
+                            // No auto-back-and-forth on the explicit-activity
+                            // path: the request names an exact destination.
+                            self.niri.layout.switch_workspace(index);
+                            self.maybe_warp_cursor_to_focus();
+                        }
+                    }
+                    // Partial-success contract: if `find_output_and_workspace_index`
+                    // returned None (workspace not visible to any connected view),
+                    // the activity switch above still stands — identical to a bare
+                    // activity switch followed by a focus that found no connected
+                    // output.
+                    self.niri.layer_shell_on_demand_focus = None;
+                    // FIXME: granular
+                    self.niri.queue_redraw_all();
+                } else if let Some((mut output, index)) =
                     self.niri.find_output_and_workspace_index(reference)
                 {
                     if let Some(active) = self.niri.layout.active_output() {
