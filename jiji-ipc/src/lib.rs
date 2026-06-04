@@ -1290,6 +1290,14 @@ pub enum PositionChange {
 }
 
 /// Workspace reference (id, index or name) to operate on.
+///
+/// The string form accepted by `FromStr` is:
+///
+/// - `id:<N>` — stable workspace id (a `u64`). The `id:` prefix is reserved: a workspace whose name
+///   literally starts with `id:` is not addressable by name through the CLI (it remains accessible
+///   by index or by id).
+/// - `<N>` (bare non-negative integer fitting in a `u8`) — positional index.
+/// - anything else — workspace name (case-insensitive match at the layout level).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub enum WorkspaceReferenceArg {
@@ -2308,6 +2316,16 @@ impl FromStr for WorkspaceReferenceArg {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // The `id:` prefix is checked first so that a string like `id:42`
+        // does not fall through to the bare-number branch and become `Index(42)`
+        // or the name branch.
+        if let Some(rest) = s.strip_prefix("id:") {
+            let raw = rest
+                .parse::<u64>()
+                .map_err(|_| "workspace id after 'id:' must be a non-negative integer")?;
+            return Ok(Self::Id(raw));
+        }
+
         let reference = if let Ok(index) = s.parse::<i32>() {
             if let Ok(idx) = u8::try_from(index) {
                 Self::Index(idx)
@@ -3307,6 +3325,43 @@ mod tests {
                 Ok(_) => panic!("expected Reply::Err variant"),
             }
         }
+    }
+
+    #[test]
+    fn parse_workspace_reference() {
+        // Round-trips for the three accepted forms.
+        assert_eq!(
+            "3".parse::<WorkspaceReferenceArg>().unwrap(),
+            WorkspaceReferenceArg::Index(3),
+        );
+        assert_eq!(
+            "web".parse::<WorkspaceReferenceArg>().unwrap(),
+            WorkspaceReferenceArg::Name("web".to_owned()),
+        );
+        assert_eq!(
+            "id:42".parse::<WorkspaceReferenceArg>().unwrap(),
+            WorkspaceReferenceArg::Id(42),
+        );
+
+        // Malformed `id:` prefixes must be rejected.
+        assert!(
+            "id:".parse::<WorkspaceReferenceArg>().is_err(),
+            "bare id: with no number is invalid",
+        );
+        assert!(
+            "id:x".parse::<WorkspaceReferenceArg>().is_err(),
+            "id: followed by non-integer is invalid",
+        );
+        assert!(
+            "id:-1".parse::<WorkspaceReferenceArg>().is_err(),
+            "id: followed by a negative number is invalid (u64 parse fails)",
+        );
+
+        // Out-of-range bare index.
+        assert!(
+            "300".parse::<WorkspaceReferenceArg>().is_err(),
+            "bare index >255 must be rejected",
+        );
     }
 
     #[test]
