@@ -220,7 +220,10 @@ pub enum Action {
     FocusWorkspaceUp,
     #[knuffel(skip)]
     FocusWorkspaceUpUnderMouse,
-    FocusWorkspace(#[knuffel(argument)] WorkspaceReference),
+    FocusWorkspace(
+        #[knuffel(argument)] WorkspaceReference,
+        #[knuffel(property(name = "activity"))] Option<ActivityReference>,
+    ),
     FocusWorkspacePrevious,
     MoveWindowToWorkspaceDown(#[knuffel(property(name = "focus"), default = true)] bool),
     MoveWindowToWorkspaceUp(#[knuffel(property(name = "focus"), default = true)] bool),
@@ -539,9 +542,13 @@ impl From<jiji_ipc::Action> for Action {
             jiji_ipc::Action::CenterVisibleColumns {} => Self::CenterVisibleColumns,
             jiji_ipc::Action::FocusWorkspaceDown {} => Self::FocusWorkspaceDown,
             jiji_ipc::Action::FocusWorkspaceUp {} => Self::FocusWorkspaceUp,
-            jiji_ipc::Action::FocusWorkspace { reference } => {
-                Self::FocusWorkspace(WorkspaceReference::from(reference))
-            }
+            jiji_ipc::Action::FocusWorkspace {
+                reference,
+                activity,
+            } => Self::FocusWorkspace(
+                WorkspaceReference::from(reference),
+                activity.map(Into::into),
+            ),
             jiji_ipc::Action::FocusWorkspacePrevious {} => Self::FocusWorkspacePrevious,
             jiji_ipc::Action::MoveWindowToWorkspaceDown { focus } => {
                 Self::MoveWindowToWorkspaceDown(focus)

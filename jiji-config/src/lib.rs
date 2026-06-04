@@ -2155,6 +2155,7 @@ mod tests {
                             Index(
                                 1,
                             ),
+                            None,
                         ),
                         repeat: true,
                         cooldown: None,
@@ -2175,6 +2176,7 @@ mod tests {
                             Name(
                                 "workspace-1",
                             ),
+                            None,
                         ),
                         repeat: true,
                         cooldown: None,

@@ -532,6 +532,12 @@ pub enum Action {
         /// Reference (index or name) of the workspace to focus.
         #[cfg_attr(feature = "clap", arg())]
         reference: WorkspaceReferenceArg,
+        /// If present, scope the lookup to workspaces that belong to this
+        /// activity. Workspaces not in the named activity are not reachable
+        /// even if their id or name would otherwise match.
+        #[serde(default)]
+        #[cfg_attr(feature = "clap", arg(long))]
+        activity: Option<ActivityReferenceArg>,
     },
     /// Focus the previous workspace.
     FocusWorkspacePrevious {},
@@ -3361,6 +3367,50 @@ mod tests {
         assert!(
             "300".parse::<WorkspaceReferenceArg>().is_err(),
             "bare index >255 must be rejected",
+        );
+    }
+
+    #[test]
+    fn focus_workspace_activity_field_wire_compat() {
+        // Legacy JSON without the `activity` field must deserialize with
+        // `activity: None` (the field carries `#[serde(default)]`).
+        let legacy = r#"{"FocusWorkspace":{"reference":{"Index":3}}}"#;
+        let action: Action = serde_json::from_str(legacy).expect("deserialize legacy form");
+        match &action {
+            Action::FocusWorkspace {
+                reference,
+                activity,
+            } => {
+                assert_eq!(reference, &WorkspaceReferenceArg::Index(3));
+                assert!(
+                    activity.is_none(),
+                    "legacy JSON must deserialise with activity=None"
+                );
+            }
+            other => panic!("expected FocusWorkspace, got {other:?}"),
+        }
+
+        // The activity-bearing form must round-trip byte-identically through
+        // serde. `Action` does not implement `PartialEq`; compare the JSON
+        // strings instead.
+        let full = Action::FocusWorkspace {
+            reference: WorkspaceReferenceArg::Index(3),
+            activity: Some(ActivityReferenceArg::Name("work".to_owned())),
+        };
+        let json = serde_json::to_string(&full).expect("serialize activity-bearing form");
+        // Verify the roundtrip by deserialising and re-serialising; both
+        // directions must produce identical bytes.
+        let reparsed: Action =
+            serde_json::from_str(&json).expect("deserialize activity-bearing form");
+        let rejson = serde_json::to_string(&reparsed).expect("re-serialize activity-bearing form");
+        assert_eq!(
+            json, rejson,
+            "activity-bearing form must round-trip through serde"
+        );
+        // Also verify the activity field is present in the wire output.
+        assert!(
+            json.contains("\"activity\""),
+            "serialised form must contain the activity field: {json}",
         );
     }
 
