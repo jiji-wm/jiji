@@ -571,6 +571,22 @@ pub(crate) enum DoActionError {
     /// not currently connected. Terminal error — replaces the pre-fix silent
     /// `Response::Handled` (which surfaced as a CLI false-success line).
     MoveWindowTargetUnreachable { ws_id: u64 },
+    /// `Action::MoveWindowToWorkspace` or `Action::MoveWindowToWorkspaceById`
+    /// was dispatched with a `Name` reference that resolves to no workspace
+    /// reachable from the active-view scope (unknown name). Terminal error —
+    /// the `Name`-fall-through sibling of `MoveWindowTargetUnreachable` (which
+    /// covers the `Id`-only path). The `name` field carries the offending token
+    /// for the wire message.
+    ///
+    /// Note: the `Index` arm is out of scope — `find_output_and_workspace_index`
+    /// always returns `Some` for `Index` (saturating clamp), so the `Index`
+    /// form keeps its clamp behaviour unchanged.
+    ///
+    /// Note: the `name` field carries a bare workspace name string, unlike the
+    /// `reference` field of [`DoActionError::FocusWorkspaceTargetUnknown`] which
+    /// carries a pre-formatted token (`id:N`, index, or name) — the two payloads
+    /// are not the same kind of value.
+    MoveWindowTargetUnknownName { name: String },
     /// `Action::CreateActivity` validation failed. Wraps the layout-side
     /// [`CreateActivityError`]. Terminal error.
     CreateActivity(CreateActivityError),
@@ -689,6 +705,9 @@ impl fmt::Display for DoActionError {
             Self::WindowNotFound { id } => write!(f, "window not found: id={id}"),
             Self::MoveWindowTargetUnreachable { ws_id } => {
                 write!(f, "workspace not reachable for move: id={ws_id}")
+            }
+            Self::MoveWindowTargetUnknownName { name } => {
+                write!(f, "workspace not found for move: {name}")
             }
             // Outer variants wrapping a layout-side `*Error` delegate to the
             // inner enum's `Display`. The inner enum's tokens are the source

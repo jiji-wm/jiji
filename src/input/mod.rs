@@ -1605,6 +1605,19 @@ impl State {
                     }
                 }
 
+                // The token is built eagerly for every reference form, but only
+                // the Name arm's value is ever consumed: Index always resolves
+                // to Some (saturating clamp) and Id is either intercepted
+                // upstream or resolves via the active view, so the `None`
+                // error-return below — the only reader of this token — is never
+                // reached for Index or Id. A harmless placeholder for those
+                // arms is preferable to a panic on a path the dispatch
+                // evaluates on every move.
+                let name_token = match &reference {
+                    jiji_config::WorkspaceReference::Name(n) => n.clone(),
+                    jiji_config::WorkspaceReference::Index(i) => format!("{i}"),
+                    jiji_config::WorkspaceReference::Id(id) => format!("id:{id}"),
+                };
                 if let Some((mut output, index)) =
                     self.niri.find_output_and_workspace_index(reference)
                 {
@@ -1641,6 +1654,8 @@ impl State {
 
                     // FIXME: granular
                     self.niri.queue_redraw_all();
+                } else {
+                    return Err(DoActionError::MoveWindowTargetUnknownName { name: name_token });
                 }
             }
             Action::MoveWindowToWorkspaceById {
@@ -1782,10 +1797,26 @@ impl State {
                         }
                     }
                 }
-                // else: dormant source. Existing fall-through into the
-                // active-view-scoped path will hit `move_to_workspace`'s
-                // `warn!`/clean-return for this case (silent `Ok(Handled)`).
+                // else: dormant source. Fall-through into the active-view-scoped
+                // path yields `Ok(Handled)` when the target name resolves
+                // (the `move_to_workspace` warn!/clean-return handles the
+                // cross-activity source); an unresolvable target name reaches
+                // the `else` below and errors with `MoveWindowTargetUnknownName`
+                // regardless of source dormancy.
 
+                // The token is built eagerly for every reference form, but only
+                // the Name arm's value is ever consumed: Index always resolves
+                // to Some (saturating clamp) and Id is either intercepted
+                // upstream or resolves via the active view, so the `None`
+                // error-return below — the only reader of this token — is never
+                // reached for Index or Id. A harmless placeholder for those
+                // arms is preferable to a panic on a path the dispatch
+                // evaluates on every move.
+                let name_token = match &reference {
+                    jiji_config::WorkspaceReference::Name(n) => n.clone(),
+                    jiji_config::WorkspaceReference::Index(i) => format!("{i}"),
+                    jiji_config::WorkspaceReference::Id(id) => format!("id:{id}"),
+                };
                 if let Some((output, index)) = self.niri.find_output_and_workspace_index(reference)
                 {
                     let target_was_active = self
@@ -1829,6 +1860,8 @@ impl State {
 
                     // FIXME: granular
                     self.niri.queue_redraw_all();
+                } else {
+                    return Err(DoActionError::MoveWindowTargetUnknownName { name: name_token });
                 }
             }
             Action::MoveColumnToWorkspaceDown(focus) => {
@@ -1844,6 +1877,10 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::MoveColumnToWorkspace(reference, focus) => {
+                // Deliberate silent no-op on a Name miss: MoveColumnToWorkspace
+                // has no by-name/by-id IPC consumer (only the Index keybind,
+                // which clamps and cannot miss), so unlike move-window it stays
+                // a silent no-op rather than surfacing an error.
                 if let Some((mut output, index)) =
                     self.niri.find_output_and_workspace_index(reference)
                 {

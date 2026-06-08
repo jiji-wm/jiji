@@ -8337,6 +8337,27 @@ fn do_action_error_display_matches_wire_contract() {
         ),
         "workspace not found: id:9999999999",
     );
+    // `move-window-to-workspace` Name-miss rows. The name token is interpolated
+    // verbatim; the prefix "workspace not found for move: " is the observable
+    // IPC contract distinguishing this variant from the focus-workspace miss.
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::MoveWindowTargetUnknownName {
+                name: "no-such-ws".to_owned()
+            }
+        ),
+        "workspace not found for move: no-such-ws",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::MoveWindowTargetUnknownName {
+                name: "id:9999999999".to_owned()
+            }
+        ),
+        "workspace not found for move: id:9999999999",
+    );
 }
 
 #[test]
@@ -8529,6 +8550,19 @@ fn do_action_error_envelope_matches_wire_contract() {
                 reference: "id:9999999999".to_owned(),
             },
             "workspace not found: id:9999999999",
+        ),
+        // `move-window-to-workspace` Name-miss rows.
+        (
+            DoActionError::MoveWindowTargetUnknownName {
+                name: "no-such-ws".to_owned(),
+            },
+            "workspace not found for move: no-such-ws",
+        ),
+        (
+            DoActionError::MoveWindowTargetUnknownName {
+                name: "id:9999999999".to_owned(),
+            },
+            "workspace not found for move: id:9999999999",
         ),
     ] {
         assert_eq!(format_do_action_error(err), expected);
