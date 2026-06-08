@@ -23,10 +23,98 @@ use crate::layout::{
     ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
 };
 
+// --- Plain focus-workspace (no --activity) dispatch coverage ---
+
+#[test]
+fn focus_workspace_unknown_name_returns_err() {
+    let mut f = Fixture::with_config(config_with_two_activities(&[], &[]));
+    f.add_output(1, (1920, 1080));
+
+    let result = f.niri_state().do_action_inner(
+        Action::FocusWorkspace(
+            WorkspaceReference::Name("no-such-workspace".to_owned()),
+            None,
+        ),
+        false,
+    );
+
+    assert_eq!(
+        result,
+        Err(DoActionError::FocusWorkspaceTargetUnknown {
+            reference: "no-such-workspace".to_owned()
+        }),
+        "FocusWorkspace with an unknown name and no activity must surface \
+         Err(FocusWorkspaceTargetUnknown)",
+    );
+}
+
+#[test]
+fn focus_workspace_unknown_id_returns_err() {
+    let mut f = Fixture::with_config(config_with_two_activities(&[], &[]));
+    f.add_output(1, (1920, 1080));
+
+    let result = f.niri_state().do_action_inner(
+        Action::FocusWorkspace(WorkspaceReference::Id(BOGUS_WS_ID), None),
+        false,
+    );
+
+    assert_eq!(
+        result,
+        Err(DoActionError::FocusWorkspaceTargetUnknown {
+            reference: format!("id:{BOGUS_WS_ID}")
+        }),
+        "FocusWorkspace with a bogus id and no activity must surface \
+         Err(FocusWorkspaceTargetUnknown)",
+    );
+}
+
+#[test]
+fn focus_workspace_valid_name_still_focuses() {
+    // Positive control: a valid named workspace must still return Ok(Handled)
+    // after the dispatch arm reshape. Uses a config-seeded named workspace so
+    // the name resolves without creating windows first.
+    let mut f = Fixture::with_config(config_with_two_activities(&["my-ws"], &[]));
+    f.add_output(1, (1920, 1080));
+
+    let result = f.niri_state().do_action_inner(
+        Action::FocusWorkspace(WorkspaceReference::Name("my-ws".to_owned()), None),
+        false,
+    );
+
+    assert_eq!(
+        result,
+        Ok(DoActionOutcome::Handled),
+        "FocusWorkspace with a valid named workspace must return Ok(Handled)",
+    );
+}
+
 /// A workspace id that is guaranteed not to resolve in any test fixture.
 /// `WorkspaceId` is a monotonic global counter — `u64::MAX` will not be
 /// minted before the test exits.
 const BOGUS_WS_ID: u64 = u64::MAX;
+
+#[test]
+fn focus_workspace_index_out_of_range_clamps_not_errors() {
+    // Pins the explicit decision that `WorkspaceReference::Index` keeps its
+    // upstream clamp behaviour and never reaches `FocusWorkspaceTargetUnknown`.
+    // `find_output_and_workspace_index` returns Some unconditionally for Index
+    // (saturating_sub clamp, early return) — this test guards against a future
+    // change to that arm silently flipping dispatch to Err.
+    let mut f = Fixture::with_config(config_with_two_activities(&[], &[]));
+    f.add_output(1, (1920, 1080));
+
+    let result = f.niri_state().do_action_inner(
+        Action::FocusWorkspace(WorkspaceReference::Index(u8::MAX), None),
+        false,
+    );
+
+    assert_eq!(
+        result,
+        Ok(DoActionOutcome::Handled),
+        "FocusWorkspace with an out-of-range Index must clamp to Ok(Handled), \
+         never reach FocusWorkspaceTargetUnknown",
+    );
+}
 
 #[test]
 fn move_workspace_to_activity_workspace_not_found_returns_err() {

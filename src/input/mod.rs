@@ -1986,41 +1986,60 @@ impl State {
                         }
                     }
                     // Partial-success contract: if `find_output_and_workspace_index`
-                    // returned None (workspace not visible to any connected view),
-                    // the activity switch above still stands — identical to a bare
-                    // activity switch followed by a focus that found no connected
-                    // output.
+                    // returned None (workspace not reachable from any connected view
+                    // — exclusive to a dormant activity or bound to a disconnected
+                    // output), the activity switch above still stands — identical to
+                    // a bare activity switch followed by a focus that found no
+                    // connected output.
                     self.niri.layer_shell_on_demand_focus = None;
                     // FIXME: granular
                     self.niri.queue_redraw_all();
-                } else if let Some((mut output, index)) =
-                    self.niri.find_output_and_workspace_index(reference)
-                {
-                    if let Some(active) = self.niri.layout.active_output() {
-                        if output.as_ref() == Some(active) {
-                            output = None;
+                } else {
+                    // Capture a human-readable token before `reference` is
+                    // consumed by `find_output_and_workspace_index`.
+                    let reference_token = match &reference {
+                        jiji_config::WorkspaceReference::Name(n) => n.clone(),
+                        jiji_config::WorkspaceReference::Id(id) => format!("id:{id}"),
+                        // find_output_and_workspace_index returns Some unconditionally for
+                        // Index (it clamps and returns early), so the error `else` below is
+                        // never reached for an Index reference. The token is built here
+                        // regardless to keep the match exhaustive; it stays harmless if that
+                        // invariant ever changes.
+                        jiji_config::WorkspaceReference::Index(i) => format!("{i}"),
+                    };
+                    if let Some((mut output, index)) =
+                        self.niri.find_output_and_workspace_index(reference)
+                    {
+                        if let Some(active) = self.niri.layout.active_output() {
+                            if output.as_ref() == Some(active) {
+                                output = None;
+                            }
                         }
-                    }
 
-                    if let Some(output) = output {
-                        self.niri.layout.focus_output(&output);
-                        self.niri.layout.switch_workspace(index);
-                        if !self.maybe_warp_cursor_to_focus_centered() {
-                            self.move_cursor_to_output(&output);
-                        }
-                    } else {
-                        let config = &self.niri.config;
-                        if config.borrow().input.workspace_auto_back_and_forth {
-                            self.niri.layout.switch_workspace_auto_back_and_forth(index);
-                        } else {
+                        if let Some(output) = output {
+                            self.niri.layout.focus_output(&output);
                             self.niri.layout.switch_workspace(index);
+                            if !self.maybe_warp_cursor_to_focus_centered() {
+                                self.move_cursor_to_output(&output);
+                            }
+                        } else {
+                            let config = &self.niri.config;
+                            if config.borrow().input.workspace_auto_back_and_forth {
+                                self.niri.layout.switch_workspace_auto_back_and_forth(index);
+                            } else {
+                                self.niri.layout.switch_workspace(index);
+                            }
+                            self.maybe_warp_cursor_to_focus();
                         }
-                        self.maybe_warp_cursor_to_focus();
-                    }
-                    self.niri.layer_shell_on_demand_focus = None;
+                        self.niri.layer_shell_on_demand_focus = None;
 
-                    // FIXME: granular
-                    self.niri.queue_redraw_all();
+                        // FIXME: granular
+                        self.niri.queue_redraw_all();
+                    } else {
+                        return Err(DoActionError::FocusWorkspaceTargetUnknown {
+                            reference: reference_token,
+                        });
+                    }
                 }
             }
             Action::FocusWorkspacePrevious => {

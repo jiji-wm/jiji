@@ -3455,6 +3455,39 @@ mod tests {
     }
 
     #[test]
+    fn reply_err_format_for_focus_workspace_target_unknown() {
+        // Roundtrips the plain `focus-workspace` unknown-reference wire
+        // envelope through serde to pin its JSON representation. The exact
+        // prefix "workspace not found: " is the observable IPC contract;
+        // the reference token is interpolated verbatim.
+        //
+        // The envelope is assembled by `format_do_action_error` in
+        // `jiji/src/layout/mod.rs` and pinned by
+        // `do_action_error_envelope_matches_wire_contract` there; the
+        // `Display` tokens are pinned by
+        // `do_action_error_display_matches_wire_contract`.
+        for (msg, expected_json) in [
+            (
+                "workspace not found: no-such-ws",
+                r#"{"Err":"workspace not found: no-such-ws"}"#,
+            ),
+            (
+                "workspace not found: id:9999999999",
+                r#"{"Err":"workspace not found: id:9999999999"}"#,
+            ),
+        ] {
+            let reply: Reply = Err(msg.to_owned());
+            let json = serde_json::to_string(&reply).expect("serialize Reply::Err");
+            assert_eq!(json, expected_json);
+            let parsed: Reply = serde_json::from_str(&json).expect("deserialize Reply::Err");
+            match parsed {
+                Err(parsed_msg) => assert_eq!(parsed_msg, msg),
+                Ok(_) => panic!("expected Reply::Err variant"),
+            }
+        }
+    }
+
+    #[test]
     fn reply_err_format_for_window_not_found() {
         // Roundtrips the `FocusWindow` "window no longer exists"
         // wire envelope through serde to pin its JSON representation. The

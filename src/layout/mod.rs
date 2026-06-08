@@ -610,6 +610,18 @@ pub(crate) enum DoActionError {
     /// positional index (unsupported in activity-scoped lookup). Terminal
     /// error — never parked on the blocked-waiter queue.
     FocusWorkspaceInActivity(FocusWorkspaceInActivityError),
+    /// `Action::FocusWorkspace { activity: None, .. }` was dispatched with a
+    /// `Name` or `Id` reference that resolves to no workspace reachable from
+    /// the active-view + disconnected-pool scope (unknown name/id, or an id
+    /// known only to a dormant activity's exclusive workspaces). Terminal
+    /// error — replaces the prior silent no-op on the IPC path. The
+    /// `reference` field carries the offending token as a human-readable
+    /// string for the wire message.
+    ///
+    /// Note: the `Index` arm is out of scope — `find_output_and_workspace_index`
+    /// always returns `Some` for `Index` and upstream clamps out-of-range
+    /// indices, so the `Index` form keeps its clamp behaviour unchanged.
+    FocusWorkspaceTargetUnknown { reference: String },
 }
 
 impl From<ActivitySwitchBlock> for DoActionError {
@@ -694,6 +706,9 @@ impl fmt::Display for DoActionError {
             Self::SetWorkspaceSticky(e) => e.fmt(f),
             Self::UnsetWorkspaceSticky(e) => e.fmt(f),
             Self::FocusWorkspaceInActivity(e) => e.fmt(f),
+            Self::FocusWorkspaceTargetUnknown { reference } => {
+                write!(f, "workspace not found: {reference}")
+            }
         }
     }
 }

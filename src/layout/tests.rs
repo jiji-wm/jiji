@@ -8317,6 +8317,26 @@ fn do_action_error_display_matches_wire_contract() {
         ),
         "index references are not supported with --activity; use a name or id:N",
     );
+    // Plain `focus-workspace` (no --activity) with a name or id that resolves
+    // to nothing. The reference token is interpolated verbatim.
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::FocusWorkspaceTargetUnknown {
+                reference: "no-such-ws".to_owned()
+            }
+        ),
+        "workspace not found: no-such-ws",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::FocusWorkspaceTargetUnknown {
+                reference: "id:9999999999".to_owned()
+            }
+        ),
+        "workspace not found: id:9999999999",
+    );
 }
 
 #[test]
@@ -8496,6 +8516,19 @@ fn do_action_error_envelope_matches_wire_contract() {
                 FocusWorkspaceInActivityError::IndexUnsupported,
             ),
             "index references are not supported with --activity; use a name or id:N",
+        ),
+        // Plain `focus-workspace` (no --activity) name/id miss rows.
+        (
+            DoActionError::FocusWorkspaceTargetUnknown {
+                reference: "no-such-ws".to_owned(),
+            },
+            "workspace not found: no-such-ws",
+        ),
+        (
+            DoActionError::FocusWorkspaceTargetUnknown {
+                reference: "id:9999999999".to_owned(),
+            },
+            "workspace not found: id:9999999999",
         ),
     ] {
         assert_eq!(format_do_action_error(err), expected);
