@@ -1,8 +1,8 @@
-# niri (gajdusek fork) — coding conventions
+# jiji — coding conventions
 
-Personal fork of niri. Branch: `feature/activities`. Upstream: `niri-wm/niri`.
+Hard fork of niri. Branch: `main`. Upstream remote: `niri-wm/niri`.
 
-For the workspace-level DD-driven phase loop and ecosystem tooling, see the parent workspace's `CLAUDE.md` — specifically the "Active work" section that pins the current DD and sub-phase. For upstream's own build/test/architecture reference, see `../upstream/CLAUDE.md`.
+Workspace-level process and cross-repo design docs live in the jiji-wm workspace. For upstream niri's own build/test/architecture reference, see the upstream niri repository.
 
 This file covers **fork-specific coding conventions** that are enforced in review: error discipline, invariant enforcement, borrow-order, commit hygiene. These are the conventions the `feature/activities` branch has built up over Phases 0–1 and that Phase 1a+ continues to enforce.
 
@@ -62,7 +62,7 @@ This file covers **fork-specific coding conventions** that are enforced in revie
 - **No design-document references in commit messages.** No phase markers (e.g. `Phase 1a`), sub-phase / sub-step / §X.X / Box N / Appendix X / "DD" / "design.md" / "Reviewed: YYYY-MM-DD". Enforced by `.git/hooks/pre-commit` and `.git/hooks/commit-msg`. Bypass with `git commit --no-verify` only for legitimate meta-commits (e.g., scrubbing historical references with filter-repo). Detailed context goes in the DD, not the commit body or source.
 - Post-review fixes typically **squash** into the commit they fix (`git commit --amend`). The exception: a fix that doesn't belong in the reviewed commit's subject — a regression test pinning the refactor, post-main polish, or a surfaced pre-existing bug — lands as a **separate follow-up commit** instead. The fixer decides based on the *"would the reviewed commit's subject still describe all its changes after squash?"* test. The DD `Reviewed: YYYY-MM-DD (<hash1>, <hash2>, ...)` entry cites all commits covered. If amend changes the hash, update the DD's hash reference in the review-scribing commit.
 - Trailers per global `~/CLAUDE.md`. The `<mode>` in `AI-Assisted: <mode> (<model>)` extends to these niri-specific values for fork work:
-  - `full-loop` — fork commit that went through `/land-subphase` (architect → implementer → review → fixer).
+  - `full-loop` — fork commit that went through the full review loop (architect → implementer → review → fixer).
   - `implementer` — ad-hoc code commit outside the loop (direct `/implement` call, no review step).
   - `scribe` — DD commit in the workspace repo.
   - `one-shot` — any other Claude-touched commit (manual tweak, drive-by).
@@ -71,7 +71,7 @@ This file covers **fork-specific coding conventions** that are enforced in revie
 
 ## Architecture (short reference)
 
-Don't duplicate the upstream architecture doc — see `../upstream/CLAUDE.md` for crate structure, build flags, and the calloop-driven single-threaded design.
+Don't duplicate the upstream architecture doc — see the upstream niri repository for crate structure, build flags, and the calloop-driven single-threaded design.
 
 Fork-specific structural additions the upstream doc doesn't cover:
 
