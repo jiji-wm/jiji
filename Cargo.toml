@@ -8,10 +8,10 @@ members = [
 [workspace.package]
 version = "26.4.0"
 description = "A scrollable-tiling Wayland compositor"
-authors = ["Ivan Molodetskikh <yalterz@gmail.com>"]
+authors = ["Ivan Molodetskikh <yalterz@gmail.com>", "Petr Gajdůšek"]
 license = "GPL-3.0-or-later"
 edition = "2021"
-repository = "https://github.com/niri-wm/niri"
+repository = "https://github.com/jiji-wm/jiji"
 rust-version = "1.85"
 
 [workspace.dependencies]

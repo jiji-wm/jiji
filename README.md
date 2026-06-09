@@ -17,7 +17,7 @@ The workspace-as-atom model means workspaces can belong to multiple activities; 
 
 Architecture and rationale live under [`docs/activities/`](docs/activities/) in this repo.
 
-Companion CLI: `jiji-activities` — drives activity switching, workspace assignment, and the fuzzy picker. Lives in a sibling repo, not yet public.
+Companion CLI: `jiji-activities` — drives activity switching, workspace assignment, and the fuzzy picker. Lives in a sibling repo: [`jiji-wm/jiji-activities`](https://github.com/jiji-wm/jiji-activities).
 
 ## Everything else
 
@@ -32,7 +32,7 @@ For questions about the underlying niri features, upstream's channels are the ri
 - Matrix: https://matrix.to/#/#niri:matrix.org
 - Upstream repo: https://github.com/niri-wm/niri
 
-The public GitHub repos (`gajdusek/jiji`, `gajdusek/jiji-activities`) are not yet created; the project is currently local-only. When they go public, jiji-specific issues belong there.
+jiji-specific issues belong on the project's GitHub repos under the [`jiji-wm`](https://github.com/jiji-wm) organization.
 
 ## Contributing
 

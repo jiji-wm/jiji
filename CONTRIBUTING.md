@@ -4,7 +4,7 @@ jiji is a personal fork of [niri](https://github.com/niri-wm/niri). For general 
 
 ## jiji-specific contributions
 
-The Activities feature and anything else that is jiji-only will not go upstream. Once the public repos are created (Phase D, currently pending), issues and PRs for jiji-specific work are welcome there.
+The Activities feature and anything else that is jiji-only will not go upstream. Issues and PRs for jiji-specific work are welcome on the project's GitHub repos under the [`jiji-wm`](https://github.com/jiji-wm) organization.
 
 Before opening a PR, skim the architecture notes under `docs/activities/` to understand the current model and what is already planned or explicitly out of scope. Opening an issue first to discuss the approach is appreciated.
 
