@@ -20456,3 +20456,320 @@ fn add_workspace_up_ewaf_inserts_and_preserves_forced_empty_slot() {
         "window 1 must still be in the layout after add_workspace_up",
     );
 }
+
+// ---- Activity-switch transition state tests ----
+
+/// Helper: arm an activity-switch and check that all connected monitors have `Some`.
+/// Returns the outgoing id for further assertions.
+fn setup_two_activity_layout_two_outputs() -> (Layout<TestWindow>, ActivityId, ActivityId) {
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+    (layout, seed_id, beta_id)
+}
+
+#[test]
+fn activity_switch_arms_all_monitors() {
+    // Switching with two connected outputs: both monitors must hold Some(ActivitySwitch)
+    // with from==seed, same dir, and anim not done yet.
+    let (mut layout, seed_id, beta_id) = setup_two_activity_layout_two_outputs();
+
+    layout.switch_activity(beta_id);
+
+    assert_eq!(layout.active_activity_id(), beta_id);
+    assert_eq!(layout.monitors.len(), 2);
+    for mon in &layout.monitors {
+        let switch = mon
+            .activity_switch
+            .as_ref()
+            .expect("monitor must have activity_switch after switch");
+        assert_eq!(switch.from, seed_id, "from must be the outgoing (seed) id");
+        assert_eq!(
+            switch.dir,
+            SlideDirection::Left,
+            "seed→beta: higher index → Left"
+        );
+        assert!(
+            !switch.anim.is_done(),
+            "anim must not be done immediately after arming"
+        );
+    }
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_no_op_arms_nothing() {
+    // Switching to the already-active id is a no-op; no transition must be armed.
+    let (mut layout, seed_id, _beta_id) = setup_two_activity_layout_two_outputs();
+
+    layout.switch_activity(seed_id);
+
+    for mon in &layout.monitors {
+        assert!(
+            mon.activity_switch.is_none(),
+            "no-op switch must not arm a transition",
+        );
+    }
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_unknown_id_arms_nothing() {
+    // Switching to an unknown id logs an error and returns; no transition must be armed.
+    let (mut layout, _seed_id, _beta_id) = setup_two_activity_layout_two_outputs();
+
+    layout.switch_activity(ActivityId::specific(u64::MAX));
+
+    for mon in &layout.monitors {
+        assert!(
+            mon.activity_switch.is_none(),
+            "unknown-id switch must not arm a transition",
+        );
+    }
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_anim_off_in_options_arms_nothing() {
+    // When the activity-switch animation is marked off, the switch still happens
+    // (workspace-switch is snapped as usual) but no ActivitySwitch state is created.
+    let mut options = Options::default();
+    options.animations.activity_switch.0.off = true;
+    let mut layout = Layout::with_options(Clock::with_time(Duration::ZERO), options);
+    let ops = [Op::AddOutput(1)];
+    check_ops_on_layout(&mut layout, ops);
+
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+    let seed_id = layout.active_activity_id();
+
+    // Workspace switch should still be snapped (no gesture here so workspace_switch is None).
+    layout.switch_activity(beta_id);
+    assert_eq!(
+        layout.active_activity_id(),
+        beta_id,
+        "switch still proceeds"
+    );
+    for mon in &layout.monitors {
+        assert!(
+            mon.activity_switch.is_none(),
+            "anim-off must not arm activity_switch",
+        );
+        assert!(
+            mon.workspace_switch.is_none(),
+            "workspace_switch snap still clears it",
+        );
+    }
+    let _ = seed_id;
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_overview_open_arms_nothing() {
+    // When the overview is open, no transition is armed — switching still proceeds.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    // Open overview programmatically.
+    layout.toggle_overview();
+    assert!(layout.overview_open);
+
+    layout.switch_activity(beta_id);
+
+    assert_eq!(layout.active_activity_id(), beta_id);
+    for mon in &layout.monitors {
+        assert!(
+            mon.activity_switch.is_none(),
+            "overview-open must suppress activity-switch transition",
+        );
+    }
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_completion_clears_state() {
+    // After the spring settles, advance_animations must clear activity_switch to None.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    layout.switch_activity(beta_id);
+    assert!(layout.monitors[0].activity_switch.is_some());
+
+    // Fast-forward past the spring settle by setting complete-instantly.
+    layout.clock.set_complete_instantly(true);
+    layout.advance_animations();
+    layout.clock.set_complete_instantly(false);
+
+    assert!(
+        layout.monitors[0].activity_switch.is_none(),
+        "completed anim must be cleared by advance_animations",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_re_trigger_mid_flight_snaps_and_restarts() {
+    // A→B then B→C before completion: each monitor must end up with from==B
+    // (snap+restart; no blending of the in-flight A→B progress).
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha_id = layout.active_activity_id();
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+    let gamma_id = layout
+        .create_activity("gamma".to_owned())
+        .expect("create gamma");
+
+    layout.switch_activity(beta_id);
+    // Transition in flight: from==alpha.
+    assert_eq!(
+        layout.monitors[0].activity_switch.as_ref().unwrap().from,
+        alpha_id,
+    );
+
+    // Re-trigger before completion.
+    layout.switch_activity(gamma_id);
+    let switch = layout.monitors[0]
+        .activity_switch
+        .as_ref()
+        .expect("must have transition after re-trigger");
+    assert_eq!(
+        switch.from, beta_id,
+        "from must be beta (the new outgoing strip)"
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_direction_left_and_right() {
+    // Declaration order: seed (pos 0) < beta (pos 1).
+    // seed→beta: target pos (1) > outgoing pos (0) → Left.
+    // beta→seed: target pos (0) < outgoing pos (1) → Right.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    layout.switch_activity(beta_id);
+    assert_eq!(
+        layout.monitors[0].activity_switch.as_ref().unwrap().dir,
+        SlideDirection::Left,
+        "seed→beta (forward): Left",
+    );
+
+    // Complete so we can arm again cleanly.
+    layout.clock.set_complete_instantly(true);
+    layout.advance_animations();
+    layout.clock.set_complete_instantly(false);
+
+    layout.switch_activity(seed_id);
+    assert_eq!(
+        layout.monitors[0].activity_switch.as_ref().unwrap().dir,
+        SlideDirection::Right,
+        "beta→seed (backward): Right",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_previous_reverses_direction() {
+    // A→B (Left) then switch_activity_previous(1) → B→A which must be Right.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    layout.switch_activity(beta_id);
+    // A→B: Left.
+    assert_eq!(
+        layout.monitors[0].activity_switch.as_ref().unwrap().dir,
+        SlideDirection::Left,
+    );
+
+    // Complete A→B first, then toggle back.
+    layout.clock.set_complete_instantly(true);
+    layout.advance_animations();
+    layout.clock.set_complete_instantly(false);
+
+    layout.switch_activity_previous(1);
+    assert_eq!(layout.active_activity_id(), seed_id);
+    assert_eq!(
+        layout.monitors[0].activity_switch.as_ref().unwrap().dir,
+        SlideDirection::Right,
+        "previous-toggle reversal: Right",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_config_reload_snaps() {
+    // After arming a transition, update_config (via update_options) must clear it.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    layout.switch_activity(beta_id);
+    assert!(layout.monitors[0].activity_switch.is_some());
+
+    layout.update_options(Options::default());
+
+    for mon in &layout.monitors {
+        assert!(
+            mon.activity_switch.is_none(),
+            "config reload must snap in-flight activity-switch transition",
+        );
+    }
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_removal_snap() {
+    // Runtime activity B: arm a transition to it (seed→B), then remove B.
+    // The removal cascade switches away from B first (so active ends up on seed),
+    // then deletes B from the pool. The snap_stale_activity_switches call must
+    // clear the in-flight `from==B` state before verify_invariants runs.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    // Switch to beta so we can arm a transition (seed→beta direction, Left).
+    // Then switch BACK to seed while beta transition is cleared, and re-arm seed→beta
+    // so the in-flight state has from==seed when we switch to beta and then remove beta.
+    // Simpler path: switch to beta (arms seed→beta), then immediately try removing beta.
+    // The cascade in remove_activity fires switch_activity(seed_id), which re-arms with
+    // from==beta. Then remove drops beta from pool; snap_stale_activity_switches clears it.
+    layout.switch_activity(beta_id);
+
+    let result = layout.remove_activity(&jiji_ipc::ActivityReferenceArg::Id(beta_id.get()));
+    assert!(result.is_ok(), "remove must succeed");
+    assert_eq!(layout.active_activity_id(), seed_id);
+
+    for mon in &layout.monitors {
+        assert!(
+            mon.activity_switch.is_none(),
+            "all activity_switch transitions must be cleared after removal",
+        );
+    }
+    layout.verify_invariants();
+}

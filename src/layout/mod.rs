@@ -62,7 +62,7 @@ pub use self::activity::{
     ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
 };
 pub use self::monitor::MonitorRenderElement;
-use self::monitor::{Monitor, WorkspaceSwitch};
+use self::monitor::{ActivitySwitch, Monitor, SlideDirection, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
@@ -5864,7 +5864,9 @@ impl<W: LayoutElement> Layout<W> {
             "switch_activity called while hard-blocked: caller must filter via \
              is_activity_switch_hard_blocked",
         );
-        if target == self.activities.active_id() {
+        // Capture before set_active so we can record the departing strip.
+        let outgoing = self.activities.active_id();
+        if target == outgoing {
             return;
         }
         if !self.activities.contains(target) {
@@ -5881,6 +5883,43 @@ impl<W: LayoutElement> Layout<W> {
             mon.workspace_switch = None;
         }
         self.ensure_all_activity_views();
+
+        // Arm the activity-switch transition on each connected monitor.
+        // Config gate: if the activity-switch animation is marked off, skip (zero new state).
+        // Overview gate: skip when the overview is open — the overview already gives a
+        // full spatial map; a simultaneous strip slide would compound confusingly.
+        // Assignment over an existing Some(_) is the snap+restart contract — no continuity math.
+        if !self.options.animations.activity_switch.0.off && !self.overview_open {
+            // Direction: higher pool index → Left (incoming strip from the right).
+            // Both positions are `.expect`-safe: `target` passed `contains` above;
+            // `outgoing` was the active id, which is always a live key.
+            let target_pos = self
+                .activities
+                .position_of(target)
+                .expect("target passed contains check and must be in the pool");
+            let outgoing_pos = self
+                .activities
+                .position_of(outgoing)
+                .expect("outgoing was the active id and must be in the pool");
+            let dir = if target_pos > outgoing_pos {
+                SlideDirection::Left
+            } else {
+                SlideDirection::Right
+            };
+            for mon in &mut self.monitors {
+                mon.activity_switch = Some(ActivitySwitch {
+                    from: outgoing,
+                    anim: Animation::new(
+                        mon.clock.clone(),
+                        0.,
+                        1.,
+                        0.,
+                        self.options.animations.activity_switch.0,
+                    ),
+                    dir,
+                });
+            }
+        }
 
         // Post-condition pins. See the "Focus restoration" rustdoc paragraph for rationale.
         #[cfg(debug_assertions)]
@@ -6409,6 +6448,10 @@ impl<W: LayoutElement> Layout<W> {
         // happened to already equal target.
         let _ = self.activities.remove(target);
 
+        // Any monitor whose activity-switch transition was departing from `target` now holds a
+        // dead id in `from`. Snap those before the invariant check fires.
+        self.snap_stale_activity_switches();
+
         // Destroying exclusive workspaces above may have dropped single-entry views in other
         // activities (cross-activity `retain` at `destroy_workspaces_cross_activity`). Re-run
         // the materializer so every remaining activity holds a bookend view for every
@@ -6419,6 +6462,26 @@ impl<W: LayoutElement> Layout<W> {
         self.verify_invariants();
 
         Ok(target)
+    }
+
+    /// Clear any in-flight activity-switch transition whose outgoing activity is no longer a live
+    /// pool key.
+    ///
+    /// Defensive: does not assume the caller redirected any in-flight transition before deleting
+    /// an activity. Any `from` id that is no longer a live pool key is cleared. Without this
+    /// sweep the monitor state would hold a permanently stale dead id; in debug builds,
+    /// `verify_invariants` (which checks `from` liveness) would panic on the next refresh.
+    fn snap_stale_activity_switches(&mut self) {
+        let activities = &self.activities;
+        for mon in &mut self.monitors {
+            if mon
+                .activity_switch
+                .as_ref()
+                .is_some_and(|s| !activities.contains(s.from))
+            {
+                mon.activity_switch = None;
+            }
+        }
     }
 
     /// Rename the runtime activity identified by `reference`, returning its id
@@ -7827,6 +7890,26 @@ impl<W: LayoutElement> Layout<W> {
             }
             monitor.verify_invariants(pool, &views_for_monitor);
 
+            // Activity-switch invariants: when a transition is in flight —
+            //   1. `from` must be a live activity id.
+            //   2. `from` must differ from the active activity id (the active id is the incoming
+            //      strip; `from` is the outgoing one).
+            // Cross-monitor consistency (all Some entries share one `from` and `dir`)
+            // is verified in the pass below, outside this per-monitor loop.
+            if let Some(switch) = &monitor.activity_switch {
+                assert!(
+                    self.activities.contains(switch.from),
+                    "Monitor activity_switch.from {:?} must be a live activity id",
+                    switch.from,
+                );
+                assert_ne!(
+                    switch.from,
+                    self.activities.active_id(),
+                    "Monitor activity_switch.from must not equal the active activity id \
+                     (from is the outgoing strip, active is the incoming one)",
+                );
+            }
+
             if idx == primary_idx {
                 for id in self.active_view(&monitor.output_id()).ids() {
                     let ws = pool
@@ -7910,6 +7993,37 @@ impl<W: LayoutElement> Layout<W> {
                     );
                 }
                 saw_view_offset_gesture = has_view_offset_gesture;
+            }
+        }
+
+        // Cross-monitor activity-switch consistency: all Some entries must share one `from` id
+        // and one `dir` value.  Mixed Some/None is legal (a monitor that connected mid-flight was
+        // never armed), but two Some entries with different `from` or different `dir` values
+        // indicate a logic bug.
+        {
+            let mut common_from: Option<ActivityId> = None;
+            let mut common_dir: Option<SlideDirection> = None;
+            for monitor in monitors.iter() {
+                if let Some(switch) = &monitor.activity_switch {
+                    match common_from {
+                        None => common_from = Some(switch.from),
+                        Some(f) => assert_eq!(
+                            f, switch.from,
+                            "all monitors with an in-flight activity-switch must share \
+                             the same outgoing activity id (expected {:?}, found {:?})",
+                            f, switch.from,
+                        ),
+                    }
+                    match common_dir {
+                        None => common_dir = Some(switch.dir),
+                        Some(d) => assert_eq!(
+                            d, switch.dir,
+                            "all monitors with an in-flight activity-switch must share \
+                             the same direction (expected {:?}, found {:?})",
+                            d, switch.dir,
+                        ),
+                    }
+                }
             }
         }
 
@@ -8133,6 +8247,42 @@ impl<W: LayoutElement> Layout<W> {
             &mut self.workspaces,
             ids_to_destroy,
         );
+
+        // Advance workspaces in outgoing-activity views. This pass is separate from the
+        // main loop above because the main loop holds &mut self.activities through its
+        // views_map borrow; resolving the outgoing activity inside it would not compile.
+        // Disjoint field borrows: &mut self.workspaces + &self.monitors + &self.activities.
+        {
+            let pool = &mut self.workspaces;
+            for mon in &self.monitors {
+                let Some(switch) = &mon.activity_switch else {
+                    continue;
+                };
+                let activity = self
+                    .activities
+                    .get(switch.from)
+                    .expect("in-flight activity switch outgoing id must be a live activity");
+                // View presence is tolerated rather than expected: a cross-activity destroy can
+                // legitimately drop a dormant single-entry view mid-flight without immediate
+                // re-materialization (the view.len()==1 → drop entry retain and
+                // destroy_workspaces_cross_activity).
+                //
+                // Sticky/shared workspaces present in both the active view (advanced in the main
+                // loop above) and the outgoing view receive advance_animations twice per tick.
+                // This is currently benign because advance_animations is clock-sampled (reads
+                // Clock::now() and is idempotent within a tick). A future delta-based animation
+                // model would need to deduplicate the workspace set across both passes.
+                let Some(view) = activity.views().get(&mon.output_id()) else {
+                    continue;
+                };
+                for id in view.ids() {
+                    pool.get_mut(id)
+                        .expect("view id must be a key in the pool")
+                        .advance_animations();
+                }
+            }
+        }
+
         for id in &self.disconnected_workspace_ids {
             self.workspaces
                 .get_mut(id)
@@ -8175,8 +8325,19 @@ impl<W: LayoutElement> Layout<W> {
                 continue;
             }
 
-            let view = self.active_view(&mon.output_id());
-            if mon.are_animations_ongoing(&self.workspaces, view) {
+            let mon_output_id = mon.output_id();
+            let view = self.active_view(&mon_output_id);
+            // Resolve the outgoing view when an activity-switch transition is in flight.
+            // View presence is tolerated (else None) — same expect/tolerate split as the
+            // advance pass; a mid-flight dormant-view evaporation is non-fatal here.
+            let outgoing_view = mon.activity_switch.as_ref().and_then(|s| {
+                self.activities
+                    .get(s.from)
+                    .expect("in-flight activity switch outgoing id must be a live activity")
+                    .views()
+                    .get(&mon_output_id)
+            });
+            if mon.are_animations_ongoing(&self.workspaces, view, outgoing_view) {
                 return true;
             }
         }
@@ -8749,6 +8910,10 @@ impl<W: LayoutElement> Layout<W> {
             // would-empty final state).
             let _ = self.activities.remove(target);
         }
+
+        // Any monitors whose activity-switch transition was departing from a now-removed activity
+        // hold a dead id in `from`. Snap those before the invariant check fires.
+        self.snap_stale_activity_switches();
 
         // Removing activities may have caused `destroy_workspaces_cross_activity` to drop
         // single-entry views in other activities (mirroring the `remove_activity` path); the

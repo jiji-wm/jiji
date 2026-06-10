@@ -66,6 +66,8 @@ pub struct Monitor<W: LayoutElement> {
     _phantom: PhantomData<W>,
     /// In-progress switch between workspaces.
     pub(super) workspace_switch: Option<WorkspaceSwitch>,
+    /// In-progress switch between activities.
+    pub(super) activity_switch: Option<ActivitySwitch>,
     /// Indication where an interactively-moved window is about to be placed.
     pub(super) insert_hint: Option<InsertHint>,
     /// Insert hint element for rendering.
@@ -90,6 +92,38 @@ pub struct Monitor<W: LayoutElement> {
 pub enum WorkspaceSwitch {
     Animation(Animation),
     Gesture(WorkspaceSwitchGesture),
+}
+
+/// Which direction the incoming activity strip slides in from.
+///
+/// `Left` means the new strip enters from the right side of the screen (the user navigated
+/// forward / to a higher-index activity); `Right` means it enters from the left (backward
+/// navigation). Fixed at arm time and never changes mid-flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlideDirection {
+    Left,
+    Right,
+}
+
+/// In-progress switch between activities on one monitor.
+///
+/// Pure data carrier — holds the outgoing activity id, a 0→1 animation, and the
+/// direction resolved at arm time. No renderer types are referenced here so the
+/// state is coverable by the headless test harness.
+///
+/// The `anim` runs from 0.0 to 1.0 on the configured activity-switch curve.
+/// `from` names the outgoing activity (the departing strip). `dir` encodes
+/// which side the incoming strip enters from.
+#[derive(Debug)]
+pub struct ActivitySwitch {
+    /// The outgoing activity id — the strip that is sliding away.
+    pub(super) from: ActivityId,
+    /// 0.0 → 1.0 animation on the configured activity-switch curve.
+    pub(super) anim: Animation,
+    /// Direction fixed at arm time: Left means the incoming strip enters from the right,
+    /// Right means it enters from the left.
+    #[allow(dead_code)]
+    pub(super) dir: SlideDirection,
 }
 
 #[derive(Debug)]
@@ -373,6 +407,7 @@ impl<W: LayoutElement> Monitor<W> {
             overview_open: false,
             overview_progress: None,
             workspace_switch: None,
+            activity_switch: None,
             clock,
             base_options,
             options,
@@ -686,6 +721,14 @@ impl<W: LayoutElement> Monitor<W> {
             None => (),
         }
 
+        if self
+            .activity_switch
+            .as_ref()
+            .is_some_and(|s| s.anim.is_done())
+        {
+            self.activity_switch = None;
+        }
+
         for id in view.ids() {
             pool.get_mut(id)
                 .expect("view id must be a key in the pool")
@@ -699,13 +742,23 @@ impl<W: LayoutElement> Monitor<W> {
         &self,
         pool: &HashMap<WorkspaceId, Workspace<W>>,
         view: &WorkspaceView,
+        outgoing_view: Option<&WorkspaceView>,
     ) -> bool {
         self.workspace_switch
             .as_ref()
             .is_some_and(|s| s.is_animation_ongoing())
+            || self
+                .activity_switch
+                .as_ref()
+                .is_some_and(|s| !s.anim.is_done())
             || view
                 .ids()
                 .iter()
+                .map(|id| pool.get(id).expect("view id must be a key in the pool"))
+                .any(|ws| ws.are_animations_ongoing())
+            || outgoing_view
+                .into_iter()
+                .flat_map(|v| v.ids())
                 .map(|id| pool.get(id).expect("view id must be a key in the pool"))
                 .any(|ws| ws.are_animations_ongoing())
     }
@@ -716,6 +769,7 @@ impl<W: LayoutElement> Monitor<W> {
         view: &WorkspaceView,
     ) -> bool {
         self.workspace_switch.is_some()
+            || self.activity_switch.is_some()
             || view
                 .ids()
                 .iter()
@@ -879,6 +933,9 @@ impl<W: LayoutElement> Monitor<W> {
 
         self.insert_hint_element
             .update_config(options.layout.insert_hint);
+
+        // Config reload snaps any in-flight activity-switch transition (snap+proceed contract).
+        self.activity_switch = None;
 
         self.base_options = base_options;
         self.options = options;

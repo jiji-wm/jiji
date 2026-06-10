@@ -951,6 +951,15 @@ impl Activities {
         self.map.contains_key(&id)
     }
 
+    /// Position of `id` in the pool, in declaration / creation order.
+    ///
+    /// Reflects the `IndexMap` insertion order — the same order the user sees
+    /// in IPC listings and that determines slide direction on an activity switch.
+    /// Returns `None` when `id` is not a live key.
+    pub(super) fn position_of(&self, id: ActivityId) -> Option<usize> {
+        self.map.get_index_of(&id)
+    }
+
     /// Resolve a list of config-declared activity names against this pool.
     ///
     /// Matching is case-insensitive (`str::eq_ignore_ascii_case`), mirroring
