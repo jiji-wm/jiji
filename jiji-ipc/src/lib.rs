@@ -559,6 +559,24 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = true))]
         focus: bool,
     },
+    /// Move the focused window to a new workspace inserted below the current one.
+    MoveWindowToNewWorkspaceDown {
+        /// Whether the focus should follow the window to the new workspace.
+        ///
+        /// If `true` (the default), the focus will follow the window to the new workspace. If
+        /// `false`, the focus will remain on the original workspace.
+        #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = true))]
+        focus: bool,
+    },
+    /// Move the focused window to a new workspace inserted above the current one.
+    MoveWindowToNewWorkspaceUp {
+        /// Whether the focus should follow the window to the new workspace.
+        ///
+        /// If `true` (the default), the focus will follow the window to the new workspace. If
+        /// `false`, the focus will remain on the original workspace.
+        #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = true))]
+        focus: bool,
+    },
     /// Move a window to a workspace.
     #[cfg_attr(
         feature = "clap",

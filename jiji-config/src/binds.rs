@@ -227,6 +227,8 @@ pub enum Action {
     FocusWorkspacePrevious,
     MoveWindowToWorkspaceDown(#[knuffel(property(name = "focus"), default = true)] bool),
     MoveWindowToWorkspaceUp(#[knuffel(property(name = "focus"), default = true)] bool),
+    MoveWindowToNewWorkspaceDown(#[knuffel(property(name = "focus"), default = true)] bool),
+    MoveWindowToNewWorkspaceUp(#[knuffel(property(name = "focus"), default = true)] bool),
     MoveWindowToWorkspace(
         #[knuffel(argument)] WorkspaceReference,
         #[knuffel(property(name = "focus"), default = true)] bool,
@@ -555,6 +557,12 @@ impl From<jiji_ipc::Action> for Action {
             }
             jiji_ipc::Action::MoveWindowToWorkspaceUp { focus } => {
                 Self::MoveWindowToWorkspaceUp(focus)
+            }
+            jiji_ipc::Action::MoveWindowToNewWorkspaceDown { focus } => {
+                Self::MoveWindowToNewWorkspaceDown(focus)
+            }
+            jiji_ipc::Action::MoveWindowToNewWorkspaceUp { focus } => {
+                Self::MoveWindowToNewWorkspaceUp(focus)
             }
             jiji_ipc::Action::MoveWindowToWorkspace {
                 window_id: None,
@@ -1304,5 +1312,33 @@ mod tests {
                 modifiers: Modifiers::ISO_LEVEL5_SHIFT
             },
         );
+    }
+
+    #[test]
+    fn move_window_to_new_workspace_down_parses_with_default_focus() {
+        // Bare `move-window-to-new-workspace-down;` must parse to `(true)`.
+        let action = parse_action("move-window-to-new-workspace-down");
+        assert_eq!(action, Action::MoveWindowToNewWorkspaceDown(true));
+    }
+
+    #[test]
+    fn move_window_to_new_workspace_down_parses_explicit_focus_false() {
+        // `focus=false` property must round-trip.
+        let action = parse_action("move-window-to-new-workspace-down focus=false");
+        assert_eq!(action, Action::MoveWindowToNewWorkspaceDown(false));
+    }
+
+    #[test]
+    fn move_window_to_new_workspace_up_parses_with_default_focus() {
+        // Bare `move-window-to-new-workspace-up;` must parse to `(true)`.
+        let action = parse_action("move-window-to-new-workspace-up");
+        assert_eq!(action, Action::MoveWindowToNewWorkspaceUp(true));
+    }
+
+    #[test]
+    fn move_window_to_new_workspace_up_parses_explicit_focus_false() {
+        // `focus=false` property must round-trip.
+        let action = parse_action("move-window-to-new-workspace-up focus=false");
+        assert_eq!(action, Action::MoveWindowToNewWorkspaceUp(false));
     }
 }

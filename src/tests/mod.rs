@@ -16,6 +16,7 @@ mod fullscreen;
 mod keyboard_shortcuts_inhibit_cross_activity;
 mod layer_shell;
 mod move_window_to_monitor_by_id_cross_activity;
+mod move_window_to_new_workspace;
 mod move_window_to_workspace_by_id_cross_activity;
 mod move_window_to_workspace_cross_activity;
 mod move_window_to_workspace_no_op_self;
