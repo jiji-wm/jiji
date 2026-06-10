@@ -4027,6 +4027,174 @@ impl<W: LayoutElement> Layout<W> {
         );
     }
 
+    /// Remove the active tile from its workspace and place it on a freshly
+    /// inserted workspace above the current position.
+    ///
+    /// The insertion index is `view.active_position()`, so the new workspace
+    /// lands above the source; the source shifts down by one after insertion.
+    /// At the edges the bookend-reuse rules from `interactive_move_end` apply:
+    ///
+    /// - If `empty_workspace_above_first` is set and the target index is 0, the existing top empty
+    ///   workspace is reused (no insert).  This arm is structurally unreachable here: `insert_idx
+    ///   == 0` requires the source at slot 0, which under ewaf is the forced-empty slot, so
+    ///   `remove_active_tile` bails first.  The arm is kept for structural symmetry with
+    ///   `interactive_move_end`.
+    /// - If the target index reaches or exceeds the trailing bookend slot, the trailing bookend is
+    ///   reused (no insert).  This arm is kept for structural symmetry with the down variant; it is
+    ///   unreachable for the up direction because the trailing empty is never the focused source.
+    ///
+    /// `focus` controls whether the view follows the window:
+    /// `true` → `ActivateWindow::Yes`; `false` → `ActivateWindow::Smart`.
+    fn move_to_new_workspace_up_on(
+        monitors: &mut [Monitor<W>],
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        view: &mut WorkspaceView,
+        mon_idx: usize,
+        focus: bool,
+        seed_activity: ActivityId,
+    ) {
+        let mon = &mut monitors[mon_idx];
+        let source_idx = view.active_position();
+        let insert_idx = source_idx;
+
+        // (1) Remove the active tile first; bail if the workspace is empty.
+        let workspace = mon.workspace_at_mut(pool, view, source_idx);
+        let Some(removed) = workspace.remove_active_tile(Some(&mon.output), Transaction::new())
+        else {
+            return;
+        };
+
+        // (2) Resolve the target workspace id, applying bookend-reuse rules in
+        //     the same order as `interactive_move_end`.
+        let target_id =
+            if monitors[mon_idx].options.layout.empty_workspace_above_first && insert_idx == 0 {
+                // Reuse the top empty workspace; no insert needed.
+                // Unreachable under intact bookend invariants (see rustdoc).
+                // If fired on invariant breach with target == source, the tile
+                // re-lands on the source workspace as a new column.
+                view.ids()[0]
+            } else if view.len() - 1 <= insert_idx {
+                // Reuse the trailing bookend; no insert needed.
+                // Unreachable for the up direction under intact bookend invariants
+                // (see rustdoc).  If fired on invariant breach with target ==
+                // source, the tile re-lands on the source workspace as a new column.
+                view.ids()[view.len() - 1]
+            } else {
+                // Insert a fresh workspace at insert_idx and capture its id.
+                Self::add_workspace_at_on(monitors, pool, view, mon_idx, insert_idx, seed_activity);
+                view.ids()[insert_idx]
+            };
+
+        // (3) Place the tile on the target workspace using an id-based target so
+        //     the up-direction index shift (source is now at insert_idx + 1)
+        //     cannot produce a stale-index lookup.
+        let activate = if focus {
+            ActivateWindow::Yes
+        } else {
+            ActivateWindow::Smart
+        };
+
+        Self::add_tile_on(
+            monitors,
+            pool,
+            view,
+            mon_idx,
+            removed.tile,
+            MonitorAddWindowTarget::Workspace {
+                id: target_id,
+                column_idx: None,
+            },
+            activate,
+            true,
+            removed.width,
+            removed.is_full_width,
+            removed.is_floating,
+            seed_activity,
+        );
+    }
+
+    /// Remove the active tile from its workspace and place it on a freshly
+    /// inserted workspace below the current position.
+    ///
+    /// The insertion index is `view.active_position() + 1`, so the new
+    /// workspace lands directly below the source.  At the edges the
+    /// bookend-reuse rules from `interactive_move_end` apply:
+    ///
+    /// - If `empty_workspace_above_first` is set and the target index is 0, the top empty workspace
+    ///   is reused.  This arm is kept for structural symmetry with `interactive_move_end`; it is
+    ///   unreachable for the down direction because `insert_idx = source_idx + 1 >= 1` always.
+    /// - If the target index reaches or exceeds the trailing bookend slot, the trailing bookend is
+    ///   reused (no insert) — the window lands on the existing trailing empty workspace at the
+    ///   bottom edge.
+    ///
+    /// `focus` controls whether the view follows the window:
+    /// `true` → `ActivateWindow::Yes`; `false` → `ActivateWindow::Smart`.
+    fn move_to_new_workspace_down_on(
+        monitors: &mut [Monitor<W>],
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        view: &mut WorkspaceView,
+        mon_idx: usize,
+        focus: bool,
+        seed_activity: ActivityId,
+    ) {
+        let mon = &mut monitors[mon_idx];
+        let source_idx = view.active_position();
+        let insert_idx = source_idx + 1;
+
+        // (1) Remove the active tile first; bail if the workspace is empty.
+        let workspace = mon.workspace_at_mut(pool, view, source_idx);
+        let Some(removed) = workspace.remove_active_tile(Some(&mon.output), Transaction::new())
+        else {
+            return;
+        };
+
+        // (2) Resolve the target workspace id, applying bookend-reuse rules in
+        //     the same order as `interactive_move_end`.
+        let target_id =
+            if monitors[mon_idx].options.layout.empty_workspace_above_first && insert_idx == 0 {
+                // Reuse the top empty workspace; no insert needed.
+                // Unreachable for the down direction under intact bookend invariants
+                // (see rustdoc).  If fired on invariant breach with target ==
+                // source, the tile re-lands on the source workspace as a new column.
+                view.ids()[0]
+            } else if view.len() - 1 <= insert_idx {
+                // Reuse the trailing bookend; no insert needed.
+                // If fired on invariant breach with target == source, the tile
+                // re-lands on the source workspace as a new column.
+                view.ids()[view.len() - 1]
+            } else {
+                // Insert a fresh workspace at insert_idx and capture its id
+                // before any index shifts.
+                Self::add_workspace_at_on(monitors, pool, view, mon_idx, insert_idx, seed_activity);
+                view.ids()[insert_idx]
+            };
+
+        // (3) Place the tile on the target workspace.
+        let activate = if focus {
+            ActivateWindow::Yes
+        } else {
+            ActivateWindow::Smart
+        };
+
+        Self::add_tile_on(
+            monitors,
+            pool,
+            view,
+            mon_idx,
+            removed.tile,
+            MonitorAddWindowTarget::Workspace {
+                id: target_id,
+                column_idx: None,
+            },
+            activate,
+            true,
+            removed.width,
+            removed.is_full_width,
+            removed.is_floating,
+            seed_activity,
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     fn move_to_workspace_on(
@@ -4904,6 +5072,58 @@ impl<W: LayoutElement> Layout<W> {
         let seed_activity = self.activities.active_id();
         let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
         Self::move_to_workspace_down_on(
+            monitors,
+            pool,
+            view,
+            active_monitor_idx,
+            focus,
+            seed_activity,
+        );
+    }
+
+    /// Move the focused window to a new workspace inserted above the current
+    /// one on the active monitor.
+    ///
+    /// No-ops when there are no monitors or the active workspace is empty.
+    /// Under `empty_workspace_above_first` the forced-empty slot 0 is always
+    /// empty, so invoking this action from slot 0 no-ops (remove_active_tile
+    /// bails on an empty source).  From the first content slot (index 1) a
+    /// genuine insert occurs at index 1 and the forced-empty slot 0 is
+    /// undisturbed.
+    pub fn move_to_new_workspace_up(&mut self, focus: bool) {
+        if self.monitors.is_empty() {
+            return;
+        }
+        let active_monitor_idx = self.active_monitor_idx;
+        let mon_out = self.monitors[active_monitor_idx].output_id();
+        let seed_activity = self.activities.active_id();
+        let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+        Self::move_to_new_workspace_up_on(
+            monitors,
+            pool,
+            view,
+            active_monitor_idx,
+            focus,
+            seed_activity,
+        );
+    }
+
+    /// Move the focused window to a new workspace inserted below the current
+    /// one on the active monitor.
+    ///
+    /// No-ops when there are no monitors or the active workspace is empty.
+    /// At the bottom edge the window lands on the existing trailing empty
+    /// workspace instead of inserting a new one (same destination as
+    /// `move_to_workspace_down` at the bottom edge).
+    pub fn move_to_new_workspace_down(&mut self, focus: bool) {
+        if self.monitors.is_empty() {
+            return;
+        }
+        let active_monitor_idx = self.active_monitor_idx;
+        let mon_out = self.monitors[active_monitor_idx].output_id();
+        let seed_activity = self.activities.active_id();
+        let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+        Self::move_to_new_workspace_down_on(
             monitors,
             pool,
             view,

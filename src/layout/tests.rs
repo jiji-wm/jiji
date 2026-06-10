@@ -560,6 +560,8 @@ enum Op {
     FocusWorkspacePrevious,
     MoveWindowToWorkspaceDown(bool),
     MoveWindowToWorkspaceUp(bool),
+    MoveWindowToNewWorkspaceDown(bool),
+    MoveWindowToNewWorkspaceUp(bool),
     MoveWindowToWorkspace {
         #[proptest(strategy = "proptest::option::of(1..=5usize)")]
         window_id: Option<usize>,
@@ -1240,6 +1242,8 @@ impl Op {
             Op::FocusWorkspacePrevious => layout.switch_workspace_previous(),
             Op::MoveWindowToWorkspaceDown(focus) => layout.move_to_workspace_down(focus),
             Op::MoveWindowToWorkspaceUp(focus) => layout.move_to_workspace_up(focus),
+            Op::MoveWindowToNewWorkspaceDown(focus) => layout.move_to_new_workspace_down(focus),
+            Op::MoveWindowToNewWorkspaceUp(focus) => layout.move_to_new_workspace_up(focus),
             Op::MoveWindowToWorkspace {
                 window_id,
                 workspace_idx,
@@ -1925,6 +1929,8 @@ fn operations_dont_panic() {
         Op::FocusWorkspace(2),
         Op::MoveWindowToWorkspaceDown(true),
         Op::MoveWindowToWorkspaceUp(true),
+        Op::MoveWindowToNewWorkspaceDown(true),
+        Op::MoveWindowToNewWorkspaceUp(true),
         Op::MoveWindowToWorkspace {
             window_id: None,
             workspace_idx: 1,
@@ -2103,6 +2109,8 @@ fn operations_from_starting_state_dont_panic() {
         Op::FocusWorkspace(3),
         Op::MoveWindowToWorkspaceDown(true),
         Op::MoveWindowToWorkspaceUp(true),
+        Op::MoveWindowToNewWorkspaceDown(true),
+        Op::MoveWindowToNewWorkspaceUp(true),
         Op::MoveWindowToWorkspace {
             window_id: None,
             workspace_idx: 1,
@@ -19591,5 +19599,368 @@ fn move_window_to_pool_workspace_disconnected_output_returns_err() {
         Err(MoveWindowToPoolError::TargetUnreachable),
         "a workspace parked in disconnected_workspace_ids must surface as \
          TargetUnreachable — arm-3 regression pin (disconnected-output sub-case)",
+    );
+}
+
+// --- move-to-new-workspace tests ---
+
+#[test]
+fn move_to_new_workspace_down_inserts_mid_stack() {
+    // A window on workspace 0 (with another named workspace at slot 1) is
+    // moved to a new workspace below. The new workspace lands at index 1
+    // (strictly between source and the pre-existing slot 1) and the window
+    // must be on it with focus following.
+    //
+    // Setup: AddOutput → [ws0, ws1(named), trailing].
+    // After move-down from ws0: insert at idx 1 → [ws0, wsNew, ws1(named), trailing].
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        // Focus back to workspace 0 (holds w1); move w1 down.
+        Op::FocusWorkspaceUp,
+        Op::MoveWindowToNewWorkspaceDown(true),
+    ];
+
+    let layout = check_ops(ops);
+
+    let mon_out = layout.monitors[0].output_id();
+    let view = layout.active_view(&mon_out).clone();
+    let pool = layout.workspace_pool();
+
+    // Focus must have followed the window to the new workspace.
+    let active_pos = view.active_position();
+    let active_ws = pool
+        .get(&view.ids()[active_pos])
+        .expect("active id in pool");
+    assert!(
+        active_ws.has_window(&1),
+        "window must be on the focused workspace after move-down",
+    );
+    // New workspace inserted at index 1 (between source 0 and former slot 1).
+    assert_eq!(
+        active_pos, 1,
+        "focus must be on the newly inserted workspace at idx 1"
+    );
+    // Original 3 slots (ws0, ws1, trailing) + 1 inserted = 4.
+    assert_eq!(
+        view.len(),
+        4,
+        "view must have 4 entries after inserting one workspace"
+    );
+    // The old slot 1 (w2) must have shifted to slot 2.
+    assert!(
+        pool.get(&view.ids()[2])
+            .expect("view id in pool")
+            .has_window(&2),
+        "window 2 must have shifted to slot 2 after insertion above it",
+    );
+}
+
+#[test]
+fn move_to_new_workspace_up_inserts_mid_stack() {
+    // Window 2 starts on workspace 1 (above is workspace 0 holding w1).
+    // Moving w2 up must insert at index 1 and shift the source to index 2.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        // Active is ws1 (w2). Move w2 up.
+        Op::MoveWindowToNewWorkspaceUp(true),
+    ];
+
+    let layout = check_ops(ops);
+
+    let mon_out = layout.monitors[0].output_id();
+    let view = layout.active_view(&mon_out).clone();
+    let pool = layout.workspace_pool();
+
+    let active_pos = view.active_position();
+    let active_ws = pool
+        .get(&view.ids()[active_pos])
+        .expect("active id in pool");
+    assert!(
+        active_ws.has_window(&2),
+        "window 2 must be on the focused workspace after move-up",
+    );
+    // Inserted at index 1: source was at 1, new workspace at 1, source shifts to 2.
+    assert_eq!(
+        active_pos, 1,
+        "focus must be on the newly inserted workspace at idx 1"
+    );
+    // Original 3 slots (ws0, ws1, trailing) + 1 inserted = 4.
+    assert_eq!(
+        view.len(),
+        4,
+        "view must have 4 entries after inserting one workspace"
+    );
+    // Window 1 must still be on slot 0, undisturbed.
+    assert!(
+        pool.get(&view.ids()[0])
+            .expect("view id in pool")
+            .has_window(&1),
+        "window 1 must remain on slot 0 after insertion above it",
+    );
+}
+
+#[test]
+fn move_to_new_workspace_up_ewaf_inserts_and_preserves_forced_empty_slot() {
+    // Source is at index 1 (the first content slot under ewaf; slot 0 is the
+    // forced-empty).  insert_idx = source_idx = 1.  The ewaf reuse arm
+    // requires insert_idx == 0, so it does not fire; a fresh workspace is
+    // inserted at index 1.  Slot 0 stays the forced-empty, the new workspace
+    // lands at slot 1, and the emptied source shifts to slot 2.
+    //
+    // Initial view: [empty(0), ws1(window), trailing(2)] — len=3.
+    // After move-up: [empty(0), wsNew(1), ws1_empty(2), trailing(3)] — len=4.
+    // Focus follows the window to slot 1.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::MoveWindowToNewWorkspaceUp(true),
+    ];
+
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let layout = check_ops_with_options(options, ops);
+
+    let mon_out = layout.monitors[0].output_id();
+    let view = layout.active_view(&mon_out).clone();
+    let pool = layout.workspace_pool();
+
+    let active_pos = view.active_position();
+    let active_ws = pool
+        .get(&view.ids()[active_pos])
+        .expect("active id in pool");
+    assert!(
+        active_ws.has_window(&1),
+        "window must be on the focused workspace after move-up under ewaf",
+    );
+    assert_eq!(
+        active_pos, 1,
+        "focus must follow the window to the new workspace at idx 1"
+    );
+    // New workspace inserted at 1; source shifts to 2; trailing at 3. len=4.
+    assert_eq!(
+        view.len(),
+        4,
+        "ewaf move-up must insert a genuine workspace at idx 1"
+    );
+    // Slot 0 must remain the forced empty (untouched by the insert).
+    assert!(
+        !pool
+            .get(&view.ids()[0])
+            .expect("slot 0 in pool")
+            .has_windows_or_name(),
+        "slot 0 must remain empty under ewaf after move-up",
+    );
+}
+
+#[test]
+fn move_to_new_workspace_up_at_top_inserts_without_leading_bookend() {
+    // Without `empty_workspace_above_first`, source at index 0: no bookend-reuse
+    // arm fires; a fresh workspace is inserted at index 0, and focus follows
+    // the window to slot 0 while the source shifts to slot 1.
+    // This is the operation that `move_to_workspace_up` cannot express
+    // (it returns early when already at index 0).
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::MoveWindowToNewWorkspaceUp(true),
+    ];
+
+    let layout = check_ops(ops);
+
+    let mon_out = layout.monitors[0].output_id();
+    let view = layout.active_view(&mon_out).clone();
+    let pool = layout.workspace_pool();
+
+    let active_pos = view.active_position();
+    let active_ws = pool
+        .get(&view.ids()[active_pos])
+        .expect("active id in pool");
+    assert!(
+        active_ws.has_window(&1),
+        "window must be on the focused workspace after move-up insert at top",
+    );
+    assert_eq!(active_pos, 0, "focus must be on the new workspace at idx 0");
+    // Original 2-slot view + 1 inserted = 3.
+    assert_eq!(
+        view.len(),
+        3,
+        "view must have 3 entries after inserting at top"
+    );
+}
+
+#[test]
+fn move_to_new_workspace_down_at_bottom_reuses_trailing_bookend() {
+    // Source is at the last named workspace (slot 1 of 3: [ws0, ws1, trailing]).
+    // Move-down: insert_idx = 2, view.len()-1 = 2, 2 <= 2 → reuse trailing bookend.
+    // The window lands on the trailing bookend; add_tile_on mints a new trailing,
+    // view grows to 4. No mid-stack insert.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        // Focus ws1 (w2); move w2 down. insert_idx=2 == view.len()-1=2 → reuse trailing.
+        Op::MoveWindowToNewWorkspaceDown(true),
+    ];
+
+    let layout = check_ops(ops);
+
+    let mon_out = layout.monitors[0].output_id();
+    let view = layout.active_view(&mon_out).clone();
+    let pool = layout.workspace_pool();
+
+    let active_pos = view.active_position();
+    let active_ws = pool
+        .get(&view.ids()[active_pos])
+        .expect("active id in pool");
+    assert!(
+        active_ws.has_window(&2),
+        "window must be on the focused workspace after trailing-bookend reuse",
+    );
+    // The window moved to the old trailing slot. add_tile_on minted a new
+    // trailing, so view grows by one: 3 → 4.
+    assert_eq!(
+        active_pos,
+        view.len() - 2,
+        "focus must be on the slot just above the new trailing bookend",
+    );
+    // No mid-stack insert; only the new trailing bookend was appended.
+    assert_eq!(
+        view.len(),
+        4,
+        "trailing-bookend reuse appends only the mandatory new trailing"
+    );
+}
+
+#[test]
+fn move_to_new_workspace_bails_on_empty_active_workspace() {
+    // Moving from an empty workspace is a no-op: view length must not change
+    // and no orphan workspace must be inserted (pins the remove-before-insert rule).
+    //
+    // A fresh output has view.len() == 1 (just the trailing bookend).
+    let ops = [
+        Op::AddOutput(1),
+        // No window added — active workspace is empty.
+        Op::MoveWindowToNewWorkspaceDown(true),
+        Op::MoveWindowToNewWorkspaceUp(true),
+    ];
+
+    let layout = check_ops(ops);
+
+    let mon_out = layout.monitors[0].output_id();
+    let view = layout.active_view(&mon_out);
+    assert_eq!(
+        view.len(),
+        1,
+        "empty-workspace bail must not insert orphan workspaces",
+    );
+}
+
+#[test]
+fn move_to_new_workspace_focus_false_keeps_view_position() {
+    // With `focus = false` the view must not advance: the source workspace
+    // stays active after the move.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::MoveWindowToNewWorkspaceDown(false),
+    ];
+
+    let layout = check_ops(ops);
+
+    let mon_out = layout.monitors[0].output_id();
+    let view = layout.active_view(&mon_out);
+    // focus=false → ActivateWindow::Smart. add_tile_on's workspace-activation
+    // gate is `Smart.map_smart(|| false)`, which is false, so the view does not
+    // switch to the target workspace; the source workspace stays active.
+    assert_eq!(
+        view.active_position(),
+        0,
+        "active position must stay on the source workspace when focus=false",
+    );
+}
+
+#[test]
+fn move_to_new_workspace_prunes_emptied_source() {
+    // After the move and an animation cycle, the source workspace (unnamed,
+    // no remaining windows) must be cleaned up by the animation-finish hook.
+    //
+    // Setup: [ws0(w1), ws1(w2), trailing] — len=3.
+    // After move-down from ws0: insert at idx 1 → [ws0(empty), wsNew(w1), ws1(w2), trailing].
+    // After CompleteAnimations: ws0(empty) is pruned → [wsNew(w1), ws1(w2), trailing] — len=3.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::FocusWorkspaceUp,
+        Op::MoveWindowToNewWorkspaceDown(true),
+        // Complete animations to flush the workspace-switch and trigger pruning.
+        Op::CompleteAnimations,
+    ];
+
+    let layout = check_ops(ops);
+
+    let mon_out = layout.monitors[0].output_id();
+    let view = layout.active_view(&mon_out).clone();
+    let pool = layout.workspace_pool();
+
+    // The emptied source must no longer appear in the view.
+    let empty_unnamed_mid_stack = view.ids()[..view.len() - 1]
+        .iter()
+        .filter(|id| {
+            let ws = pool.get(id).expect("view id in pool");
+            !ws.has_windows_or_name()
+        })
+        .count();
+    assert_eq!(
+        empty_unnamed_mid_stack, 0,
+        "emptied unnamed source must be pruned after animation completes",
+    );
+    // Both windows must still be present.
+    assert!(
+        view.ids()
+            .iter()
+            .any(|id| pool.get(id).expect("view id in pool").has_window(&1)),
+        "window 1 must still be in the layout after source prune",
+    );
+    assert!(
+        view.ids()
+            .iter()
+            .any(|id| pool.get(id).expect("view id in pool").has_window(&2)),
+        "window 2 must still be in the layout after source prune",
     );
 }
