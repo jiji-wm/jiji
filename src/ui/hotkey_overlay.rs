@@ -474,6 +474,8 @@ fn action_name(action: &Action) -> String {
             String::from("Move Window to New Workspace Down")
         }
         Action::MoveWindowToNewWorkspaceUp(_) => String::from("Move Window to New Workspace Up"),
+        Action::AddWorkspaceDown => String::from("Add Workspace Down"),
+        Action::AddWorkspaceUp => String::from("Add Workspace Up"),
         Action::SwitchPresetColumnWidth => String::from("Switch Preset Column Widths"),
         Action::MaximizeColumn => String::from("Maximize Column"),
         Action::ConsumeOrExpelWindowLeft => String::from("Consume or Expel Window Left"),

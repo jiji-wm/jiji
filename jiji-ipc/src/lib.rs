@@ -577,6 +577,16 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = true))]
         focus: bool,
     },
+    /// Insert a fresh empty workspace directly below the current one and focus it.
+    ///
+    /// The new workspace is ephemeral: it is pruned if focus leaves it while
+    /// it is still empty and unnamed.  Populate it or set a name to keep it.
+    AddWorkspaceDown {},
+    /// Insert a fresh empty workspace directly above the current one and focus it.
+    ///
+    /// The new workspace is ephemeral: it is pruned if focus leaves it while
+    /// it is still empty and unnamed.  Populate it or set a name to keep it.
+    AddWorkspaceUp {},
     /// Move a window to a workspace.
     #[cfg_attr(
         feature = "clap",

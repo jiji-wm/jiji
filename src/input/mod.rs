@@ -1516,6 +1516,20 @@ impl State {
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
+            Action::AddWorkspaceDown => {
+                self.niri.layout.add_workspace_down();
+                self.maybe_warp_cursor_to_focus();
+                self.niri.layer_shell_on_demand_focus = None;
+                // FIXME: granular
+                self.niri.queue_redraw_all();
+            }
+            Action::AddWorkspaceUp => {
+                self.niri.layout.add_workspace_up();
+                self.maybe_warp_cursor_to_focus();
+                self.niri.layer_shell_on_demand_focus = None;
+                // FIXME: granular
+                self.niri.queue_redraw_all();
+            }
             Action::MoveWindowToWorkspace(reference, focus) => {
                 // Move-to-self short-circuit. Resolve source (the active
                 // workspace, since this arm targets the active workspace's

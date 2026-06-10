@@ -4,6 +4,7 @@ mod client;
 mod fixture;
 mod server;
 
+mod add_workspace;
 mod animations;
 mod close_window_cross_activity;
 mod config_reload_cross_activity;

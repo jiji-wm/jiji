@@ -229,6 +229,8 @@ pub enum Action {
     MoveWindowToWorkspaceUp(#[knuffel(property(name = "focus"), default = true)] bool),
     MoveWindowToNewWorkspaceDown(#[knuffel(property(name = "focus"), default = true)] bool),
     MoveWindowToNewWorkspaceUp(#[knuffel(property(name = "focus"), default = true)] bool),
+    AddWorkspaceDown,
+    AddWorkspaceUp,
     MoveWindowToWorkspace(
         #[knuffel(argument)] WorkspaceReference,
         #[knuffel(property(name = "focus"), default = true)] bool,
@@ -564,6 +566,8 @@ impl From<jiji_ipc::Action> for Action {
             jiji_ipc::Action::MoveWindowToNewWorkspaceUp { focus } => {
                 Self::MoveWindowToNewWorkspaceUp(focus)
             }
+            jiji_ipc::Action::AddWorkspaceDown {} => Self::AddWorkspaceDown,
+            jiji_ipc::Action::AddWorkspaceUp {} => Self::AddWorkspaceUp,
             jiji_ipc::Action::MoveWindowToWorkspace {
                 window_id: None,
                 reference,
@@ -1340,5 +1344,19 @@ mod tests {
         // `focus=false` property must round-trip.
         let action = parse_action("move-window-to-new-workspace-up focus=false");
         assert_eq!(action, Action::MoveWindowToNewWorkspaceUp(false));
+    }
+
+    #[test]
+    fn add_workspace_down_parses() {
+        // Bare `add-workspace-down;` must parse to `Action::AddWorkspaceDown`.
+        let action = parse_action("add-workspace-down");
+        assert_eq!(action, Action::AddWorkspaceDown);
+    }
+
+    #[test]
+    fn add_workspace_up_parses() {
+        // Bare `add-workspace-up;` must parse to `Action::AddWorkspaceUp`.
+        let action = parse_action("add-workspace-up");
+        assert_eq!(action, Action::AddWorkspaceUp);
     }
 }
