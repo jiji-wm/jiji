@@ -191,6 +191,27 @@ const CLEAR_COLOR_LOCKED: [f32; 4] = [0.3, 0.1, 0.1, 1.];
 // should be ~1.995 seconds.
 const FRAME_CALLBACK_THROTTLE: Option<Duration> = Some(Duration::from_millis(995));
 
+/// Latency canary threshold, parsed once from `JIJI_LATENCY_WARN_MS`.
+///
+/// Returns `None` when the variable is unset, unparseable, or `0` — the
+/// default — in which case the canary costs a single `Option::is_none()`
+/// check per input event and per dispatch cycle. When set to a positive
+/// millisecond count, input events and dispatch cycles exceeding it emit a
+/// `warn!` breakdown (timings plus pool / active-view / disconnected counts)
+/// to the journal, so a long input-latency report can be localized without a
+/// Tracy build. Read once via `OnceLock` so a single environment lookup
+/// serves the whole process lifetime.
+pub(crate) fn latency_warn_threshold() -> Option<Duration> {
+    static THRESHOLD: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("JIJI_LATENCY_WARN_MS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|&ms| ms > 0)
+            .map(Duration::from_millis)
+    })
+}
+
 pub struct Niri {
     pub config: Rc<RefCell<Config>>,
 
@@ -769,13 +790,33 @@ impl State {
     pub fn refresh_and_flush_clients(&mut self) {
         let _span = tracy_client::span!("State::refresh_and_flush_clients");
 
+        let latency_warn = latency_warn_threshold();
+        let cycle_start = latency_warn.map(|_| Instant::now());
+
         self.refresh();
+
+        let after_refresh = cycle_start.map(|s| s.elapsed());
 
         // Advance animations to the current time (not target render time) before rendering outputs
         // in order to clear completed animations and render elements. Even if we're not rendering,
         // it's good to advance every now and then so the workspace clean-up and animations don't
         // build up (the 1 second frame callback timer will call this line).
         self.niri.advance_animations();
+
+        if let (Some(start), Some(refresh_elapsed), Some(threshold)) =
+            (cycle_start, after_refresh, latency_warn)
+        {
+            let total = start.elapsed();
+            if total >= threshold {
+                let anim = total - refresh_elapsed;
+                let (pool, active_view, disconnected) = self.niri.layout.latency_debug_counts();
+                warn!(
+                    "dispatch latency: cycle {total:?} (refresh {refresh_elapsed:?}, \
+                     advance_animations {anim:?}); pool={pool} active_view={active_view} \
+                     disconnected={disconnected}"
+                );
+            }
+        }
 
         self.niri.redraw_queued_outputs(&mut self.backend);
 

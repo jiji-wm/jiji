@@ -3173,6 +3173,24 @@ impl<W: LayoutElement> Layout<W> {
         &self.workspaces
     }
 
+    /// Diagnostic counts for the latency canary: `(pool size, total
+    /// workspaces summed across every connected monitor's active-activity
+    /// view, disconnected-pool size)`. These are the three quantities that
+    /// the per-input-event `advance_animations` walk iterates, so a
+    /// pathological count here localizes an input-latency regression. Cheap
+    /// (`HashMap::len` plus one `WorkspaceView::ids().len()` per monitor);
+    /// safe to call on the slow path only.
+    pub fn latency_debug_counts(&self) -> (usize, usize, usize) {
+        let pool = self.workspaces.len();
+        let active_view = self
+            .monitors
+            .iter()
+            .map(|m| self.active_view(&m.output_id()).ids().len())
+            .sum();
+        let disconnected = self.disconnected_workspace_ids.len();
+        (pool, active_view, disconnected)
+    }
+
     /// Id of the currently-active [`Activity`]. Callers that need to stamp a freshly-built
     /// workspace with the active activity (e.g. reloading output config via
     /// [`Monitor::update_layout_config`]) capture this before taking a split-borrow of the

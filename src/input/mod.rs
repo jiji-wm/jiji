@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use calloop::timer::{TimeoutAction, Timer};
 use input::event::gesture::GestureEventCoordinates as _;
@@ -121,8 +121,14 @@ impl State {
     {
         let _span = tracy_client::span!("process_input_event");
 
+        let latency_warn = crate::niri::latency_warn_threshold();
+        let ev_start = latency_warn.map(|_| Instant::now());
+        let ev_label = ev_start.map(|_| input_event_label(&event));
+
         // Make sure some logic like workspace clean-up has a chance to run before doing actions.
+        let anim_start = ev_start.map(|_| Instant::now());
         self.niri.advance_animations();
+        let anim_elapsed = anim_start.map(|s| s.elapsed());
 
         if self.niri.monitors_active {
             // Notify the idle-notifier of activity.
@@ -179,6 +185,19 @@ impl State {
             TouchFrame { event } => self.on_touch_frame::<I>(event),
             SwitchToggle { event } => self.on_switch_toggle::<I>(event),
             Special(_) => (),
+        }
+
+        if let (Some(start), Some(anim), Some(label), Some(threshold)) =
+            (ev_start, anim_elapsed, ev_label, latency_warn)
+        {
+            let total = start.elapsed();
+            if total >= threshold {
+                let (pool, active_view, disconnected) = self.niri.layout.latency_debug_counts();
+                warn!(
+                    "input latency: {label} took {total:?} (advance_animations {anim:?}); \
+                     pool={pool} active_view={active_view} disconnected={disconnected}"
+                );
+            }
         }
 
         // Don't hide overlays if consumed by a11y, so that you can use the screen reader
@@ -5690,6 +5709,39 @@ fn should_notify_activity<I: InputBackend>(event: &InputEvent<I>) -> bool {
         event,
         InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }
     )
+}
+
+/// Stable short label per input-event kind for the latency canary log.
+fn input_event_label<I: InputBackend>(event: &InputEvent<I>) -> &'static str {
+    use InputEvent::*;
+    match event {
+        DeviceAdded { .. } => "device-added",
+        DeviceRemoved { .. } => "device-removed",
+        Keyboard { .. } => "keyboard",
+        PointerMotion { .. } => "pointer-motion",
+        PointerMotionAbsolute { .. } => "pointer-motion-absolute",
+        PointerButton { .. } => "pointer-button",
+        PointerAxis { .. } => "pointer-axis",
+        TabletToolAxis { .. } => "tablet-tool-axis",
+        TabletToolTip { .. } => "tablet-tool-tip",
+        TabletToolProximity { .. } => "tablet-tool-proximity",
+        TabletToolButton { .. } => "tablet-tool-button",
+        GestureSwipeBegin { .. } => "gesture-swipe-begin",
+        GestureSwipeUpdate { .. } => "gesture-swipe-update",
+        GestureSwipeEnd { .. } => "gesture-swipe-end",
+        GesturePinchBegin { .. } => "gesture-pinch-begin",
+        GesturePinchUpdate { .. } => "gesture-pinch-update",
+        GesturePinchEnd { .. } => "gesture-pinch-end",
+        GestureHoldBegin { .. } => "gesture-hold-begin",
+        GestureHoldEnd { .. } => "gesture-hold-end",
+        TouchDown { .. } => "touch-down",
+        TouchMotion { .. } => "touch-motion",
+        TouchUp { .. } => "touch-up",
+        TouchCancel { .. } => "touch-cancel",
+        TouchFrame { .. } => "touch-frame",
+        SwitchToggle { .. } => "switch-toggle",
+        Special(_) => "special",
+    }
 }
 
 fn should_reset_pointer_inactivity_timer<I: InputBackend>(event: &InputEvent<I>) -> bool {
