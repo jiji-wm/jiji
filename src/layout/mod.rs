@@ -4195,6 +4195,97 @@ impl<W: LayoutElement> Layout<W> {
         );
     }
 
+    /// Insert a fresh empty workspace directly above the active workspace and
+    /// focus it.
+    ///
+    /// The insertion index is `view.active_position()`.  At the edges the
+    /// bookend-reuse rules from `interactive_move_end` apply:
+    ///
+    /// - If `empty_workspace_above_first` is set and the target index is 0, the existing top empty
+    ///   workspace is reused (no insert).  This arm is live: from the forced-empty slot 0 there is
+    ///   nothing to bail on, so the call reaches here with `insert_idx == 0`, reuses the EWAF slot,
+    ///   and focuses it (a no-op because it is already active).
+    /// - If the target index reaches or exceeds the trailing bookend slot, the trailing bookend is
+    ///   reused (no insert).  This arm is live: focusing the trailing bookend itself produces
+    ///   `insert_idx == view.len() - 1`, which collapses to a reuse with an immediate focus of the
+    ///   trailing slot.
+    /// - Otherwise a fresh workspace is inserted at `insert_idx` and focused.
+    fn add_workspace_up_on(
+        monitors: &mut [Monitor<W>],
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        view: &mut WorkspaceView,
+        mon_idx: usize,
+        seed_activity: ActivityId,
+    ) {
+        let insert_idx = view.active_position();
+
+        let target_idx =
+            if monitors[mon_idx].options.layout.empty_workspace_above_first && insert_idx == 0 {
+                // Reuse the top empty workspace; no insert needed.
+                // This arm is live: when the cursor is already on the forced-empty
+                // slot 0, insert_idx == 0 and no new workspace is inserted.
+                0
+            } else if view.len() - 1 <= insert_idx {
+                // Reuse the trailing bookend; no insert needed.
+                // This arm is live: from the trailing bookend itself insert_idx
+                // equals view.len() - 1, so the condition fires.
+                view.len() - 1
+            } else {
+                Self::add_workspace_at_on(monitors, pool, view, mon_idx, insert_idx, seed_activity);
+                insert_idx
+            };
+
+        monitors[mon_idx].activate_workspace(view, target_idx);
+    }
+
+    /// Insert a fresh empty workspace directly below the active workspace and
+    /// focus it.
+    ///
+    /// The insertion index is `view.active_position() + 1`.  At the edges the
+    /// bookend-reuse rules from `interactive_move_end` apply:
+    ///
+    /// - If `empty_workspace_above_first` is set and the target index is 0, the existing top empty
+    ///   workspace is reused (no insert).  This arm is kept for structural symmetry with the up
+    ///   variant; it is unreachable for the down direction because `insert_idx = active_position()
+    ///   + 1 >= 1` always.
+    /// - If the target index reaches or exceeds the trailing bookend slot, the trailing bookend is
+    ///   reused (no insert).  This arm is live in two scenarios: (a) from the last content
+    ///   workspace the insert would land on the trailing slot, which collapses to a reuse (same as
+    ///   `FocusWorkspaceDown` at the bottom edge); (b) from the trailing bookend itself `insert_idx
+    ///   == view.len()-1` and focus stays in place.
+    /// - Otherwise a fresh workspace is inserted at `insert_idx` and focused.
+    fn add_workspace_down_on(
+        monitors: &mut [Monitor<W>],
+        pool: &mut HashMap<WorkspaceId, Workspace<W>>,
+        view: &mut WorkspaceView,
+        mon_idx: usize,
+        seed_activity: ActivityId,
+    ) {
+        let insert_idx = view.active_position() + 1;
+
+        let target_idx =
+            if monitors[mon_idx].options.layout.empty_workspace_above_first && insert_idx == 0 {
+                // Reuse the top empty workspace; no insert needed.
+                // Unreachable for the down direction because insert_idx >= 1 always;
+                // kept for structural symmetry with the up variant.
+                0
+            } else if view.len() - 1 <= insert_idx {
+                // Reuse the trailing bookend; no insert needed.
+                // This arm is live in two scenarios:
+                // (a) from the last content workspace: insert_idx == view.len()-1
+                //     (the trailing slot), same collapse as FocusWorkspaceDown at
+                //     the bottom edge;
+                // (b) from the trailing bookend itself: insert_idx == view.len()-1
+                //     (active_position() == view.len()-1), focus stays in place.
+                view.len() - 1
+            } else {
+                Self::add_workspace_at_on(monitors, pool, view, mon_idx, insert_idx, seed_activity);
+                insert_idx
+            };
+
+        monitors[mon_idx].activate_workspace(view, target_idx);
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     fn move_to_workspace_on(
@@ -5131,6 +5222,45 @@ impl<W: LayoutElement> Layout<W> {
             focus,
             seed_activity,
         );
+    }
+
+    /// Insert a fresh empty workspace directly above the current one on the
+    /// active monitor and focus it.
+    ///
+    /// No-ops when there are no monitors.  At the edges the bookend-reuse rules
+    /// apply: when `empty_workspace_above_first` is set and the active position
+    /// is 0, the existing forced-empty top slot is reused; from the trailing
+    /// bookend the trailing bookend is reused.  The fresh workspace is ephemeral:
+    /// it is pruned if focus leaves it while it is still empty and unnamed.
+    /// Populate it or set a name to keep it.
+    pub fn add_workspace_up(&mut self) {
+        if self.monitors.is_empty() {
+            return;
+        }
+        let active_monitor_idx = self.active_monitor_idx;
+        let mon_out = self.monitors[active_monitor_idx].output_id();
+        let seed_activity = self.activities.active_id();
+        let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+        Self::add_workspace_up_on(monitors, pool, view, active_monitor_idx, seed_activity);
+    }
+
+    /// Insert a fresh empty workspace directly below the current one on the
+    /// active monitor and focus it.
+    ///
+    /// No-ops when there are no monitors.  At the bottom edge the existing
+    /// trailing empty workspace is reused instead of inserting a new one
+    /// (same destination as `switch_workspace_down` at the bottom edge).  The
+    /// fresh workspace is ephemeral: it is pruned if focus leaves it while it
+    /// is still empty and unnamed.  Populate it or set a name to keep it.
+    pub fn add_workspace_down(&mut self) {
+        if self.monitors.is_empty() {
+            return;
+        }
+        let active_monitor_idx = self.active_monitor_idx;
+        let mon_out = self.monitors[active_monitor_idx].output_id();
+        let seed_activity = self.activities.active_id();
+        let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
+        Self::add_workspace_down_on(monitors, pool, view, active_monitor_idx, seed_activity);
     }
 
     pub fn move_to_workspace(
