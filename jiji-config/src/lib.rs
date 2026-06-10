@@ -1531,6 +1531,18 @@ mod tests {
                         ),
                     },
                 ),
+                activity_switch: ActivitySwitchAnim(
+                    Animation {
+                        off: false,
+                        kind: Spring(
+                            SpringParams {
+                                damping_ratio: 1.0,
+                                stiffness: 1000,
+                                epsilon: 0.0001,
+                            },
+                        ),
+                    },
+                ),
                 window_open: WindowOpenAnim {
                     anim: Animation {
                         off: true,

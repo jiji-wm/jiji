@@ -9,6 +9,7 @@ pub struct Animations {
     pub off: bool,
     pub slowdown: f64,
     pub workspace_switch: WorkspaceSwitchAnim,
+    pub activity_switch: ActivitySwitchAnim,
     pub window_open: WindowOpenAnim,
     pub window_close: WindowCloseAnim,
     pub horizontal_view_movement: HorizontalViewMovementAnim,
@@ -27,6 +28,7 @@ impl Default for Animations {
             off: false,
             slowdown: 1.,
             workspace_switch: Default::default(),
+            activity_switch: Default::default(),
             horizontal_view_movement: Default::default(),
             window_movement: Default::default(),
             window_open: Default::default(),
@@ -51,6 +53,8 @@ pub struct AnimationsPart {
     pub slowdown: Option<FloatOrInt<0, { i32::MAX }>>,
     #[knuffel(child)]
     pub workspace_switch: Option<WorkspaceSwitchAnim>,
+    #[knuffel(child)]
+    pub activity_switch: Option<ActivitySwitchAnim>,
     #[knuffel(child)]
     pub window_open: Option<WindowOpenAnim>,
     #[knuffel(child)]
@@ -87,6 +91,7 @@ impl MergeWith<AnimationsPart> for Animations {
         merge_clone!(
             (self, part),
             workspace_switch,
+            activity_switch,
             window_open,
             window_close,
             horizontal_view_movement,
@@ -148,6 +153,21 @@ impl Default for WorkspaceSwitchAnim {
                 epsilon: 0.0001,
             }),
         })
+    }
+}
+
+/// Animation played while switching between activities.
+///
+/// Wraps a single [`Animation`] value; uses the same spring defaults as
+/// [`WorkspaceSwitchAnim`] so the two transitions feel consistent out of the box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActivitySwitchAnim(pub Animation);
+
+impl Default for ActivitySwitchAnim {
+    fn default() -> Self {
+        // Structurally derived so a retune of WorkspaceSwitchAnim defaults
+        // keeps the two transitions consistent without a separate update here.
+        Self(WorkspaceSwitchAnim::default().0)
     }
 }
 
@@ -327,6 +347,21 @@ impl Default for RecentWindowsCloseAnim {
 }
 
 impl<S> knuffel::Decode<S> for WorkspaceSwitchAnim
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        let default = Self::default().0;
+        Ok(Self(Animation::decode_node(node, ctx, default, |_, _| {
+            Ok(false)
+        })?))
+    }
+}
+
+impl<S> knuffel::Decode<S> for ActivitySwitchAnim
 where
     S: knuffel::traits::ErrorSpan,
 {
@@ -833,5 +868,89 @@ where
             stiffness,
             epsilon,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(kdl: &str) -> crate::Config {
+        crate::Config::parse_mem(kdl).expect("config must parse without errors")
+    }
+
+    #[test]
+    fn activity_switch_default_on() {
+        // Absent animations block.
+        let cfg = parse("");
+        let anim = &cfg.animations.activity_switch.0;
+        assert!(!anim.off, "activity-switch must be on by default");
+        assert_eq!(
+            anim.kind,
+            Kind::Spring(SpringParams {
+                damping_ratio: 1.,
+                stiffness: 1000,
+                epsilon: 0.0001,
+            }),
+            "default kind must be spring 1.0/1000/0.0001",
+        );
+
+        // Present but empty animations block.
+        let cfg = parse("animations {}");
+        let anim = &cfg.animations.activity_switch.0;
+        assert!(
+            !anim.off,
+            "activity-switch must be on by default with empty block"
+        );
+        assert_eq!(
+            anim.kind,
+            Kind::Spring(SpringParams {
+                damping_ratio: 1.,
+                stiffness: 1000,
+                epsilon: 0.0001,
+            }),
+        );
+    }
+
+    #[test]
+    fn activity_switch_off() {
+        let cfg = parse("animations {\n    activity-switch {\n        off\n    }\n}");
+        assert!(
+            cfg.animations.activity_switch.0.off,
+            "activity-switch must be off"
+        );
+    }
+
+    #[test]
+    fn activity_switch_explicit_spring() {
+        let cfg = parse(
+            "animations {\n    activity-switch {\n        spring damping-ratio=0.8 stiffness=500 epsilon=0.001\n    }\n}",
+        );
+        let anim = &cfg.animations.activity_switch.0;
+        assert!(!anim.off);
+        assert_eq!(
+            anim.kind,
+            Kind::Spring(SpringParams {
+                damping_ratio: 0.8,
+                stiffness: 500,
+                epsilon: 0.001,
+            }),
+        );
+    }
+
+    #[test]
+    fn activity_switch_easing() {
+        let cfg = parse(
+            "animations {\n    activity-switch {\n        duration-ms 250\n        curve \"ease-out-cubic\"\n    }\n}",
+        );
+        let anim = &cfg.animations.activity_switch.0;
+        assert!(!anim.off);
+        assert_eq!(
+            anim.kind,
+            Kind::Easing(EasingParams {
+                duration_ms: 250,
+                curve: Curve::EaseOutCubic,
+            }),
+        );
     }
 }
