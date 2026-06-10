@@ -4693,6 +4693,26 @@ impl<W: LayoutElement> Layout<W> {
         LayoutCtx::new(&self.workspaces, self.active_view(&mon.output_id()))
     }
 
+    /// Build the shared-borrow context for `mon`'s outgoing activity strip during a switch.
+    ///
+    /// Returns `None` when no activity-switch transition is in flight on `mon`. While one is,
+    /// the outgoing activity (`activity_switch.from`) is resolved from the live pool — that the
+    /// `from` id is a live activity key is a verified invariant, so the lookup `.expect()`s.
+    /// The per-output *view* lookup is tolerated (`None`): a cross-activity destroy can drop a
+    /// dormant single-entry view mid-flight without immediate re-materialization. The view is
+    /// keyed by `mon.output_id()` (never a workspace's own `output_id`, which is deliberately
+    /// stale post-partial-disconnect).
+    pub fn outgoing_ctx_for<'a>(&'a self, mon: &Monitor<W>) -> Option<LayoutCtx<'a, W>> {
+        let switch = mon.activity_switch.as_ref()?;
+        let view = self
+            .activities
+            .get(switch.from)
+            .expect("in-flight activity switch outgoing id must be a live activity")
+            .views()
+            .get(&mon.output_id())?;
+        Some(LayoutCtx::new(&self.workspaces, view))
+    }
+
     pub fn monitor_for_workspace(&self, workspace_name: &str) -> Option<&Monitor<W>> {
         let pool = &self.workspaces;
         self.monitors().find(|monitor| {
@@ -6484,6 +6504,18 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Clear every monitor's in-flight activity-switch transition, snapping it to its end.
+    ///
+    /// Used when entering or leaving the overview: a strip slide and the overview spatial map
+    /// must not run simultaneously. The close direction is a structural no-op (nothing can be
+    /// armed while the overview is open, enforced by the overview/slide exclusion invariant), so
+    /// the unconditional clear is simply simpler than gating on direction.
+    fn snap_all_activity_switches(&mut self) {
+        for mon in &mut self.monitors {
+            mon.activity_switch = None;
+        }
+    }
+
     /// Rename the runtime activity identified by `reference`, returning its id
     /// on success.
     ///
@@ -8027,6 +8059,19 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        // Overview/slide exclusion: the overview spatial map and an activity-strip slide must
+        // never run simultaneously. Arming is suppressed while the overview is open, and both
+        // overview entry paths snap every in-flight switch, so no monitor may have an armed
+        // activity_switch while the overview is open.
+        if self.overview_open {
+            for monitor in monitors.iter() {
+                assert!(
+                    monitor.activity_switch.is_none(),
+                    "no monitor may have an in-flight activity-switch while the overview is open",
+                );
+            }
+        }
+
         // Partial-disconnect migration invariant: when any monitor is connected, every
         // activity's `views` map is keyed exclusively by connected monitors' OutputIds.
         // The partial-disconnect walk in `remove_output` drains dormant views for the
@@ -8391,6 +8436,44 @@ impl<W: LayoutElement> Layout<W> {
                     .expect("connected output must have a view in the active activity");
                 mon.set_overview_progress(view, self.overview_progress.as_ref());
                 mon.update_render_elements(pool, view, is_active);
+            }
+        }
+
+        // Update render elements in outgoing-activity views. This pass is separate from the
+        // main loop above because the main loop holds &mut self.activities through its
+        // views_map borrow; resolving the outgoing activity inside it would not compile.
+        // Disjoint field borrows: &mut self.workspaces + &self.monitors + &self.activities.
+        {
+            let pool = &mut self.workspaces;
+            for mon in &self.monitors {
+                if output.is_some_and(|output| mon.output != *output) {
+                    continue;
+                }
+                let Some(switch) = &mon.activity_switch else {
+                    continue;
+                };
+                let activity = self
+                    .activities
+                    .get(switch.from)
+                    .expect("in-flight activity switch outgoing id must be a live activity");
+                // View presence is tolerated rather than expected: a cross-activity destroy can
+                // legitimately drop a dormant single-entry view mid-flight without immediate
+                // re-materialization.
+                //
+                // Sticky/shared workspaces present in both the active view (updated in the main
+                // loop above) and the outgoing view receive update_render_elements twice per
+                // frame. This is benign — update_render_elements is idempotent within a frame.
+                let Some(view) = activity.views().get(&mon.output_id()) else {
+                    continue;
+                };
+                // Update every id in the outgoing view, not just the rendered (culled) subset:
+                // updating more than rendered is safe and renderer-free, and it avoids growing
+                // the geo-ids family for the small outgoing view.
+                for id in view.ids() {
+                    pool.get_mut(id)
+                        .expect("view id must be a key in the pool")
+                        .update_render_elements(false);
+                }
             }
         }
     }
@@ -10103,6 +10186,8 @@ impl<W: LayoutElement> Layout<W> {
     pub fn overview_gesture_begin(&mut self) {
         self.overview_open = true;
 
+        self.snap_all_activity_switches();
+
         let value = self.overview_progress.take().map_or(0., |p| p.value());
         let gesture = OverviewGesture {
             tracker: SwipeTracker::new(),
@@ -11226,6 +11311,8 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn toggle_overview(&mut self) {
         self.overview_open = !self.overview_open;
+
+        self.snap_all_activity_switches();
 
         let from = self.overview_progress.take().map_or(0., |p| p.value());
         let to = if self.overview_open { 1. } else { 0. };

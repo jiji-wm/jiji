@@ -138,6 +138,7 @@ use crate::input::{
 use crate::ipc::server::IpcServer;
 use crate::layer::mapped::LayerSurfaceRenderElement;
 use crate::layer::MappedLayer;
+use crate::layout::monitor::ActivityStrip;
 use crate::layout::tile::TileRenderElement;
 use crate::layout::workspace::Workspace;
 use crate::layout::{
@@ -4539,7 +4540,13 @@ impl Niri {
 
             mon.render_insert_hint_between_workspaces(ctx.renderer, &mut |elem| push(elem.into()));
 
-            mon.render_workspaces(lctx, ctx.r(), focus_ring, &mut |elem| push(elem.into()));
+            mon.render_workspaces(
+                lctx,
+                ctx.r(),
+                focus_ring,
+                ActivityStrip::Incoming,
+                &mut |elem| push(elem.into()),
+            );
 
             push_popups_from_layer!(Layer::Top);
             push_normal_from_layer!(Layer::Top);
@@ -4580,7 +4587,13 @@ impl Niri {
                 push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
             }
 
-            mon.render_workspaces(lctx, ctx.r(), focus_ring, &mut |elem| push(elem.into()));
+            mon.render_workspaces(
+                lctx,
+                ctx.r(),
+                focus_ring,
+                ActivityStrip::Incoming,
+                &mut |elem| push(elem.into()),
+            );
 
             for (ws, geo) in mon.workspaces_with_render_geo(lctx) {
                 // The render element namespace. This will be set to the workspace index for

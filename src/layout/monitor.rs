@@ -105,6 +105,18 @@ pub enum SlideDirection {
     Right,
 }
 
+/// Which of the two activity strips a geometry/render call is computing for.
+///
+/// During an activity switch two strips coexist: the `Incoming` one (the newly active
+/// activity's view, sliding into place) and the `Outgoing` one (the departing activity's
+/// view, sliding away). They are horizontally offset by opposite amounts so they never
+/// overlap. When no switch is in flight only `Incoming` is meaningful and its offset is 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityStrip {
+    Incoming,
+    Outgoing,
+}
+
 /// In-progress switch between activities on one monitor.
 ///
 /// Pure data carrier — holds the outgoing activity id, a 0→1 animation, and the
@@ -122,7 +134,6 @@ pub struct ActivitySwitch {
     pub(super) anim: Animation,
     /// Direction fixed at arm time: Left means the incoming strip enters from the right,
     /// Right means it enters from the left.
-    #[allow(dead_code)]
     pub(super) dir: SlideDirection,
 }
 
@@ -1126,16 +1137,72 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
+    /// Horizontal offset applied to one strip's workspace rects during an activity switch.
+    ///
+    /// Returns `0.` when no transition is in flight — a single `Option` check, the entire idle
+    /// cost. While a switch is armed, for a `Left` direction the incoming strip arrives from
+    /// `+stride` (right side) and settles to 0, while the outgoing strip departs toward `-stride`
+    /// (left side); signs are negated for a `Right` direction. `stride` is the per-workspace
+    /// horizontal pitch (workspace width plus gap), mirroring the vertical pitch used by the y
+    /// layout.
+    fn activity_switch_x_offset(&self, strip: ActivityStrip) -> f64 {
+        let Some(switch) = &self.activity_switch else {
+            return 0.;
+        };
+
+        let scale = self.scale.fractional_scale();
+        let zoom = self.overview_zoom();
+        let stride = self.workspace_size(zoom).w + self.workspace_gap(zoom);
+
+        let p = switch.anim.value();
+        let sign = match switch.dir {
+            SlideDirection::Left => 1.,
+            SlideDirection::Right => -1.,
+        };
+
+        let x = match strip {
+            ActivityStrip::Incoming => sign * (1. - p) * stride,
+            ActivityStrip::Outgoing => -sign * p * stride,
+        };
+        round_logical_in_physical(scale, x)
+    }
+
     pub fn workspaces_render_geo(
         &self,
         view: &WorkspaceView,
     ) -> impl Iterator<Item = Rectangle<f64, Logical>> {
+        self.workspaces_render_geo_for_strip(view, ActivityStrip::Incoming)
+    }
+
+    /// Strip-aware core of [`workspaces_render_geo`](Self::workspaces_render_geo).
+    ///
+    /// Yields the same vertical layout as the public method but adds the activity-switch
+    /// horizontal offset for `strip` to every rect's `loc`. The offset is applied here, before
+    /// any culling downstream, so the cull filters see the post-offset positions.
+    pub(super) fn workspaces_render_geo_for_strip(
+        &self,
+        view: &WorkspaceView,
+        strip: ActivityStrip,
+    ) -> impl Iterator<Item = Rectangle<f64, Logical>> {
+        // Partial I3 guard: the Outgoing strip is only meaningful while a switch is in flight.
+        // The full invariant (that `view` is the correct strip's view) is not checked here because
+        // this layer does not have access to both the active and `switch.from` views
+        // simultaneously. A structural fix (fold `strip` into the view-resolution so the
+        // illegal pairing is unrepresentable) is the correct long-term resolution; see the
+        // architectural escalation.
+        debug_assert!(
+            strip == ActivityStrip::Incoming || self.activity_switch.is_some(),
+            "Outgoing strip requested with no activity switch in flight",
+        );
+
         let scale = self.scale.fractional_scale();
         let zoom = self.overview_zoom();
 
         let ws_size = self.workspace_size(zoom);
         let gap = self.workspace_gap(zoom);
         let ws_height_with_gap = ws_size.h + gap;
+
+        let x_offset = self.activity_switch_x_offset(strip);
 
         let static_offset = (self.view_size.to_point() - ws_size.to_point()).downscale(2.);
         let static_offset = static_offset
@@ -1148,7 +1215,7 @@ impl<W: LayoutElement> Monitor<W> {
         // Return position for one-past-last workspace too.
         (0..=view.len()).map(move |idx| {
             let y = first_ws_y + idx as f64 * ws_height_with_gap;
-            let loc = Point::from((0., y)) + static_offset;
+            let loc = Point::from((x_offset, y)) + static_offset;
 
             // Even though all components that go into loc are rounded to physical pixels, the
             // floating point addition may lose precision. This can result for example in the
@@ -1167,6 +1234,21 @@ impl<W: LayoutElement> Monitor<W> {
         let output_geo = Rectangle::from_size(self.view_size);
 
         let geo = self.workspaces_render_geo(ctx.view());
+        zip(ctx.view().ids().iter().copied(), geo)
+            .map(move |(id, geo)| (ctx.workspace(id), geo))
+            // Cull out workspaces outside the output.
+            .filter(move |(_ws, geo)| geo.intersection(output_geo).is_some())
+    }
+
+    /// Same as [`workspaces_with_render_geo`](Self::workspaces_with_render_geo) but for the
+    /// outgoing activity strip during a switch. `ctx` must bundle the outgoing activity's view.
+    pub fn workspaces_with_render_geo_outgoing<'a>(
+        &'a self,
+        ctx: LayoutCtx<'a, W>,
+    ) -> impl Iterator<Item = (&'a Workspace<W>, Rectangle<f64, Logical>)> + 'a {
+        let output_geo = Rectangle::from_size(self.view_size);
+
+        let geo = self.workspaces_render_geo_for_strip(ctx.view(), ActivityStrip::Outgoing);
         zip(ctx.view().ids().iter().copied(), geo)
             .map(move |(id, geo)| (ctx.workspace(id), geo))
             // Cull out workspaces outside the output.
@@ -1313,7 +1395,10 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn render_above_top_layer(&self, ctx: LayoutCtx<'_, W>) -> bool {
         // Render above the top layer only if the view is stationary.
-        if self.workspace_switch.is_some() || self.overview_progress.is_some() {
+        if self.workspace_switch.is_some()
+            || self.overview_progress.is_some()
+            || self.activity_switch.is_some()
+        {
             return false;
         }
 
@@ -1351,6 +1436,7 @@ impl<W: LayoutElement> Monitor<W> {
         lctx: LayoutCtx<'_, W>,
         mut ctx: RenderCtx<R>,
         focus_ring: bool,
+        strip: ActivityStrip,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
         let _span = tracy_client::span!("Monitor::render_workspaces");
@@ -1369,7 +1455,10 @@ impl<W: LayoutElement> Monitor<W> {
         // rendering for maximized GTK windows.
         //
         // FIXME: use proper bounds after fixing the Crop element.
-        let crop_bounds = if self.workspace_switch.is_some() || self.overview_progress.is_some() {
+        let crop_bounds = if self.workspace_switch.is_some()
+            || self.overview_progress.is_some()
+            || self.activity_switch.is_some()
+        {
             Rectangle::new(
                 Point::from((-i32::MAX / 2, 0)),
                 Size::from((i32::MAX, height)),
@@ -1399,45 +1488,66 @@ impl<W: LayoutElement> Monitor<W> {
             )
         };
 
-        for (ws, geo) in self.workspaces_with_render_geo(lctx) {
-            // Macro instead of closure because ws and insert hint have different elem types.
-            macro_rules! push {
-                () => {{
-                    &mut |elem| {
-                        let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
-                        if let Some(elem) = elem {
-                            let elem = MonitorInnerRenderElement::from(elem);
-                            push(scale_relocate(geo, elem));
-                        }
+        // The two strip iterators have distinct opaque types; dispatching via a macro avoids
+        // a Vec collect on the idle/Incoming path (zero allocation when no switch is in flight).
+        // Macro instead of closure because ws and insert hint have different elem types.
+        macro_rules! push_for_geo {
+            ($geo:expr) => {{
+                &mut |elem| {
+                    let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
+                    if let Some(elem) = elem {
+                        let elem = MonitorInnerRenderElement::from(elem);
+                        push(scale_relocate($geo, elem));
                     }
-                }};
-            }
+                }
+            }};
+        }
 
-            let xray_pos = XrayPos::new(geo.loc, zoom);
-
-            // The active layer renders on top, so that raising the tiling layer
-            // (e.g. switching focus to it) brings tiled windows in front of
-            // floating ones — not only the other way around. The insert hint
-            // belongs to the tiling layer and stays immediately above it.
-            macro_rules! render_insert_hint {
-                () => {
-                    if let Some(loc) = insert_hint_render_loc {
-                        if loc.workspace == InsertWorkspace::Existing(ws.id()) {
-                            self.insert_hint_element
-                                .render(ctx.renderer, loc.location, push!());
-                        }
+        // The active layer renders on top, so that raising the tiling layer
+        // (e.g. switching focus to it) brings tiled windows in front of
+        // floating ones — not only the other way around. The insert hint
+        // belongs to the tiling layer and stays immediately above it.
+        macro_rules! render_insert_hint_for {
+            ($ws:expr, $geo:expr) => {
+                if let Some(loc) = insert_hint_render_loc {
+                    if loc.workspace == InsertWorkspace::Existing($ws.id()) {
+                        self.insert_hint_element.render(
+                            ctx.renderer,
+                            loc.location,
+                            push_for_geo!($geo),
+                        );
                     }
-                };
-            }
+                }
+            };
+        }
 
-            if ws.floating_is_active() {
-                ws.render_floating(ctx.r(), xray_pos, focus_ring, push!());
-                render_insert_hint!();
-                ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
-            } else {
-                render_insert_hint!();
-                ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
-                ws.render_floating(ctx.r(), xray_pos, focus_ring, push!());
+        macro_rules! render_ws {
+            ($ws:expr, $geo:expr) => {{
+                let ws = $ws;
+                let geo = $geo;
+                let xray_pos = XrayPos::new(geo.loc, zoom);
+                if ws.floating_is_active() {
+                    ws.render_floating(ctx.r(), xray_pos, focus_ring, push_for_geo!(geo));
+                    render_insert_hint_for!(ws, geo);
+                    ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push_for_geo!(geo));
+                } else {
+                    render_insert_hint_for!(ws, geo);
+                    ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push_for_geo!(geo));
+                    ws.render_floating(ctx.r(), xray_pos, focus_ring, push_for_geo!(geo));
+                }
+            }};
+        }
+
+        match strip {
+            ActivityStrip::Incoming => {
+                for (ws, geo) in self.workspaces_with_render_geo(lctx) {
+                    render_ws!(ws, geo);
+                }
+            }
+            ActivityStrip::Outgoing => {
+                for (ws, geo) in self.workspaces_with_render_geo_outgoing(lctx) {
+                    render_ws!(ws, geo);
+                }
             }
         }
     }

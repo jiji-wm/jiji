@@ -277,7 +277,13 @@ impl TestCase for Layout {
             target: RenderTarget::Output,
             xray: None,
         };
-        mon.render_workspaces(lctx, ctx, true, &mut |elem| rv.push(Box::new(elem) as _));
+        mon.render_workspaces(
+            lctx,
+            ctx,
+            true,
+            jiji::layout::monitor::ActivityStrip::Incoming,
+            &mut |elem| rv.push(Box::new(elem) as _),
+        );
         rv
     }
 }

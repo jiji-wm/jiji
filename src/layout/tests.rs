@@ -13,6 +13,7 @@ use smithay::output::{Mode, PhysicalProperties, Subpixel};
 use smithay::utils::Rectangle;
 
 use super::activity::ActivityId;
+use super::monitor::ActivityStrip;
 use super::*;
 
 mod animations;
@@ -20967,5 +20968,336 @@ fn activity_switch_are_animations_ongoing_true_mid_flight() {
         !layout.are_animations_ongoing(None),
         "are_animations_ongoing must be false after transition completes",
     );
+    layout.verify_invariants();
+}
+
+// ---- Activity-switch render-geometry tests ----
+
+/// First workspace rect x of the monitor's active (incoming) view for the given strip.
+fn first_incoming_x(layout: &Layout<TestWindow>) -> f64 {
+    let mon = &layout.monitors[0];
+    let view = layout.active_view(&mon.output_id());
+    mon.workspaces_render_geo(view)
+        .next()
+        .expect("at least one workspace rect")
+        .loc
+        .x
+}
+
+/// First workspace rect x of the outgoing activity's view for `mon`.
+fn first_outgoing_x(layout: &Layout<TestWindow>) -> f64 {
+    let mon = &layout.monitors[0];
+    let switch = mon
+        .activity_switch
+        .as_ref()
+        .expect("a switch must be in flight to have an outgoing strip");
+    let view = layout
+        .activities
+        .get(switch.from)
+        .expect("outgoing activity must be live")
+        .views()
+        .get(&mon.output_id())
+        .expect("outgoing view must exist for this output");
+    mon.workspaces_render_geo_for_strip(view, ActivityStrip::Outgoing)
+        .next()
+        .expect("at least one workspace rect")
+        .loc
+        .x
+}
+
+#[test]
+fn activity_switch_idle_geo_has_no_x_offset() {
+    // With no transition in flight, the incoming geometry must carry zero horizontal offset.
+    let ops = [Op::AddOutput(1)];
+    let layout = check_ops(ops);
+
+    let mon = &layout.monitors[0];
+    let view = layout.active_view(&mon.output_id());
+    let incoming = mon.workspaces_render_geo(view).next().unwrap().loc.x;
+    let bare = mon
+        .workspaces_render_geo_for_strip(view, ActivityStrip::Incoming)
+        .next()
+        .unwrap()
+        .loc
+        .x;
+    assert_eq!(
+        incoming, bare,
+        "idle incoming geo must match the strip-aware core with no offset",
+    );
+    // The idle baseline x (no transition) is the reference for the offset tests below; arming a
+    // switch must move the incoming x by exactly +stride relative to it.
+}
+
+#[test]
+fn activity_switch_incoming_geo_starts_one_stride_out() {
+    // At arm time (anim value 0) the incoming strip sits one full stride offscreen.
+    // Forward nav (seed→beta) is Left, so the incoming strip enters from the right: +stride.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    let idle_x = first_incoming_x(&layout);
+
+    layout.switch_activity(beta_id);
+    let armed_x = first_incoming_x(&layout);
+
+    let p = layout.monitors[0]
+        .activity_switch
+        .as_ref()
+        .unwrap()
+        .anim
+        .value();
+    assert_eq!(p, 0., "anim value must be 0 immediately after arming");
+
+    assert!(
+        armed_x > idle_x,
+        "incoming strip must start to the right of its settled position (Left direction)",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_incoming_geo_settles_to_zero() {
+    // On completion the incoming strip's offset must be 0 and the state cleared.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    let idle_x = first_incoming_x(&layout);
+
+    layout.switch_activity(beta_id);
+    layout.clock.set_complete_instantly(true);
+    layout.advance_animations();
+    layout.clock.set_complete_instantly(false);
+
+    assert!(
+        layout.monitors[0].activity_switch.is_none(),
+        "completed transition must be cleared",
+    );
+    let settled_x = first_incoming_x(&layout);
+    assert_eq!(
+        settled_x, idle_x,
+        "incoming strip must settle back to the idle (zero-offset) position",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_outgoing_geo_tracks_progress() {
+    // The outgoing strip's offset must equal -anim.value() * stride (Left direction). We infer
+    // stride from the incoming strip at arm time: incoming offset = +(1-0)*stride = +stride, so
+    // stride == incoming_armed_x - idle_x. Then outgoing x - idle_x must equal -p * stride.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    let idle_x = first_incoming_x(&layout);
+
+    layout.switch_activity(beta_id);
+    let stride = first_incoming_x(&layout) - idle_x;
+    assert!(stride > 0., "stride must be positive for a Left switch");
+
+    // At arm time p == 0: outgoing offset must be 0 (departs from the settled position).
+    let out_x = first_outgoing_x(&layout);
+    assert_eq!(
+        out_x, idle_x,
+        "outgoing strip must start at the settled (zero-offset) position",
+    );
+
+    // Advance partway and re-sample. The outgoing x must move left (negative) by p*stride.
+    layout.clock.set_unadjusted(Duration::from_millis(50));
+    layout.advance_animations();
+    let p = layout.monitors[0]
+        .activity_switch
+        .as_ref()
+        .expect("still in flight")
+        .anim
+        .value();
+    let out_x_mid = first_outgoing_x(&layout);
+    // Rounding to physical pixels makes exact equality brittle; assert the sign-and-magnitude
+    // relationship in a sampling-robust form.
+    let expected = idle_x - p * stride;
+    assert!(
+        (out_x_mid - expected).abs() <= 1.,
+        "outgoing x ({out_x_mid}) must track -p*stride (expected ~{expected}, p={p})",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_direction_right_flips_offsets() {
+    // Backward nav (beta→seed) is Right: the incoming strip enters from the LEFT (-stride) and
+    // the outgoing strip departs to the RIGHT (+). Both signs mirror the forward case.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    // Settle on beta first so we can switch backward.
+    layout.switch_activity(beta_id);
+    layout.clock.set_complete_instantly(true);
+    layout.advance_animations();
+    layout.clock.set_complete_instantly(false);
+
+    let idle_x = first_incoming_x(&layout);
+
+    layout.switch_activity(seed_id);
+    assert_eq!(
+        layout.monitors[0].activity_switch.as_ref().unwrap().dir,
+        SlideDirection::Right,
+    );
+
+    let armed_x = first_incoming_x(&layout);
+    assert!(
+        armed_x < idle_x,
+        "Right direction: incoming strip must start to the LEFT of its settled position",
+    );
+
+    // Outgoing strip must depart rightward for a Right switch (at p=0 the offset is 0, so
+    // verify the sign by checking that the outgoing position equals idle — it starts there —
+    // and then advance slightly so p>0 and confirm the outgoing x moves right of idle_x).
+    let out_x_at_arm = first_outgoing_x(&layout);
+    assert_eq!(
+        out_x_at_arm, idle_x,
+        "Right direction: outgoing strip must start at the settled (zero-offset) position",
+    );
+
+    layout.clock.set_unadjusted(Duration::from_millis(50));
+    layout.advance_animations();
+    let out_x_mid = first_outgoing_x(&layout);
+    assert!(
+        out_x_mid > idle_x,
+        "Right direction: outgoing strip must depart rightward (out_x_mid={out_x_mid} > idle_x={idle_x})",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn outgoing_ctx_for_resolves_in_flight_only() {
+    // None when idle; Some pointing at the outgoing activity's view mid-flight; None again
+    // after the transition completes.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    {
+        let mon = &layout.monitors[0];
+        assert!(
+            layout.outgoing_ctx_for(mon).is_none(),
+            "idle: outgoing ctx must be None",
+        );
+    }
+
+    layout.switch_activity(beta_id);
+    {
+        let mon = &layout.monitors[0];
+        let ctx = layout
+            .outgoing_ctx_for(mon)
+            .expect("mid-flight: outgoing ctx must resolve");
+        let expected_ids: Vec<_> = layout
+            .activities
+            .get(seed_id)
+            .expect("seed must be live")
+            .views()
+            .get(&mon.output_id())
+            .expect("seed view for this output")
+            .ids()
+            .to_vec();
+        assert_eq!(
+            ctx.view().ids(),
+            expected_ids.as_slice(),
+            "outgoing ctx must carry the from-activity's view for this output",
+        );
+    }
+
+    layout.clock.set_complete_instantly(true);
+    layout.advance_animations();
+    layout.clock.set_complete_instantly(false);
+    {
+        let mon = &layout.monitors[0];
+        assert!(
+            layout.outgoing_ctx_for(mon).is_none(),
+            "after completion: outgoing ctx must be None",
+        );
+    }
+    layout.verify_invariants();
+}
+
+#[test]
+fn overview_toggle_mid_flight_snaps_transition() {
+    // Arming a switch then opening the overview must snap every monitor's transition to None,
+    // and the overview/slide exclusion invariant must hold.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    layout.switch_activity(beta_id);
+    assert!(layout.monitors[0].activity_switch.is_some());
+
+    layout.toggle_overview();
+    assert!(layout.overview_open);
+    for mon in &layout.monitors {
+        assert!(
+            mon.activity_switch.is_none(),
+            "opening the overview must snap every in-flight activity switch",
+        );
+    }
+    layout.verify_invariants();
+}
+
+#[test]
+fn overview_gesture_begin_mid_flight_snaps_transition() {
+    // Same snap via the overview gesture entry path.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    layout.switch_activity(beta_id);
+    assert!(layout.monitors[0].activity_switch.is_some());
+
+    layout.overview_gesture_begin();
+    assert!(layout.overview_open);
+    for mon in &layout.monitors {
+        assert!(
+            mon.activity_switch.is_none(),
+            "the overview gesture must snap every in-flight activity switch",
+        );
+    }
+    layout.verify_invariants();
+}
+
+#[test]
+fn update_render_elements_mid_flight_covers_outgoing() {
+    // With a transition in flight, update_render_elements must exercise the outgoing pass
+    // without panicking (the pass is renderer-free).
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    layout.switch_activity(beta_id);
+    assert!(layout.monitors[0].activity_switch.is_some());
+
+    layout.update_render_elements(None);
+
+    // Still in flight (nothing advanced the clock), and invariants hold.
+    assert!(layout.monitors[0].activity_switch.is_some());
     layout.verify_invariants();
 }
