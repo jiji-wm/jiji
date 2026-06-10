@@ -20773,3 +20773,199 @@ fn activity_switch_removal_snap() {
     }
     layout.verify_invariants();
 }
+
+#[test]
+fn activity_switch_removal_snap_two_monitors() {
+    // Two-output layout: arm seed→beta, then remove beta via remove_activity.
+    // snap_stale_activity_switches must clear activity_switch on BOTH monitors.
+    // (An off-by-one that only cleared monitors[0] would not be caught by the
+    // single-monitor test above.)
+    let (mut layout, seed_id, beta_id) = setup_two_activity_layout_two_outputs();
+
+    layout.switch_activity(beta_id);
+
+    // Both monitors must be armed before removal.
+    assert_eq!(layout.monitors.len(), 2);
+    for mon in &layout.monitors {
+        assert!(
+            mon.activity_switch.is_some(),
+            "both monitors must have activity_switch before removal",
+        );
+    }
+
+    let result = layout.remove_activity(&jiji_ipc::ActivityReferenceArg::Id(beta_id.get()));
+    assert!(result.is_ok(), "remove must succeed");
+    assert_eq!(layout.active_activity_id(), seed_id);
+
+    for mon in &layout.monitors {
+        assert!(
+            mon.activity_switch.is_none(),
+            "activity_switch must be cleared on every monitor after removal",
+        );
+    }
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_reconcile_remove_snaps_stale_from() {
+    // Arm seed→beta via switch_activity, then remove beta through the config-reload
+    // reconcile path (reconcile_activities_on_reload_remove). The snap call inside
+    // reconcile_activities_on_reload_remove must clear the stale from==beta state on
+    // every monitor — this call site does NOT go through remove_activity's cascade.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+
+    // Seed beta as a config-declared activity.
+    let cfg_init = [
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
+        },
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Beta".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let beta_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Beta")
+        .expect("Beta was seeded")
+        .id();
+
+    // Switch to beta — arms seed→beta transition.
+    layout.switch_activity(beta_id);
+    assert!(
+        layout.monitors[0].activity_switch.is_some(),
+        "transition must be armed before reconcile-remove",
+    );
+
+    // Remove beta via config-reload reconcile (not via remove_activity).
+    // The new config names only Default; Beta falls out of the remove-set.
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Default".to_owned()),
+    }];
+    layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect("reconcile-remove of Beta must succeed");
+
+    assert_eq!(layout.active_activity_id(), seed_id);
+    for mon in &layout.monitors {
+        assert!(
+            mon.activity_switch.is_none(),
+            "reconcile-remove must snap stale activity_switch on every monitor",
+        );
+    }
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_reconcile_remove_snaps_stale_non_active_from() {
+    // Arms seed→beta (from=seed), then re-arms beta→seed (from=beta, active=seed).
+    // At reconcile-remove time beta is NOT the active activity, so the cascade
+    // branch at the `remove_set.contains(&self.activities.active_id())` guard is
+    // skipped entirely.  The unconditional snap at the bottom of
+    // `reconcile_activities_on_reload_remove` is the SOLE site that clears the
+    // stale `from == beta` entry.  Removing that snap would leave a dead id in
+    // `activity_switch.from`, causing `verify_invariants` to panic — this test
+    // pins that path.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+
+    // Seed beta as a config-declared activity.
+    let cfg_init = [
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
+        },
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Beta".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let beta_id = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Beta")
+        .expect("Beta was seeded")
+        .id();
+
+    // Switch seed→beta: arms from=seed, active=beta.
+    layout.switch_activity(beta_id);
+    // Switch beta→seed: re-arms from=beta, active=seed.
+    layout.switch_activity(seed_id);
+
+    // Post-condition: from==beta but beta is NOT the active activity.
+    assert!(
+        layout.monitors[0]
+            .activity_switch
+            .as_ref()
+            .is_some_and(|s| s.from == beta_id),
+        "activity_switch.from must be beta_id after the second switch",
+    );
+    assert_eq!(
+        layout.active_activity_id(),
+        seed_id,
+        "active activity must be seed after switching back",
+    );
+
+    // Remove beta via config-reload reconcile.  Beta is non-active, so the
+    // cascade branch that calls switch_activity is skipped.  Only the
+    // unconditional snap clears the stale from==beta.
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Default".to_owned()),
+    }];
+    layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect("reconcile-remove of Beta must succeed");
+
+    assert_eq!(layout.active_activity_id(), seed_id);
+    for mon in &layout.monitors {
+        assert!(
+            mon.activity_switch.is_none(),
+            "reconcile-remove must snap stale activity_switch (non-active from) on every monitor",
+        );
+    }
+    layout.verify_invariants();
+}
+
+#[test]
+fn activity_switch_are_animations_ongoing_true_mid_flight() {
+    // While an activity-switch transition is in flight, are_animations_ongoing(None)
+    // must return true. After advance_animations completes the spring, it must return
+    // false and activity_switch must be cleared. This pins the
+    // `activity_switch.as_ref().is_some_and(|s| !s.anim.is_done())` OR-clause in
+    // Monitor::are_animations_ongoing: dropping it would silently freeze the transition
+    // (no crash, animation just never renders).
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let beta_id = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    layout.switch_activity(beta_id);
+
+    assert!(
+        layout.monitors[0].activity_switch.is_some(),
+        "transition must be armed",
+    );
+    assert!(
+        layout.are_animations_ongoing(None),
+        "are_animations_ongoing must be true while activity-switch is in flight",
+    );
+
+    // Fast-forward past the spring settle.
+    layout.clock.set_complete_instantly(true);
+    layout.advance_animations();
+    layout.clock.set_complete_instantly(false);
+
+    assert!(
+        layout.monitors[0].activity_switch.is_none(),
+        "activity_switch must be cleared after completion",
+    );
+    assert!(
+        !layout.are_animations_ongoing(None),
+        "are_animations_ongoing must be false after transition completes",
+    );
+    layout.verify_invariants();
+}
