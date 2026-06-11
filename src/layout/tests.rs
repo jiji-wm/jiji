@@ -11575,7 +11575,8 @@ fn workspace_is_safe_to_reclaim_false_for_shared_membership() {
 
 // Absent-id debug path: in debug builds the debug_assert! fires to surface
 // caller bugs early. In release builds the predicate stays total (returns
-// false). Two flavours below cover each case.
+// false), but that branch is not testable here: this module's pervasive use
+// of debug-gated accessors means release-profile test builds do not compile.
 #[test]
 #[cfg(debug_assertions)]
 #[should_panic(expected = "absent from the pool (caller bug)")]
@@ -11595,29 +11596,6 @@ fn workspace_is_safe_to_reclaim_panics_for_absent_id_in_debug() {
 
     // Must panic in debug builds — debug_assert! fires in the absent branch.
     let _ = Layout::<TestWindow>::workspace_is_safe_to_reclaim(&layout.workspaces, absent_id);
-}
-
-// Release-only twin: no panic, returns false.
-#[test]
-#[cfg(not(debug_assertions))]
-fn workspace_is_safe_to_reclaim_false_for_absent_id() {
-    let layout = check_ops([Op::AddOutput(1)]);
-
-    let absent_id = Workspace::<TestWindow>::new_no_outputs(
-        HashSet::from([layout.active_activity_id()]),
-        layout.clock.clone(),
-        layout.options.clone(),
-    )
-    .id();
-    assert!(
-        !layout.workspaces.contains_key(&absent_id),
-        "precondition: absent_id must not be in the pool",
-    );
-
-    assert!(
-        !Layout::<TestWindow>::workspace_is_safe_to_reclaim(&layout.workspaces, absent_id),
-        "id absent from pool must return false in release (total predicate)",
-    );
 }
 
 // End-to-end absent-id panic: an id not present in the pool must not be
@@ -21682,5 +21660,825 @@ fn update_render_elements_mid_flight_covers_outgoing() {
 
     // Still in flight (nothing advanced the clock), and invariants hold.
     assert!(layout.monitors[0].activity_switch.is_some());
+    layout.verify_invariants();
+}
+
+// ---------------------------------------------------------------------------
+// reclaim_unpinned_empty_workspaces tests
+// ---------------------------------------------------------------------------
+//
+// Each test exercises one branch of the helper or one call-site. The shared
+// setup pattern: build a shared empty workspace legally pinned in the middle
+// of a view, then narrow its `activities` set via one of the four narrowing
+// methods (set_workspace_activities / remove_workspace_from_activity /
+// remove_activity / reconcile_activities_on_reload_remove), then assert the
+// helper's policy (cull vs. keep) and that verify_invariants stays green.
+
+#[test]
+fn set_workspace_activities_narrow_to_exclusive_culls_pinned_empty_middle() {
+    // Site 1: set_workspace_activities narrows {A, B} → {A}.
+    // A shared empty middle workspace must be culled from the pool after
+    // narrowing leaves it exclusive to A but sitting in an illegal position.
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ]);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    // Build view [W0(win1, active=0), W1(empty), E_trail] for alpha.
+    // Switch focus to the trailing bookend, add a window there (expands view),
+    // then remove the window so W1 is empty and non-active.
+    let trailing = *layout
+        .active_view(&mon_out)
+        .ids()
+        .last()
+        .expect("trailing bookend exists");
+    check_ops_on_layout(&mut layout, [Op::FocusWorkspace(1), Op::CompleteAnimations]);
+    layout.add_window(
+        TestWindow::new(TestWindowParams::new(2)),
+        AddWindowTarget::Workspace(trailing),
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::No,
+    );
+    check_ops_on_layout(&mut layout, [Op::FocusWorkspace(0), Op::CompleteAnimations]);
+    layout.remove_window(&2usize, Transaction::new());
+
+    // At this point alpha's view may be [W0(win1,active), E_trail] if the cull
+    // already fired. If W1 is still there, share it; otherwise re-expand.
+    // Robustly: create the shared middle by seeding a fresh empty workspace.
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    // Mint a fresh empty workspace and insert it as a middle entry in alpha's view.
+    let beta_extra = test_mint_empty_for(&mut layout, 0, alpha);
+    {
+        let alpha_act = layout.activities.get_mut(alpha).expect("alpha live");
+        let view = alpha_act.views_mut().get_mut(&mon_out).expect("alpha view");
+        // Insert at position len-1 (before the trailing bookend).
+        let insert_pos = view.len() - 1;
+        view.insert(insert_pos, beta_extra);
+    }
+    // Tag it with both activities so it is shared.
+    layout
+        .workspaces
+        .get_mut(&beta_extra)
+        .expect("beta_extra live")
+        .activities
+        .insert(beta);
+    // Give beta a view containing beta_extra and a trailing bookend.
+    let beta_trail = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![beta_extra, beta_trail], 0),
+    );
+    layout.verify_invariants();
+
+    // Preconditions: beta_extra is in a middle position of alpha's view,
+    // shared between alpha and beta.
+    let alpha_pos_before = layout.active_view(&mon_out).position_of(beta_extra);
+    assert!(
+        alpha_pos_before.is_some(),
+        "precondition: beta_extra in alpha's view",
+    );
+    let shared_count = layout
+        .workspaces
+        .get(&beta_extra)
+        .expect("live")
+        .activities()
+        .len();
+    assert_eq!(shared_count, 2, "precondition: shared between 2 activities");
+
+    // Narrow: set activities to {alpha} only.
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(beta_extra.get())),
+            &[ActivityReferenceArg::Id(alpha.get())],
+        )
+        .expect("set must succeed");
+
+    // The workspace is now exclusive to alpha, empty, and was in the middle.
+    // It must have been culled.
+    assert!(
+        !layout.workspaces.contains_key(&beta_extra),
+        "exclusive empty middle workspace must be culled from pool after narrowing",
+    );
+    assert!(
+        layout
+            .active_view(&mon_out)
+            .position_of(beta_extra)
+            .is_none(),
+        "culled workspace must not appear in alpha's view",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_narrow_keeps_trailing_bookend() {
+    // Narrowing a shared empty trailing bookend leaves it in a protected
+    // position: pos == view.len() - 1. The helper must keep it.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // Alpha's trailing bookend is the last entry. Share it with beta so it is
+    // a "pinned" trailing bookend.
+    let alpha_trail = *layout
+        .active_view(&mon_out)
+        .ids()
+        .last()
+        .expect("alpha has trailing bookend");
+    layout
+        .workspaces
+        .get_mut(&alpha_trail)
+        .expect("live")
+        .activities
+        .insert(beta);
+    // Give beta a view that also ends in alpha_trail.
+    let beta_extra = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![beta_extra, alpha_trail], 0),
+    );
+    layout.verify_invariants();
+
+    // Narrow alpha_trail to {alpha} only.
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(alpha_trail.get())),
+            &[ActivityReferenceArg::Id(alpha.get())],
+        )
+        .expect("set must succeed");
+
+    // alpha_trail is the trailing bookend — protected. Must still be in pool
+    // and in alpha's view.
+    assert!(
+        layout.workspaces.contains_key(&alpha_trail),
+        "trailing bookend must survive narrowing",
+    );
+    assert_eq!(
+        layout.active_view(&mon_out).ids().last().copied(),
+        Some(alpha_trail),
+        "narrowed trailing bookend must remain at the end of alpha's view",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_narrow_keeps_active_position_empty() {
+    // Narrowing an empty workspace that sits at the active position.
+    // The no-empty-middle assert at monitor.rs:1931 skips the active position,
+    // so the helper must also keep it.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // Insert a fresh empty workspace at position 0 (before the trailing bookend)
+    // and make it the active position for alpha.
+    let active_ws = test_mint_empty_for(&mut layout, 0, alpha);
+    {
+        let alpha_act = layout.activities.get_mut(alpha).expect("alpha live");
+        let view = alpha_act.views_mut().get_mut(&mon_out).expect("view");
+        // Insert at position 0, before the trailing bookend.
+        view.insert(0, active_ws);
+        view.set_active_at(0);
+    }
+    // Share active_ws with beta.
+    layout
+        .workspaces
+        .get_mut(&active_ws)
+        .expect("live")
+        .activities
+        .insert(beta);
+    let beta_trail = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![active_ws, beta_trail], 0),
+    );
+    layout.verify_invariants();
+
+    assert_eq!(
+        layout.active_view(&mon_out).active_position(),
+        0,
+        "precondition: active_ws is at the active position",
+    );
+
+    // Narrow active_ws to {alpha} only.
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(active_ws.get())),
+            &[ActivityReferenceArg::Id(alpha.get())],
+        )
+        .expect("set must succeed");
+
+    // active_ws is at the active position — must not be culled.
+    assert!(
+        layout.workspaces.contains_key(&active_ws),
+        "empty workspace at active position must survive narrowing",
+    );
+    assert_eq!(
+        layout.active_view(&mon_out).active_position(),
+        0,
+        "active position must be preserved",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn narrow_to_still_shared_does_not_cull() {
+    // Narrowing {A, B, C} → {A, B} leaves the workspace shared (len > 1).
+    // The helper's step-1 skip must fire and the workspace must survive.
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ]);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    let gamma = layout.create_activity("Gamma".to_owned()).expect("create");
+
+    // Create a fresh empty workspace shared by alpha, beta, and gamma.
+    // Place it in a middle position in alpha's view.
+    let shared_ws = test_mint_empty_for(&mut layout, 0, alpha);
+    {
+        let alpha_act = layout.activities.get_mut(alpha).expect("alpha live");
+        let view = alpha_act.views_mut().get_mut(&mon_out).expect("view");
+        let insert_pos = view.len() - 1;
+        view.insert(insert_pos, shared_ws);
+    }
+    layout
+        .workspaces
+        .get_mut(&shared_ws)
+        .expect("live")
+        .activities
+        .insert(beta);
+    layout
+        .workspaces
+        .get_mut(&shared_ws)
+        .expect("live")
+        .activities
+        .insert(gamma);
+    // Give beta and gamma minimal views.
+    let beta_trail = test_mint_empty_for(&mut layout, 0, beta);
+    let gamma_trail = test_mint_empty_for(&mut layout, 0, gamma);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![shared_ws, beta_trail], 0),
+    );
+    test_override_activity_view(
+        &mut layout,
+        gamma,
+        mon_out.clone(),
+        WorkspaceView::new(vec![shared_ws, gamma_trail], 0),
+    );
+    layout.verify_invariants();
+
+    let count_before = layout
+        .workspaces
+        .get(&shared_ws)
+        .expect("live")
+        .activities()
+        .len();
+    assert_eq!(count_before, 3, "precondition: shared by 3 activities");
+
+    // Narrow to {alpha, beta} — still shared after narrowing.
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(shared_ws.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    assert!(
+        layout.workspaces.contains_key(&shared_ws),
+        "still-shared workspace must not be culled",
+    );
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&shared_ws)
+            .expect("live")
+            .activities()
+            .len(),
+        2,
+        "activities set must be narrowed to 2",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_workspace_from_activity_narrow_culls_pinned_empty_middle() {
+    // Site 2: remove_workspace_from_activity narrows {A, B} → {A}.
+    // Shared empty middle must be culled once exclusive.
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ]);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // Insert a shared empty workspace in a middle position of alpha's view.
+    let shared_ws = test_mint_empty_for(&mut layout, 0, alpha);
+    {
+        let alpha_act = layout.activities.get_mut(alpha).expect("alpha live");
+        let view = alpha_act.views_mut().get_mut(&mon_out).expect("view");
+        let insert_pos = view.len() - 1;
+        view.insert(insert_pos, shared_ws);
+    }
+    layout
+        .workspaces
+        .get_mut(&shared_ws)
+        .expect("live")
+        .activities
+        .insert(beta);
+    let beta_trail = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![shared_ws, beta_trail], 0),
+    );
+    layout.verify_invariants();
+
+    // Remove beta from shared_ws's activities: narrows to {alpha}.
+    layout
+        .remove_workspace_from_activity(
+            Some(WorkspaceReference::Id(shared_ws.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("remove must succeed");
+
+    assert!(
+        !layout.workspaces.contains_key(&shared_ws),
+        "exclusive empty middle workspace must be culled after remove_workspace_from_activity",
+    );
+    assert!(
+        layout
+            .active_view(&mon_out)
+            .position_of(shared_ws)
+            .is_none(),
+        "culled workspace must not appear in alpha's view",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_activity_prune_culls_pinned_empty_middle() {
+    // Site 3: remove_activity triggers the prune pass, narrowing a shared
+    // empty workspace to exclusive ownership by the surviving activity.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    // Build a shared empty workspace in a middle position of alpha's view.
+    let shared_ws = test_mint_empty_for(&mut layout, 0, alpha);
+    {
+        let alpha_act = layout.activities.get_mut(alpha).expect("alpha live");
+        let view = alpha_act.views_mut().get_mut(&mon_out).expect("view");
+        let insert_pos = view.len() - 1;
+        view.insert(insert_pos, shared_ws);
+    }
+    layout
+        .workspaces
+        .get_mut(&shared_ws)
+        .expect("live")
+        .activities
+        .insert(beta);
+    let beta_trail = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![shared_ws, beta_trail], 0),
+    );
+    layout.verify_invariants();
+
+    // Remove beta. The prune pass removes beta from shared_ws.activities,
+    // leaving alpha as the sole owner. The reclaim helper must then cull it.
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("remove_activity must succeed");
+
+    assert!(
+        !layout.workspaces.contains_key(&shared_ws),
+        "shared empty middle workspace must be culled after remove_activity prunes beta",
+    );
+    assert!(
+        layout
+            .active_view(&mon_out)
+            .position_of(shared_ws)
+            .is_none(),
+        "culled workspace must not appear in alpha's view",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn reload_remove_prune_culls_pinned_empty_middle() {
+    // Site 4: reconcile_activities_on_reload_remove prunes beta from a shared
+    // workspace, leaving alpha as the sole owner. Reclaim must fire.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    // Seed config-declared [Default, Beta].
+    let cfg_init = [
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Default".to_owned()),
+        },
+        jiji_config::ActivityDecl {
+            name: jiji_config::ActivityName("Beta".to_owned()),
+        },
+    ];
+    layout.reconcile_activities_on_reload_add(&cfg_init, &[]);
+    let beta = layout
+        .activities
+        .iter()
+        .find(|a| a.name() == "Beta")
+        .expect("Beta was added")
+        .id();
+
+    // Build a shared empty workspace in a middle position of alpha's view.
+    let shared_ws = test_mint_empty_for(&mut layout, 0, alpha);
+    {
+        let alpha_act = layout.activities.get_mut(alpha).expect("alpha live");
+        let view = alpha_act.views_mut().get_mut(&mon_out).expect("view");
+        let insert_pos = view.len() - 1;
+        view.insert(insert_pos, shared_ws);
+    }
+    layout
+        .workspaces
+        .get_mut(&shared_ws)
+        .expect("live")
+        .activities
+        .insert(beta);
+    let beta_trail = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![shared_ws, beta_trail], 0),
+    );
+    layout.verify_invariants();
+
+    // Reload drops Beta from config.
+    let cfg_reload = [jiji_config::ActivityDecl {
+        name: jiji_config::ActivityName("Default".to_owned()),
+    }];
+    layout
+        .reconcile_activities_on_reload_remove(&cfg_reload)
+        .expect("reload remove must succeed");
+
+    assert!(
+        !layout.workspaces.contains_key(&shared_ws),
+        "shared empty middle workspace must be culled after reload removes beta",
+    );
+    assert!(
+        layout
+            .active_view(&mon_out)
+            .position_of(shared_ws)
+            .is_none(),
+        "culled workspace must not appear in alpha's view",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn narrow_to_exclusive_culls_dormant_view_empty_middle() {
+    // Regression pin: a shared empty workspace sitting in the middle of a
+    // DORMANT view must be eagerly culled on narrowing — not deferred to the
+    // next switch into that activity (delayed-bomb pattern).
+    //
+    // Setup:
+    //   alpha (active) view: [W0(win1, active=0), w_shared(empty, pos=1), E_trail(pos=2)]
+    //   beta (dormant) view: [w_shared(empty, pos=0), w_extra(empty, active=1), beta_trail(pos=2)]
+    //   w_shared.activities = {alpha, beta}
+    //
+    // Narrow by removing alpha from w_shared (remove_workspace_from_activity targeting alpha).
+    // After narrowing: w_shared.activities = {beta}, w_shared at pos=0 of beta's dormant view,
+    // active_pos=1. pos=0 is non-trailing, non-active, non-EWAF-leading → cull.
+    //
+    // Then switch_activity(beta): beta's view must not reference the culled workspace.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // Mint w_shared tagged with alpha; share with beta.
+    let w_shared = test_mint_empty_for(&mut layout, 0, alpha);
+    layout
+        .workspaces
+        .get_mut(&w_shared)
+        .expect("live")
+        .activities
+        .insert(beta);
+    // Place w_shared at position 1 (middle) of alpha's active view.
+    {
+        let alpha_act = layout.activities.get_mut(alpha).expect("alpha live");
+        let view = alpha_act.views_mut().get_mut(&mon_out).expect("view");
+        // Alpha's view: [W0(win1), E_trail] — insert w_shared at pos 1 (before E_trail).
+        view.insert(1, w_shared);
+    }
+    // Build beta's dormant view: [w_shared(pos=0), w_extra(pos=1, active=1), beta_trail(pos=2)].
+    let w_extra = test_mint_empty_for(&mut layout, 0, beta);
+    let beta_trail = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![w_shared, w_extra, beta_trail], 1),
+    );
+    layout.verify_invariants();
+
+    // Preconditions: w_shared is shared, in a middle position of beta's dormant view.
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&w_shared)
+            .expect("live")
+            .activities()
+            .len(),
+        2,
+        "precondition: w_shared shared by 2 activities",
+    );
+    assert_eq!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .position_of(w_shared),
+        Some(0),
+        "precondition: w_shared at pos=0 of beta's dormant view",
+    );
+    assert_eq!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .active_position(),
+        1,
+        "precondition: beta's active_pos=1 (not w_shared)",
+    );
+
+    // Narrow: remove alpha from w_shared. Now w_shared.activities = {beta}.
+    layout
+        .remove_workspace_from_activity(
+            Some(WorkspaceReference::Id(w_shared.get())),
+            &ActivityReferenceArg::Id(alpha.get()),
+        )
+        .expect("remove must succeed");
+
+    // w_shared is now exclusive to beta and sits at a non-active, non-trailing
+    // middle position in beta's dormant view → must be culled eagerly.
+    assert!(
+        !layout.workspaces.contains_key(&w_shared),
+        "exclusive empty workspace in dormant view middle must be culled eagerly",
+    );
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .position_of(w_shared)
+            .is_none(),
+        "culled workspace must not appear in beta's dormant view",
+    );
+
+    // The delayed-bomb regression: switching into beta must not panic at
+    // verify_invariants (no stale view reference to the culled workspace).
+    layout.switch_activity(beta);
+    layout.verify_invariants();
+}
+
+#[test]
+fn narrow_under_ewaf_collapses_len2_view() {
+    // EWAF special case: a len-2 view [leading_empty, shared_empty] with the
+    // second entry shared. After narrowing to exclusive, the EWAF len-2 cull
+    // must fire (overriding the trailing-slot keep), collapsing the view to len 1.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut layout = check_ops_with_options(options, [Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // Alpha's EWAF view starts as [leading_bookend] (len 1). The second entry
+    // will be a shared workspace that doubles as the trailing bookend.
+    // (alpha_trail is the initial single-entry bookend; it becomes the leading
+    // bookend once we insert shared_trailing as the second entry below.)
+    let _alpha_trail = *layout
+        .active_view(&mon_out)
+        .ids()
+        .last()
+        .expect("alpha has a trailing bookend");
+    // The initial EWAF view is [_alpha_trail] (len 1 because no windows).
+    assert_eq!(
+        layout.active_view(&mon_out).len(),
+        1,
+        "precondition: EWAF with no windows starts at len 1",
+    );
+
+    // Add a second (trailing) slot that is shared with beta: len becomes 2.
+    let shared_trailing = test_mint_empty_for(&mut layout, 0, alpha);
+    {
+        let alpha_act = layout.activities.get_mut(alpha).expect("alpha live");
+        let view = alpha_act.views_mut().get_mut(&mon_out).expect("view");
+        view.insert(1, shared_trailing);
+    }
+    layout
+        .workspaces
+        .get_mut(&shared_trailing)
+        .expect("live")
+        .activities
+        .insert(beta);
+    let beta_lead = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![beta_lead, shared_trailing], 0),
+    );
+    layout.verify_invariants();
+
+    assert_eq!(
+        layout.active_view(&mon_out).len(),
+        2,
+        "precondition: alpha EWAF view is len 2 with shared trailing",
+    );
+
+    // Narrow shared_trailing to {alpha} only.
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(shared_trailing.get())),
+            &[ActivityReferenceArg::Id(alpha.get())],
+        )
+        .expect("set must succeed");
+
+    // The EWAF len-2 cull must have fired: shared_trailing is culled,
+    // alpha's view collapses to len 1.
+    assert!(
+        !layout.workspaces.contains_key(&shared_trailing),
+        "EWAF len-2 cull must fire when the shared trailing entry is narrowed to exclusive",
+    );
+    assert_eq!(
+        layout.active_view(&mon_out).len(),
+        1,
+        "alpha's EWAF view must collapse to len 1 after the cull",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn narrow_with_animation_snaps_then_culls() {
+    // When a WorkspaceSwitch::Animation is in flight on the monitor whose active
+    // view holds the workspace, the helper must snap the animation before culling,
+    // or clean_up_workspaces_on's assert!(workspace_switch.is_none()) fires.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // Insert a shared empty workspace in a middle position of alpha's view.
+    let shared_ws = test_mint_empty_for(&mut layout, 0, alpha);
+    {
+        let alpha_act = layout.activities.get_mut(alpha).expect("alpha live");
+        let view = alpha_act.views_mut().get_mut(&mon_out).expect("view");
+        let insert_pos = view.len() - 1;
+        view.insert(insert_pos, shared_ws);
+    }
+    layout
+        .workspaces
+        .get_mut(&shared_ws)
+        .expect("live")
+        .activities
+        .insert(beta);
+    let beta_trail = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![shared_ws, beta_trail], 0),
+    );
+    layout.verify_invariants();
+
+    // Alpha's view is [W0(win1,active=0), shared_ws(pos=1), E_trail(pos=2)].
+    // Arm a workspace-switch animation by switching to the trailing bookend
+    // (position 2). The active position moves to 2; shared_ws stays at
+    // position 1 (a non-active middle entry after the switch).
+    assert_eq!(
+        layout.active_view(&mon_out).len(),
+        3,
+        "precondition: view has 3 entries before arming animation",
+    );
+    assert_eq!(
+        layout.active_view(&mon_out).active_position(),
+        0,
+        "precondition: W0(win1) is active before arming animation",
+    );
+    layout.switch_workspace(2);
+    assert!(
+        matches!(
+            layout.monitors[0].workspace_switch,
+            Some(super::monitor::WorkspaceSwitch::Animation(_)),
+        ),
+        "switch_workspace must arm a WorkspaceSwitch::Animation",
+    );
+    assert_eq!(
+        layout.active_view(&mon_out).active_position(),
+        2,
+        "precondition: active position moved to the trailing bookend",
+    );
+
+    // Narrow shared_ws to {alpha} only via remove_workspace_from_activity.
+    // shared_ws is at position 1 (middle, non-active). The helper must snap
+    // the animation and cull the workspace.
+    layout
+        .remove_workspace_from_activity(
+            Some(WorkspaceReference::Id(shared_ws.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("remove must succeed");
+
+    // Animation must be snapped (None on the holding monitor).
+    assert!(
+        layout.monitors[0].workspace_switch.is_none(),
+        "animation must be snapped before culling the active-view middle entry",
+    );
+
+    // shared_ws must have been culled.
+    assert!(
+        !layout.workspaces.contains_key(&shared_ws),
+        "exclusive empty middle workspace must be culled even under an in-flight animation",
+    );
     layout.verify_invariants();
 }

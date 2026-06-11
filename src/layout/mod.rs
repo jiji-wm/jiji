@@ -3683,6 +3683,193 @@ impl<W: LayoutElement> Layout<W> {
         ws.activities().len() == 1
     }
 
+    /// Reclaim empty unnamed workspaces whose activity-membership set just
+    /// shrank to a single activity, restoring the no-empty-middle invariant
+    /// for their new exclusive owner.
+    ///
+    /// Callers pass every workspace id whose `activities` set just shrank.
+    /// The helper processes each id independently — classify then mutate —
+    /// so an earlier cull cannot stale a later position check.
+    ///
+    /// Per id:
+    ///
+    /// 1. Skip unless [`Self::workspace_is_safe_to_reclaim`] returns `true` (still shared → keep
+    ///    pinned; absent id → `debug_assert!` fires, skip).
+    /// 2. Skip if `has_windows_or_name()` — only empty unnamed candidates need reclaiming.
+    /// 3. Locate the holding view via view-keyed resolution: take the sole remaining activity id,
+    ///    scan that activity's views for one that contains `ws_id`, capture `(OutputId, pos)`.
+    ///    Using `Workspace::output_id()` here is forbidden — that field is a deliberately-stale
+    ///    reclaim tag after partial-disconnect, so it may not match any live view key.
+    /// 4. Resolve the EWAF flag from the connected monitor when the view key matches a monitor's
+    ///    `output_id()`; fall back to the layout-root option otherwise (dormant / disconnected
+    ///    views), matching `assert_view_bookends`' documented source-of-truth split.
+    /// 5. Legality decision (check order is load-bearing):
+    ///    - **Cull** if `ewaf && view.len() == 2 && pos == 1` — the all-empty EWAF len-2 collapse;
+    ///      this carve-out overrides the trailing-slot and active-position keeps that follow.
+    ///    - **Keep** if the workspace is in a protected position: sole entry (`view.len() == 1`),
+    ///      trailing bookend (`pos == view.len() - 1`), EWAF leading bookend (`ewaf && pos == 0`),
+    ///      or the active / remembered- active position (`pos == view.active_position()`).
+    ///    - **Cull** otherwise — an illegal middle entry, whether the view is active today or
+    ///      dormant (a delayed-bomb on the next switch).
+    /// 6. Before culling into an active view that is mid-animation: snap that monitor's
+    ///    `workspace_switch` to `None` first. The mutation is scoped to the one (activity, output)
+    ///    view that holds the workspace, so only the holding monitor is snapped — a narrower
+    ///    footprint than the two methods that snap all monitors unconditionally.
+    /// 7. Cull via [`Self::destroy_workspaces_cross_activity`], which patches every view before
+    ///    removing the pool entry (ordering load-bearing per its rustdoc).
+    fn reclaim_unpinned_empty_workspaces(
+        &mut self,
+        narrowed: impl IntoIterator<Item = WorkspaceId>,
+    ) {
+        for ws_id in narrowed {
+            // Step 1: skip still-shared ids; debug_assert! fires on absent ids.
+            if !Self::workspace_is_safe_to_reclaim(&self.workspaces, ws_id) {
+                let n = self
+                    .workspaces
+                    .get(&ws_id)
+                    .map_or(0, |ws| ws.activities().len());
+                trace!(
+                    "reclaim_unpinned_empty_workspaces: workspace {ws_id:?} still shared \
+                     across {n} activities, skipping",
+                );
+                continue;
+            }
+
+            // Step 2: skip workspaces that have content.
+            {
+                let ws = self
+                    .workspaces
+                    .get(&ws_id)
+                    .expect("workspace_is_safe_to_reclaim returned true → id is a live pool key");
+                if ws.has_windows_or_name() {
+                    continue;
+                }
+            }
+
+            // Step 3: view-keyed resolution. Take the sole remaining activity,
+            // scan its views for the one holding ws_id. ws.output_id() is
+            // intentionally not used — it may be a stale reclaim tag after
+            // partial-disconnect (the field is not updated when a workspace
+            // migrates between monitors during a reconnect).
+            let sole_activity_id = {
+                let ws = self
+                    .workspaces
+                    .get(&ws_id)
+                    .expect("id is a live pool key after step 2");
+                *ws.activities()
+                    .iter()
+                    .next()
+                    .expect("workspace_is_safe_to_reclaim guarantees activities().len() == 1")
+            };
+
+            let holding = self
+                .activities
+                .get(sole_activity_id)
+                .expect("sole_activity_id came from ws.activities() — must be a live activity")
+                .views()
+                .iter()
+                .find_map(|(out_id, view)| {
+                    view.position_of(ws_id).map(|pos| (out_id.clone(), pos))
+                });
+
+            let (view_key, pos) = match holding {
+                Some(pair) => pair,
+                None => {
+                    // Defensive: ws_id is in the pool and in no view of its sole
+                    // remaining activity. This is a membership↔view coherence gap
+                    // that a separate cleanup path is responsible for. Skip
+                    // without panicking so this helper stays narrowly scoped.
+                    trace!(
+                        "reclaim_unpinned_empty_workspaces: workspace {ws_id:?} not found \
+                         in any view of activity {sole_activity_id:?}, skipping",
+                    );
+                    continue;
+                }
+            };
+
+            // Step 4: resolve EWAF. Connected monitors use their per-monitor
+            // merged options; views on disconnected / dormant outputs fall back
+            // to the layout-root option. This mirrors assert_view_bookends'
+            // documented source-of-truth split (monitor.rs:1994-1996).
+            let ewaf = self
+                .monitors
+                .iter()
+                .find(|m| m.output_id() == view_key)
+                .map(|m| m.options.layout.empty_workspace_above_first)
+                .unwrap_or(self.options.layout.empty_workspace_above_first);
+
+            // Re-borrow view for the legality check. The sole_activity_id borrow
+            // above ended; re-enter with a shared borrow.
+            let (view_len, active_pos) = {
+                let view = self
+                    .activities
+                    .get(sole_activity_id)
+                    .expect("sole_activity_id is still live")
+                    .views()
+                    .get(&view_key)
+                    .expect("view_key was found in the scan above");
+                (view.len(), view.active_position())
+            };
+
+            // Step 5: legality decision. Check order is load-bearing: the EWAF
+            // len-2 cull must override the trailing-slot keep, since pos == 1 ==
+            // view.len() - 1 when len == 2.
+            let should_cull = if ewaf && view_len == 2 && pos == 1 {
+                // All-empty EWAF len-2 collapse: the single non-leading entry is
+                // no longer a valid bookend anchor for a shared workspace.
+                true
+            } else if view_len == 1
+                || pos == view_len - 1
+                || (ewaf && pos == 0)
+                || pos == active_pos
+            {
+                // Protected positions: sole entry, trailing bookend, EWAF leading
+                // bookend, or the active / remembered-active position.
+                false
+            } else {
+                // Illegal middle: either an active-view violation (no-empty-middle
+                // assert at monitor.rs:1931) or a dormant-view delayed-bomb (the
+                // assert_view_bookends check is not animation-gated, so it fires
+                // on the next switch into this activity).
+                true
+            };
+
+            if !should_cull {
+                continue;
+            }
+
+            // Step 6: snap the holding monitor's animation before mutating its
+            // active view. assert_view_bookends (called from verify_invariants
+            // for every view including dormant ones) is not animation-gated —
+            // only the no-empty-middle check at monitor.rs:1921 gates on
+            // workspace_switch.is_none(). Snapping here prevents
+            // clean_up_workspaces_on's assert!(mon.workspace_switch.is_none())
+            // from firing if the caller-level animate path runs next.
+            // Only the holding monitor is snapped because the mutation is
+            // provably scoped to this one (activity, output) view; snapping all
+            // monitors (the precedent at mod.rs:7014-7020 and :6860-6866) is
+            // unnecessarily broad for a per-id mutation.
+            if sole_activity_id == self.activities.active_id() {
+                for mon in &mut self.monitors {
+                    if mon.output_id() == view_key
+                        && matches!(mon.workspace_switch, Some(WorkspaceSwitch::Animation(_)))
+                    {
+                        mon.workspace_switch = None;
+                    }
+                }
+            }
+
+            // Step 7: cull. destroy_workspaces_cross_activity patches every
+            // activity's views before the pool removal — ordering is load-bearing
+            // per its rustdoc.
+            Self::destroy_workspaces_cross_activity(
+                &mut self.activities,
+                &mut self.workspaces,
+                [ws_id],
+            );
+        }
+    }
+
     /// Drops workspaces from the pool after patching every activity's
     /// `WorkspaceView` that still references them. The retain closure mirrors
     /// `RemoveActivity`'s exclusive-workspace destruction pass: single-entry
@@ -6503,7 +6690,9 @@ impl<W: LayoutElement> Layout<W> {
         // Prune shared workspaces — ones where the target coexists with at
         // least one other activity. Exclusives were destroyed or errored out
         // above, so every remaining membership is shared and the set stays
-        // non-empty after the remove.
+        // non-empty after the remove. Collect pruned ids for the post-remove
+        // reclaim pass below.
+        let mut pruned_ids: Vec<WorkspaceId> = Vec::new();
         for ws in self.workspaces.values_mut() {
             if ws.activities().contains(&target) {
                 debug_assert!(
@@ -6511,6 +6700,7 @@ impl<W: LayoutElement> Layout<W> {
                     "exclusive workspaces were destroyed or errored in the validation pass",
                 );
                 ws.activities.remove(&target);
+                pruned_ids.push(ws.id());
             }
         }
 
@@ -6529,6 +6719,11 @@ impl<W: LayoutElement> Layout<W> {
         // the materializer so every remaining activity holds a bookend view for every
         // connected monitor.
         self.ensure_all_activity_views();
+
+        // The membership prune above shrank each pruned workspace's activities set
+        // by one. Any that became exclusive to a single activity may now sit in an
+        // illegal middle position (previously legal as a pinned shared workspace).
+        self.reclaim_unpinned_empty_workspaces(pruned_ids);
 
         #[cfg(debug_assertions)]
         self.verify_invariants();
@@ -6906,6 +7101,11 @@ impl<W: LayoutElement> Layout<W> {
             self.ensure_all_activity_views();
         }
 
+        // The narrowing may have left ws_id exclusively in one activity's view
+        // while it sits in an illegal middle position (previously legal as a
+        // pinned shared workspace). Reclaim if so.
+        self.reclaim_unpinned_empty_workspaces([ws_id]);
+
         #[cfg(debug_assertions)]
         self.verify_invariants();
 
@@ -7140,6 +7340,13 @@ impl<W: LayoutElement> Layout<W> {
         // `remove_workspace_from_activity` recipe.
         if dropped_any_view_entry {
             self.ensure_all_activity_views();
+        }
+
+        // When to_remove is non-empty, ws_id may have been narrowed to a single
+        // activity. If it now sits in an illegal middle position under its sole
+        // remaining owner, reclaim it.
+        if !to_remove.is_empty() {
+            self.reclaim_unpinned_empty_workspaces([ws_id]);
         }
 
         #[cfg(debug_assertions)]
@@ -8993,6 +9200,9 @@ impl<W: LayoutElement> Layout<W> {
             .map(|a| a.id())
             .filter(|id| remove_set.contains(id))
             .collect();
+        // Collect every workspace id whose membership set is narrowed by the
+        // prune passes below so the reclaim helper can check them afterwards.
+        let mut all_pruned_ids: Vec<WorkspaceId> = Vec::new();
         for target in targets {
             // Pre-collect destroy ids to release the shared borrow on
             // self.workspaces before the `iter_mut()` + `remove()` mutations.
@@ -9036,6 +9246,7 @@ impl<W: LayoutElement> Layout<W> {
                         "exclusives of {target:?} were destroyed in the pass above",
                     );
                     ws.activities.remove(&target);
+                    all_pruned_ids.push(ws.id());
                 }
             }
 
@@ -9055,6 +9266,11 @@ impl<W: LayoutElement> Layout<W> {
         // materializer re-installs bookend views for every remaining activity on every
         // connected monitor.
         self.ensure_all_activity_views();
+
+        // The membership prune passes above shrank each collected workspace's
+        // activities set by one per removed target. Any that became exclusive to a
+        // single activity may now sit in an illegal middle position.
+        self.reclaim_unpinned_empty_workspaces(all_pruned_ids);
 
         #[cfg(debug_assertions)]
         self.verify_invariants();
