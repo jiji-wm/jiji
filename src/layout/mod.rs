@@ -1723,11 +1723,13 @@ impl<W: LayoutElement> Layout<W> {
         self.dormant_view_bookend_fixup(receiving_ws_id, monitor_idx);
     }
 
-    /// After a window has been added to `ws_id` on `mon_idx`, walk every dormant activity's
-    /// view of the same output and append a fresh trailing-empty bookend if `ws_id` is that
-    /// view's trailing entry; under EWAF, also prepend a fresh leading empty if `ws_id` is at
-    /// position 0. Mirrors the trailing-empty bookend spawn the active-side `add_column_on`
-    /// already does, but for the dormant activities' views.
+    /// After a window has been added to `ws_id` on `mon_idx` (window-add path), or after a
+    /// windowed-or-named workspace has been inserted into an activity's view for a connected
+    /// monitor (activity-add path), walk every dormant activity's view of the same output and
+    /// append a fresh trailing-empty bookend
+    /// if `ws_id` is that view's trailing entry; under EWAF, also prepend a fresh leading empty
+    /// if `ws_id` is at position 0. Mirrors the trailing-empty bookend spawn the active-side
+    /// `add_column_on` already does, but for the dormant activities' views.
     ///
     /// Called outside the `(monitors, pool, view)` split-borrow scope so `&mut self` is
     /// available; mirrors the post-split flush pattern in `add_output` / `remove_output`.
@@ -1744,7 +1746,9 @@ impl<W: LayoutElement> Layout<W> {
             .iter()
             .filter_map(|a| {
                 if a.id() == active_id {
-                    // The active view's bookend is maintained by `add_column_on`.
+                    // The active view's bookend is maintained by `add_column_on` (window-add)
+                    // or by the inline leading-mint in `add_workspace_to_activity` /
+                    // `set_workspace_activities` (activity-add, EWAF pos-0 case).
                     return None;
                 }
                 let view = a.views().get(&mon_out_id)?;
@@ -3571,6 +3575,44 @@ impl<W: LayoutElement> Layout<W> {
     ) {
         let len = view.len();
         Self::add_workspace_at_on(monitors, pool, view, mon_idx, len, seed_activity);
+    }
+
+    /// Insert an existing pool workspace into `view`, keeping a trailing-empty
+    /// bookend at the tail.
+    ///
+    /// A windowed-or-named workspace lands just above a trailing empty unnamed
+    /// workspace, reusing it as the bookend — appending past it would strand
+    /// that empty mid-view (a stray empty workspace above the inserted one
+    /// until the focus-driven cleanup reaps it) and force a redundant fresh
+    /// mint. An empty unnamed workspace appends at the tail: it is itself a
+    /// valid bookend. A view whose tail is windowed-or-named (a disconnected
+    /// output's view, where the bookend rule is not maintained) also appends
+    /// at the tail.
+    ///
+    /// Returns the insertion position so callers patching the view the monitor
+    /// is rendering can shift an in-flight workspace switch.
+    fn view_insert_above_trailing_bookend(
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        view: &mut WorkspaceView,
+        ws_id: WorkspaceId,
+    ) -> usize {
+        let windowed_or_named = |id: &WorkspaceId| {
+            pool.get(id)
+                .expect("view id must be a key in the pool")
+                .has_windows_or_name()
+        };
+        let pos = if windowed_or_named(&ws_id)
+            && view
+                .ids()
+                .last()
+                .is_some_and(|last| !windowed_or_named(last))
+        {
+            view.len() - 1
+        } else {
+            view.len()
+        };
+        view.insert(pos, ws_id);
+        pos
     }
 
     /// Prunes empty unnamed workspaces from this monitor's view, returning the
@@ -6815,12 +6857,13 @@ impl<W: LayoutElement> Layout<W> {
     /// Returns `Some(ActivitySwitchBlock::WorkspaceSwitchGesture)` if any
     /// monitor carries an in-flight `WorkspaceSwitch::Gesture(_)`, else `None`.
     ///
-    /// `RemoveWorkspaceFromActivity` (and the future
-    /// `SetWorkspaceActivities`) are hard-blocked by an in-flight
-    /// workspace-switch *gesture* — removing an id from the current activity's
-    /// `view.ids` would invalidate the gesture's fractional position targets.
-    /// `AddWorkspaceToActivity` is not gated: append is position-invariant so
-    /// it is safe during both gestures and animations.
+    /// `RemoveWorkspaceFromActivity` and `SetWorkspaceActivities` are
+    /// hard-blocked by an in-flight workspace-switch *gesture* — removing an id
+    /// from the current activity's `view.ids` would invalidate the gesture's
+    /// fractional position targets.
+    /// `AddWorkspaceToActivity` is not gated: the insert adjusts any in-flight
+    /// workspace switch on the target monitor when the active view is patched,
+    /// and is safe during animations and gestures alike.
     ///
     /// This predicate is weaker than [`Self::is_activity_switch_hard_blocked`]:
     /// it does **not** consider `self.interactive_move` / `self.dnd` (those are
@@ -6840,8 +6883,9 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     /// Add `workspace` to `activity_ref`'s membership set and, if the activity
-    /// has a view for the workspace's bound output, append the id to that
-    /// view's `ids`.
+    /// has a view for the workspace's bound output, insert the id above the
+    /// view's trailing-empty bookend (or append when the workspace is itself
+    /// empty-unnamed, since it is a valid bookend position).
     ///
     /// Resolution order:
     /// 1. `activity_ref` → `AddWorkspaceToActivityError::ActivityNotFound`.
@@ -6852,12 +6896,14 @@ impl<W: LayoutElement> Layout<W> {
     /// - No-op when the workspace's `activities` set already contains the target id (returns `Ok`,
     ///   no state touched).
     /// - Otherwise `activity_id` is inserted into `ws.activities`. If the target activity already
-    ///   has a view for the workspace's bound output, the id is appended to that view's `ids`.
-    ///   Views are not fabricated: a dormant activity without a view for the output gets its view
-    ///   rebuilt lazily on the next switch.
+    ///   has a view for the workspace's bound output, the id is inserted above the trailing-empty
+    ///   bookend (or appended when the workspace is itself empty-unnamed). Views are not
+    ///   fabricated: a dormant activity without a view for the output gets its view rebuilt lazily
+    ///   on the next switch.
     ///
-    /// Not gated. Append is position-invariant so this is safe during both
-    /// workspace-switch animations and gestures.
+    /// Not gated. The insert adjusts any in-flight workspace switch on the
+    /// target monitor when the active view is patched, so this is safe during
+    /// both workspace-switch animations and gestures.
     pub(crate) fn add_workspace_to_activity(
         &mut self,
         workspace: Option<WorkspaceReference>,
@@ -6893,6 +6939,7 @@ impl<W: LayoutElement> Layout<W> {
         let out_id = {
             let pool = &mut self.workspaces;
             let activities = &mut self.activities;
+            let active_id = activities.active_id();
 
             let ws = pool
                 .get_mut(&ws_id)
@@ -6910,8 +6957,23 @@ impl<W: LayoutElement> Layout<W> {
                         // invariant is derived from pool membership. The guard
                         // stays as belt-and-braces for any future drift.
                         if !view.ids().contains(&ws_id) {
-                            let pos = view.len();
-                            view.insert(pos, ws_id);
+                            let pos = Self::view_insert_above_trailing_bookend(pool, view, ws_id);
+                            // A mid-view insert into the view the monitor is
+                            // rendering must shift an in-flight workspace
+                            // switch, mirroring `add_workspace_at_on`.
+                            if activity_id == active_id {
+                                if let Some(mon) = self
+                                    .monitors
+                                    .iter_mut()
+                                    .find(|m| &m.output_id() == out_id_ref)
+                                {
+                                    if let Some(switch) = &mut mon.workspace_switch {
+                                        if pos as f64 <= switch.target_idx() {
+                                            switch.offset(1);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -6920,12 +6982,15 @@ impl<W: LayoutElement> Layout<W> {
         };
 
         // Per-activity bookend invariant: every (activity, connected output)
-        // view must end in an empty unnamed workspace. Appending `ws_id` only
-        // breaks the rule when `ws_id` itself is windowed or named — an empty
-        // unnamed workspace is already a valid bookend, so the entire repair
-        // block short-circuits in that case (matches the active-side
-        // `has_windows_or_name` check that gates the inline mint and prevents
-        // the dormant fixup from over-minting on empty-unnamed Adds).
+        // view must end in an empty unnamed workspace. The insert above keeps
+        // an existing trailing-empty bookend at the tail, so the only rule a
+        // windowed-or-named `ws_id` can still break is EWAF's leading empty —
+        // when the target view held a single empty entry (doubling as both
+        // bookends) and `ws_id` landed at position 0. Dormant views are
+        // repaired by `dormant_view_bookend_fixup`'s leading-empty branch; the
+        // active view needs the leading mint inline (the fixup skips the
+        // active activity). An empty unnamed `ws_id` is itself a valid bookend
+        // and the entire repair block short-circuits.
         //
         // Silent-skip case: when `ws_id` is bound to an output that no live
         // monitor matches (the workspace lives only in the disconnected pool),
@@ -6944,26 +7009,25 @@ impl<W: LayoutElement> Layout<W> {
                 if let Some(mon_idx) = mon_idx_opt {
                     let active_id = self.activities.active_id();
                     if activity_id == active_id {
-                        let needs_mint = self
-                            .activities
-                            .active()
-                            .views()
-                            .get(&out_id)
-                            .expect(
-                                "active activity must hold a view on every connected \
-                                 output (per-activity bookend invariant)",
-                            )
-                            .ids()
-                            .last()
-                            .is_some_and(|last_id| {
-                                self.workspaces
-                                    .get(last_id)
-                                    .expect("view id must be a key in the pool")
-                                    .has_windows_or_name()
-                            });
-                        if needs_mint {
+                        let ewaf = self.monitors[mon_idx]
+                            .options
+                            .layout
+                            .empty_workspace_above_first;
+                        let needs_leading_mint = ewaf
+                            && self
+                                .activities
+                                .active()
+                                .views()
+                                .get(&out_id)
+                                .expect(
+                                    "active activity must hold a view on every connected \
+                                     output (per-activity bookend invariant)",
+                                )
+                                .position_of(ws_id)
+                                == Some(0);
+                        if needs_leading_mint {
                             let (monitors, pool, view) = self.monitors_pool_view_mut(&out_id);
-                            Self::add_workspace_bottom_on(monitors, pool, view, mon_idx, active_id);
+                            Self::add_workspace_top_on(monitors, pool, view, mon_idx, active_id);
                         }
                     }
                     self.dormant_view_bookend_fixup(ws_id, mon_idx);
@@ -7129,9 +7193,10 @@ impl<W: LayoutElement> Layout<W> {
     /// `DoActionError::SetWorkspaceActivities(SetWorkspaceActivitiesError::WorkspaceNotFound)`.
     ///
     /// Semantics:
-    /// - Symmetric diff: `to_remove = old ∖ new`, `to_add = new ∖ old`. Adds append to the target
-    ///   activity's view (position-invariant); removes call the same single-entry drop /
-    ///   `remove_at` patch as [`Self::remove_workspace_from_activity`].
+    /// - Symmetric diff: `to_remove = old ∖ new`, `to_add = new ∖ old`. Adds insert above the
+    ///   trailing-empty bookend in the target activity's view (or append when the workspace is
+    ///   itself empty-unnamed); removes call the same single-entry drop / `remove_at` patch as
+    ///   [`Self::remove_workspace_from_activity`].
     /// - No-op when `new == old` — returns without mutating any state.
     /// - If the active activity id is in the symmetric diff AND any monitor has a
     ///   `WorkspaceSwitch::Animation`, the animation is snapped on every monitor before patching (
@@ -7258,11 +7323,13 @@ impl<W: LayoutElement> Layout<W> {
                 }
             }
 
-            // Adds: append to existing views (position-invariant). Views
-            // are not fabricated — a dormant activity without a view for
-            // the output gets its view rebuilt lazily on the next switch
-            //. Defensive `contains` guard mirrors
-            // `add_workspace_to_activity`.
+            // Adds: insert into existing views, keeping a trailing-empty
+            // bookend at the tail. Views are not fabricated — a dormant
+            // activity without a view for the output gets its view rebuilt
+            // lazily on the next switch. Defensive `contains` guard mirrors
+            // `add_workspace_to_activity`. No in-flight switch shift is
+            // needed even when the active view is patched: any switch was
+            // snapped above (the active activity is in the diff).
             for act_id in &to_add {
                 let activity = self
                     .activities
@@ -7270,8 +7337,7 @@ impl<W: LayoutElement> Layout<W> {
                     .expect("resolve_activity_ref returned a live id");
                 if let Some(view) = activity.views_mut().get_mut(out_id) {
                     if !view.ids().contains(&ws_id) {
-                        let pos = view.len();
-                        view.insert(pos, ws_id);
+                        Self::view_insert_above_trailing_bookend(&self.workspaces, view, ws_id);
                     }
                 }
             }
@@ -7283,17 +7349,16 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         // Per-activity bookend invariant: every (activity, connected output)
-        // view must end in an empty unnamed workspace. The Add loop above may
-        // have placed `ws_id` at the trailing slot of any view that gained it
-        // — but only a windowed-or-named `ws_id` actually breaks the rule. An
-        // empty unnamed workspace is itself a valid bookend, so the entire
-        // repair block short-circuits in that case (prevents
-        // `dormant_view_bookend_fixup` from over-minting on empty-unnamed
-        // Adds). When the workspace IS windowed/named: mint a fresh empty
-        // into the active view inline (only when the active activity was
-        // itself added — a pure dormant-only Add leaves the active view
-        // untouched) and let `dormant_view_bookend_fixup` patch every dormant
-        // view that holds `ws_id` at a bookend slot.
+        // view must end in an empty unnamed workspace. The Add loop above
+        // keeps an existing trailing-empty bookend at the tail, so the only
+        // rule a windowed-or-named `ws_id` can still break is EWAF's leading
+        // empty — when a target view held a single empty entry (doubling as
+        // both bookends) and `ws_id` landed at position 0. Dormant views are
+        // repaired by `dormant_view_bookend_fixup`'s leading-empty branch; the
+        // active view needs the leading mint inline (only when the active
+        // activity was itself added — the fixup skips the active activity).
+        // An empty unnamed `ws_id` is itself a valid bookend and the entire
+        // repair block short-circuits.
         //
         // Silent-skip case: when `ws_id` is bound to an output that no live
         // monitor matches (the workspace lives only in the disconnected pool),
@@ -7310,26 +7375,25 @@ impl<W: LayoutElement> Layout<W> {
             if let Some(mon_idx) = bookend_mon_idx {
                 let out_id = out_id.as_ref().expect("bookend_mon_idx implies out_id");
                 if to_add.contains(&active_id) {
-                    let needs_mint = self
-                        .activities
-                        .active()
-                        .views()
-                        .get(out_id)
-                        .expect(
-                            "active activity must hold a view on every connected output \
-                             (per-activity bookend invariant)",
-                        )
-                        .ids()
-                        .last()
-                        .is_some_and(|last_id| {
-                            self.workspaces
-                                .get(last_id)
-                                .expect("view id must be a key in the pool")
-                                .has_windows_or_name()
-                        });
-                    if needs_mint {
+                    let ewaf = self.monitors[mon_idx]
+                        .options
+                        .layout
+                        .empty_workspace_above_first;
+                    let needs_leading_mint = ewaf
+                        && self
+                            .activities
+                            .active()
+                            .views()
+                            .get(out_id)
+                            .expect(
+                                "active activity must hold a view on every connected output \
+                                 (per-activity bookend invariant)",
+                            )
+                            .position_of(ws_id)
+                            == Some(0);
+                    if needs_leading_mint {
                         let (monitors, pool, view) = self.monitors_pool_view_mut(out_id);
-                        Self::add_workspace_bottom_on(monitors, pool, view, mon_idx, active_id);
+                        Self::add_workspace_top_on(monitors, pool, view, mon_idx, active_id);
                     }
                 }
                 self.dormant_view_bookend_fixup(ws_id, mon_idx);
@@ -10110,12 +10174,13 @@ impl<W: LayoutElement> Layout<W> {
         //
         // Source side: single-entry drop vs. `remove_at` to preserve
         // `WorkspaceView::active`/`previous` — mirrors `set_workspace_activities`.
-        // Target side diverges: inserts at `len-1` to preserve the
-        // trailing-empty bookend that `ensure_view_for` materialized
-        // (`set_workspace_activities` appends at `len` because its trailing
-        // `ensure_all_activity_views` repairs the bookend afterward). Dormant
-        // activities lacking a target-side view are left absent —
-        // `ensure_view_for` materializes lazily on the next switch.
+        // Target side: insert at `len-1` to preserve the trailing-empty bookend
+        // that `ensure_view_for` materialized — the windowed-workspace path of
+        // `view_insert_above_trailing_bookend`, with the gating implicit here via
+        // invariants (the moved workspace is windowed/named; `ensure_view_for`
+        // guarantees an empty-unnamed tail). Dormant activities lacking a
+        // target-side view are left absent — `ensure_view_for` materializes
+        // lazily on the next switch.
         let source_out_id = self.monitors[current_idx].output_id();
         let target_out_id = self.monitors[target_idx].output_id();
         let active_id = self.activities.active_id();

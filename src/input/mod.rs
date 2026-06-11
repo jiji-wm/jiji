@@ -2245,9 +2245,9 @@ impl State {
                 }
             }
             Action::AddWorkspaceToActivity(ws_ref, activity_ref) => {
-                // Add is position-invariant on the view, so it is safe during
-                // both workspace-switch animations AND gestures.
-                // No hard-block gate here.
+                // Add is safe un-gated: `add_workspace_to_activity` shifts any
+                // in-flight workspace-switch (animation or gesture) when it patches
+                // the active view, so no hard-block gate is needed here.
                 let arg_act: ActivityReferenceArg = activity_ref.into();
                 let arg_ws_log = ws_ref.clone();
                 match self.niri.layout.add_workspace_to_activity(ws_ref, &arg_act) {
