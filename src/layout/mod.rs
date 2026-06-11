@@ -3605,6 +3605,18 @@ impl<W: LayoutElement> Layout<W> {
 
             if !mon.workspace_at(pool, view, idx).has_windows_or_name() {
                 let id = view.ids()[idx];
+                // A shared workspace is pinned in every member activity's view; pruning it
+                // here while destroy_workspaces_cross_activity skips the pool removal for
+                // shared ids would orphan it (in the pool but eventually in no view). Skip
+                // it — the same policy as remove_window.
+                if !Self::workspace_is_safe_to_reclaim(pool, id) {
+                    let n = pool.get(&id).map_or(0, |ws| ws.activities().len());
+                    trace!(
+                        "clean_up_workspaces_on: workspace {id:?} emptied but pinned \
+                         (shared across {n} activities)",
+                    );
+                    continue;
+                }
                 view.remove_at(idx);
                 pruned.push(id);
             }
@@ -3616,8 +3628,18 @@ impl<W: LayoutElement> Layout<W> {
             assert!(!mon.workspace_at(pool, view, 0).has_windows_or_name());
             assert!(!mon.workspace_at(pool, view, 1).has_windows_or_name());
             let id = view.ids()[1];
-            view.remove_at(1);
-            pruned.push(id);
+            // A shared second entry is pinned by another activity's view; the length-2 view
+            // is the honest minimal EWAF shape when the trailing slot is shared.
+            if !Self::workspace_is_safe_to_reclaim(pool, id) {
+                let n = pool.get(&id).map_or(0, |ws| ws.activities().len());
+                trace!(
+                    "clean_up_workspaces_on: workspace {id:?} emptied but pinned \
+                     (shared across {n} activities, EWAF trailing slot)",
+                );
+            } else {
+                view.remove_at(1);
+                pruned.push(id);
+            }
         }
 
         pruned

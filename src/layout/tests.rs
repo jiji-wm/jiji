@@ -6941,6 +6941,104 @@ fn remove_window_culls_exclusive_empty_middle_from_active_view() {
 }
 
 #[test]
+fn clean_up_workspaces_on_does_not_reclaim_shared_empty_middle() {
+    // Regression: clean_up_workspaces_on ran on workspace-switch completion and pruned
+    // shared empty workspaces from the active view, patching only that view while
+    // destroy_workspaces_cross_activity skipped the pool removal (shared-id guard).
+    // The net effect was a view/pool split: the workspace stayed in the pool but was
+    // gone from both activities' views — the pool==union-of-views assert fires in
+    // debug builds, and in release the workspace leaks.
+    //
+    // Share workspace → close last window → switch_workspace + CompleteAnimations
+    // (triggers clean_up_workspaces_on via advance_animations) → verify.
+    //
+    // Construct view [W0(win1, active=0), W1(win2), E_trail] by adding win1, switching
+    // to the trailing slot, adding win2, then refocusing W0.
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ]);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let trailing_id = *layout
+        .active_view(&mon_out)
+        .ids()
+        .last()
+        .expect("view has trailing bookend");
+    check_ops_on_layout(&mut layout, [Op::FocusWorkspace(1), Op::CompleteAnimations]);
+    layout.add_window(
+        TestWindow::new(TestWindowParams::new(2)),
+        AddWindowTarget::Workspace(trailing_id),
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::No,
+    );
+    check_ops_on_layout(&mut layout, [Op::FocusWorkspace(0), Op::CompleteAnimations]);
+
+    let ids = layout.active_view(&mon_out).ids().to_vec();
+    assert!(ids.len() >= 3, "precondition: view has at least 3 entries");
+    assert_eq!(
+        layout.active_view(&mon_out).active_position(),
+        0,
+        "precondition: W0 is active",
+    );
+    let w_shared = ids[1];
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(w_shared.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+    layout.verify_invariants();
+
+    // Close the window on the shared workspace.
+    let removed = layout.remove_window(&2usize, Transaction::new());
+    assert!(removed.is_some(), "win2 must be reaped");
+    assert!(
+        layout.workspaces.contains_key(&w_shared),
+        "precondition: shared workspace must still be in pool after remove_window",
+    );
+
+    // Trigger clean_up_workspaces_on via workspace switch + animation completion.
+    // Without the guard, clean_up_workspaces_on would prune w_shared from the view,
+    // hand it to destroy_workspaces_cross_activity (which skips the pool removal),
+    // leaving the pool and views inconsistent (pool==union-of-views assert fires).
+    check_ops_on_layout(&mut layout, [Op::FocusWorkspace(0), Op::CompleteAnimations]);
+
+    assert!(
+        layout.workspaces.contains_key(&w_shared),
+        "shared workspace must survive clean_up_workspaces_on after workspace switch",
+    );
+    assert!(
+        layout.active_view(&mon_out).position_of(w_shared).is_some(),
+        "shared workspace must remain in alpha's view after workspace switch",
+    );
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .position_of(w_shared)
+            .is_some(),
+        "beta's view must still reference the shared workspace after workspace switch",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
 fn remove_window_from_dormant_ewaf_keeps_len3_view() {
     // EWAF boundary: reclaiming an empty middle entry must not leave a length-2 view
     // (EWAF requires 1 or 3+). Build a dormant 3-entry view [leading, window_ws, trailing]
