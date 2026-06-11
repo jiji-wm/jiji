@@ -6682,6 +6682,265 @@ fn remove_window_from_shared_dormant_workspace_does_not_reclaim() {
 }
 
 #[test]
+fn remove_window_from_shared_active_view_workspace_does_not_reclaim() {
+    // Active-view twin of the dormant-arm shared guard: emptying a shared workspace
+    // that sits non-active, non-last in the ACTIVE activity's view must not reclaim
+    // it from the pool. Reclaiming would leave the other activity's view referencing
+    // a dead pool key, and the next switch into that activity panics at the
+    // "workspace id must be a key in the pool" expect on first refresh.
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ]);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    // Active view is [W0(win1, active), W_trailing]. Land win2 on the trailing
+    // bookend without activating it: [W0(win1, active), W_shared(win2), fresh].
+    let w_shared = layout
+        .active_view(&mon_out)
+        .ids()
+        .last()
+        .copied()
+        .expect("alpha view has trailing bookend");
+    let win2 = 2usize;
+    let win = TestWindow::new(TestWindowParams::new(win2));
+    layout.add_window(
+        win,
+        AddWindowTarget::Workspace(w_shared),
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::No,
+    );
+    assert_eq!(
+        layout.active_view(&mon_out).position_of(w_shared),
+        Some(1),
+        "precondition: w_shared is a middle entry of alpha's view",
+    );
+    assert_eq!(
+        layout.active_view(&mon_out).active_position(),
+        0,
+        "precondition: the windowed first workspace stays active",
+    );
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(w_shared.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+    layout.verify_invariants();
+
+    let removed = layout.remove_window(&win2, Transaction::new());
+    assert!(removed.is_some(), "the shared tile must be reaped");
+    assert!(
+        layout.workspaces.contains_key(&w_shared),
+        "a workspace shared by >1 activity must not be reclaimed when emptied",
+    );
+    assert!(
+        layout.active_view(&mon_out).position_of(w_shared).is_some(),
+        "the shared workspace stays pinned in alpha's view as an empty middle",
+    );
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .position_of(w_shared)
+            .is_some(),
+        "beta's view must still reference the shared workspace",
+    );
+    layout.verify_invariants();
+
+    // The crash scenario: switching into the other activity must survive.
+    layout.switch_activity(beta);
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_window_under_ewaf_does_not_reclaim_shared_trailing() {
+    // EWAF flavor of the shared guard: after the cull leaves the active view as
+    // [leading_empty, shared_empty], the all-empty special case must not drop the
+    // shared trailing entry from the pool. The resulting length-2 view is the
+    // honest minimal EWAF shape when the trailing entry is pinned by another
+    // activity.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut layout = check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::FocusWorkspace(0),
+            Op::CompleteAnimations,
+        ],
+    );
+    let mon_out = layout.monitors[0].output_id();
+
+    // EWAF active view: [leading(active), W(win1), trailing].
+    let ids = layout.active_view(&mon_out).ids().to_vec();
+    assert_eq!(
+        ids.len(),
+        3,
+        "precondition: EWAF view is [leading, windowed, trailing]"
+    );
+    assert_eq!(
+        layout.active_view(&mon_out).active_position(),
+        0,
+        "precondition: leading bookend is focused",
+    );
+    let w_trailing = ids[2];
+
+    // Share the trailing bookend into beta by hand (membership insert + a manually
+    // seeded dormant view), mirroring the dormant EWAF fixture.
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    let beta_lead = {
+        let ws = Workspace::new(
+            &layout.monitors[0].output,
+            HashSet::from([beta]),
+            layout.clock.clone(),
+            layout.monitors[0].options.clone(),
+        );
+        let id = ws.id();
+        assert!(
+            layout.workspaces.insert(id, ws).is_none(),
+            "fresh id must be unique",
+        );
+        id
+    };
+    layout
+        .workspaces
+        .get_mut(&w_trailing)
+        .expect("trailing in pool")
+        .activities
+        .insert(beta);
+    // [beta_lead, w_trailing]: length 2 is legal under EWAF because the shared
+    // trailing entry is pinned and doubles as the trailing bookend.
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![beta_lead, w_trailing], 0),
+    );
+    layout.verify_invariants();
+
+    let removed = layout.remove_window(&1usize, Transaction::new());
+    assert!(removed.is_some(), "the windowed tile must be reaped");
+    assert!(
+        layout.workspaces.contains_key(&w_trailing),
+        "a shared trailing bookend must not be reclaimed by the all-empty special case",
+    );
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .position_of(w_trailing)
+            .is_some(),
+        "beta's view must still reference the shared workspace",
+    );
+    layout.verify_invariants();
+
+    layout.switch_activity(beta);
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_window_culls_exclusive_empty_middle_from_active_view() {
+    // The shared-workspace guard must not become always-false: an exclusive empty
+    // non-active middle entry must still be reclaimed by remove_window. Regression
+    // pin so a mistaken "always skip" never silently passes.
+    //
+    // Construct view [W0(win1, active=0), W1(win2), E_trail] by adding win1, then
+    // switching focus to the trailing bookend and adding win2 there (which shifts
+    // active to that workspace and appends a new trailing bookend).
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ]);
+    let mon_out = layout.monitors[0].output_id();
+
+    // View is now [W0(win1, active=0), E_trail]. Switch to the trailing slot and add win2.
+    let trailing_id = *layout
+        .active_view(&mon_out)
+        .ids()
+        .last()
+        .expect("view has trailing bookend");
+    check_ops_on_layout(&mut layout, [Op::FocusWorkspace(1), Op::CompleteAnimations]);
+    layout.add_window(
+        TestWindow::new(TestWindowParams::new(2)),
+        AddWindowTarget::Workspace(trailing_id),
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::No,
+    );
+
+    // View is now [W0(win1), W1(win2, was trailing), E_trail_new]. Focus W0.
+    check_ops_on_layout(&mut layout, [Op::FocusWorkspace(0), Op::CompleteAnimations]);
+
+    let ids_now = layout.active_view(&mon_out).ids().to_vec();
+    assert!(
+        ids_now.len() >= 3,
+        "precondition: view has at least 3 entries"
+    );
+    let w1_id = ids_now[1];
+    assert_eq!(
+        layout.active_view(&mon_out).active_position(),
+        0,
+        "precondition: W0 is active",
+    );
+    assert!(
+        layout
+            .workspaces
+            .get(&w1_id)
+            .expect("w1 in pool")
+            .activities()
+            .len()
+            == 1,
+        "precondition: W1 is exclusive to one activity (not shared)",
+    );
+
+    // Remove win2 (the window on W1). W1 becomes empty + unnamed + non-active + middle.
+    // workspace_is_safe_to_reclaim must return true (exclusive) so the cull fires.
+    let removed = layout.remove_window(&2usize, Transaction::new());
+    assert!(removed.is_some(), "win2 must be reaped");
+    assert!(
+        !layout.workspaces.contains_key(&w1_id),
+        "an exclusive empty non-active middle workspace must be culled from the pool",
+    );
+    assert!(
+        !layout.active_view(&mon_out).ids().contains(&w1_id),
+        "an exclusive empty non-active middle workspace must be removed from the view",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
 fn remove_window_from_dormant_ewaf_keeps_len3_view() {
     // EWAF boundary: reclaiming an empty middle entry must not leave a length-2 view
     // (EWAF requires 1 or 3+). Build a dormant 3-entry view [leading, window_ws, trailing]
@@ -11216,17 +11475,36 @@ fn workspace_is_safe_to_reclaim_false_for_shared_membership() {
     // without a matching Beta view entry.
 }
 
-// Defensive branch: an id not present in the pool returns `false`. The
-// authoritative panic for genuinely dead ids lives in
-// `destroy_workspaces_cross_activity`'s `pool.remove.is_some()` assert;
-// returning `false` here simply keeps the predicate total.
+// Absent-id debug path: in debug builds the debug_assert! fires to surface
+// caller bugs early. In release builds the predicate stays total (returns
+// false). Two flavours below cover each case.
 #[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "absent from the pool (caller bug)")]
+fn workspace_is_safe_to_reclaim_panics_for_absent_id_in_debug() {
+    let layout = check_ops([Op::AddOutput(1)]);
+
+    let absent_id = Workspace::<TestWindow>::new_no_outputs(
+        HashSet::from([layout.active_activity_id()]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    )
+    .id();
+    assert!(
+        !layout.workspaces.contains_key(&absent_id),
+        "precondition: absent_id must not be in the pool",
+    );
+
+    // Must panic in debug builds — debug_assert! fires in the absent branch.
+    let _ = Layout::<TestWindow>::workspace_is_safe_to_reclaim(&layout.workspaces, absent_id);
+}
+
+// Release-only twin: no panic, returns false.
+#[test]
+#[cfg(not(debug_assertions))]
 fn workspace_is_safe_to_reclaim_false_for_absent_id() {
     let layout = check_ops([Op::AddOutput(1)]);
 
-    // Manufacture an id that cannot possibly be in the pool by allocating a
-    // throwaway workspace and dropping it — its `WorkspaceId` is unique and
-    // never inserted.
     let absent_id = Workspace::<TestWindow>::new_no_outputs(
         HashSet::from([layout.active_activity_id()]),
         layout.clock.clone(),
@@ -11240,7 +11518,7 @@ fn workspace_is_safe_to_reclaim_false_for_absent_id() {
 
     assert!(
         !Layout::<TestWindow>::workspace_is_safe_to_reclaim(&layout.workspaces, absent_id),
-        "id absent from pool must return false (defensive branch)",
+        "id absent from pool must return false in release (total predicate)",
     );
 }
 
@@ -18504,8 +18782,15 @@ fn partial_disconnect_dormant_walk_handles_multi_activity_membership() {
     // Patch the pool entry's activities set to include both alpha and beta.
     {
         let ws = layout.workspaces.get_mut(&shared_ws_id).expect("pool key");
-        ws.activities.insert(alpha);
-        ws.activities.insert(beta);
+        // alpha is already a member (workspace was created while alpha was active).
+        assert!(
+            !ws.activities.insert(alpha),
+            "alpha must already be a member of shared_ws_id",
+        );
+        assert!(
+            ws.activities.insert(beta),
+            "beta must not already be a member of shared_ws_id",
+        );
     }
 
     // Verify the invariants still hold with our surgical splice.

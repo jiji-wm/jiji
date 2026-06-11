@@ -2262,17 +2262,31 @@ impl<W: LayoutElement> Layout<W> {
                     .expect("workspace id must be a key in the pool")
                     .has_windows_or_name();
 
-                // Clean up empty workspaces that are not active and not last.
+                // Clean up empty workspaces that are not active and not last. A workspace
+                // shared across activities is pinned: reclaiming it here would leave every
+                // other member activity's view referencing a dead pool key, panicking on
+                // the next switch into one of them. It stays as an empty middle instead.
                 if ws_empty
                     && idx != active_pos
                     && idx != view_len - 1
                     && self.monitors[mon_idx].workspace_switch.is_none()
                 {
-                    self.active_view_mut(&mon_out).remove_at(idx);
-                    assert!(
-                        self.workspaces.remove(&id).is_some(),
-                        "view id must be a key in the pool",
-                    );
+                    if Self::workspace_is_safe_to_reclaim(&self.workspaces, id) {
+                        self.active_view_mut(&mon_out).remove_at(idx);
+                        assert!(
+                            self.workspaces.remove(&id).is_some(),
+                            "view id must be a key in the pool",
+                        );
+                    } else {
+                        let n = self
+                            .workspaces
+                            .get(&id)
+                            .map_or(0, |ws| ws.activities().len());
+                        trace!(
+                            "remove_window: workspace {id:?} emptied but pinned \
+                             (shared across {n} activities)",
+                        );
+                    }
                 }
 
                 // Special case handling when empty_workspace_above_first is set and all
@@ -2290,11 +2304,25 @@ impl<W: LayoutElement> Layout<W> {
                     assert!(!mon.workspace_at(pool, view, 0).has_windows_or_name());
                     assert!(!mon.workspace_at(pool, view, 1).has_windows_or_name());
                     let drop_id = self.active_view(&mon_out).ids()[1];
-                    self.active_view_mut(&mon_out).remove_at(1);
-                    assert!(
-                        self.workspaces.remove(&drop_id).is_some(),
-                        "view id must be a key in the pool",
-                    );
+                    // A shared second entry is pinned by another activity's view; the
+                    // length-2 view is then the honest minimal shape (the shared empty
+                    // doubles as the trailing bookend).
+                    if Self::workspace_is_safe_to_reclaim(&self.workspaces, drop_id) {
+                        self.active_view_mut(&mon_out).remove_at(1);
+                        assert!(
+                            self.workspaces.remove(&drop_id).is_some(),
+                            "view id must be a key in the pool",
+                        );
+                    } else {
+                        let n = self
+                            .workspaces
+                            .get(&drop_id)
+                            .map_or(0, |ws| ws.activities().len());
+                        trace!(
+                            "remove_window: workspace {drop_id:?} emptied but pinned \
+                             (shared across {n} activities, EWAF trailing slot)",
+                        );
+                    }
                 }
                 return Some(removed);
             }
@@ -3601,31 +3629,33 @@ impl<W: LayoutElement> Layout<W> {
     /// whose workspace is exclusive to a single activity.
     ///
     /// Returns `false` in two cases:
-    /// - `ws_id` is absent from the pool. Defensive: the downstream `pool.remove` assert inside
-    ///   `destroy_workspaces_cross_activity` is the authoritative panic for genuinely dead ids;
-    ///   returning `false` here just keeps the predicate total.
+    /// - `ws_id` is absent from the pool. Caller bug; returning `false` keeps the predicate total
+    ///   so callers that gate the whole reclaim block on this predicate (rather than funneling
+    ///   through `destroy_workspaces_cross_activity`) don't lose the authoritative panic. A
+    ///   `debug_assert!` fires in debug builds to surface caller bugs early.
     /// - `workspace.activities().len() > 1`. Shared membership — another activity still references
     ///   the workspace, so reclaim must be skipped per the contract: "a workspace with `activities
     ///   = {A, B}` that becomes empty is not removed".
     ///
     /// The `len() == 1` form is a deliberate narrowing. The full
     /// rule is "empty AND every activity in its `activities` set has
-    /// another, non-empty workspace to fall back to on the same output"; since
-    /// no shared workspace is constructible yet, `len() == 1` coincides with
-    /// the membership-exclusivity portion of that predicate; callers separately
-    /// enforce the emptiness precondition. Tightening to the full
-    /// per-(activity, output) fallback check is deferred.
+    /// another, non-empty workspace to fall back to on the same output";
+    /// `len() == 1` checks only the membership-exclusivity portion of that
+    /// predicate; callers separately enforce the emptiness precondition.
+    /// Tightening to the full per-(activity, output) fallback check is
+    /// deferred.
     ///
-    /// `pub(crate)` so action handlers (`AddWorkspaceToActivity`,
-    /// `SetWorkspaceActivities`, sticky mutators) can reuse the predicate
-    /// directly rather than re-encoding the rule.
-    // Suppress the premature dead_code lint (call sites not yet wired up).
-    #[allow(dead_code)]
+    /// `pub(crate)` so `clean_up_workspaces_on` and other reclaim sites can
+    /// share the policy rather than re-encoding the rule.
     pub(crate) fn workspace_is_safe_to_reclaim(
         pool: &HashMap<WorkspaceId, Workspace<W>>,
         ws_id: WorkspaceId,
     ) -> bool {
         let Some(ws) = pool.get(&ws_id) else {
+            debug_assert!(
+                pool.contains_key(&ws_id),
+                "workspace_is_safe_to_reclaim: ws_id {ws_id:?} is absent from the pool (caller bug)",
+            );
             return false;
         };
         ws.activities().len() == 1
@@ -3644,8 +3674,8 @@ impl<W: LayoutElement> Layout<W> {
     /// per-activity retain sweep and the `pool.remove` assert are bypassed.
     /// Skipping rather than panicking keeps a batched destroy recoverable when
     /// a caller passes a shared id; the `warn!` ensures the skip is not silent.
-    /// The guard is defensive — no caller can yet construct a shared
-    /// workspace — but the skip path is wired up before it can fire.
+    /// Shared workspaces are constructible (`set_workspace_activities`, sticky
+    /// expansion), so the skip is load-bearing, not defensive.
     ///
     /// Absent ids (not present in the pool at all) are a caller bug; they are
     /// not skipped here and fall through to the `pool.remove` assert, which is

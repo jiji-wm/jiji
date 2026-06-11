@@ -1886,9 +1886,10 @@ impl<W: LayoutElement> Monitor<W> {
         let active_view = views[0];
 
         // Per-view assertions: every activity's view for this monitor's output must hold the
-        // structural bookend / pool-membership / "1 or 3+" rules. The in-flight switch animation
-        // bounds-check looks at the active view only — `WorkspaceSwitch` lives on the monitor and
-        // points at positions inside the *active* activity's view.
+        // structural bookend / pool-membership / length rules (1, or 3+, or 2 when the second
+        // entry is a shared workspace pinned by another activity under EWAF). The in-flight switch
+        // animation bounds-check looks at the active view only — `WorkspaceSwitch` lives on the
+        // monitor and points at positions inside the *active* activity's view.
         for (vi, view) in views.iter().enumerate() {
             for (i, id) in view.ids().iter().enumerate() {
                 assert!(
@@ -1928,9 +1929,13 @@ impl<W: LayoutElement> Monitor<W> {
                 .skip(1)
             {
                 if idx != active_view.active_position() {
+                    let workspace = ws(*id);
+                    // A shared workspace is pinned in every member activity's view, so an
+                    // empty unnamed middle entry is its legal steady state.
                     assert!(
-                        ws(*id).has_windows_or_name(),
-                        "non-active workspace can't be empty and unnamed except the last one"
+                        workspace.has_windows_or_name() || workspace.activities().len() > 1,
+                        "non-active workspace can't be empty and unnamed except the last one \
+                         or a shared (pinned) workspace"
                     );
                 }
             }
@@ -1981,7 +1986,8 @@ impl<W: LayoutElement> Monitor<W> {
 }
 
 /// Per-view bookend invariant: trailing workspace empty + unnamed, and (under EWAF) leading
-/// workspace empty + unnamed plus the "1 or 3+ length" rule. Shared between
+/// workspace empty + unnamed plus the length rule (1, or 3+, or 2 when the second entry is a
+/// shared workspace pinned by another activity). Shared between
 /// `Monitor::verify_invariants` (called per activity-view of a connected monitor) and
 /// `Layout::verify_invariants` (called for views on outputs that are no longer connected).
 ///
@@ -2027,9 +2033,12 @@ pub(super) fn assert_view_bookends<W: LayoutElement>(
             ws(first_id).name.is_none(),
             "first workspace must be unnamed when empty_workspace_above_first is set{ctx_str}",
         );
+        // A shared second entry is pinned by another activity's view and doubles as
+        // the trailing bookend, making length 2 the honest minimal shape.
         assert!(
-            view.len() != 2,
-            "if empty_workspace_above_first is set there must be just 1 or 3+ workspaces{ctx_str}",
+            view.len() != 2 || ws(view.ids()[1]).activities().len() > 1,
+            "if empty_workspace_above_first is set there must be just 1 or 3+ workspaces, \
+             unless a shared workspace pins the second entry{ctx_str}",
         );
     }
 }
