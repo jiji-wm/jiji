@@ -12306,6 +12306,13 @@ fn windows_all_interactive_move_first() {
     check_ops_on_layout(
         &mut layout,
         [
+            // Settle the activity-switch slide armed by the final `switch_activity`
+            // in the seed helper. While that animation runs, the seed activity's
+            // workspaces render off-screen and are culled from
+            // `workspaces_with_render_geo`, so `interactive_move_begin` cannot find
+            // the target window and silently returns `false` — leaving the move
+            // unarmed and `windows_all()` ordering at the mercy of HashMap iteration.
+            Op::CompleteAnimations,
             Op::InteractiveMoveBegin {
                 window: 1,
                 output_idx: 1,
@@ -12323,6 +12330,18 @@ fn windows_all_interactive_move_first() {
         ],
     );
 
+    // Guard: the move must actually reach `Moving`, otherwise this test silently
+    // degrades into a coin-flip on HashMap iteration order. `interactive_move_begin`
+    // returns `false` (no panic) if it can't locate the window, so without this
+    // assertion a regression that re-breaks arming would just re-flake.
+    assert!(
+        matches!(
+            layout.interactive_move,
+            Some(InteractiveMoveState::Moving(_))
+        ),
+        "interactive move must be armed (Moving) for this test to be meaningful",
+    );
+
     // windows_all() — first element must be the moving window.
     let first_all = layout
         .windows_all()
@@ -12332,6 +12351,19 @@ fn windows_all_interactive_move_first() {
     assert_eq!(
         first_all, 1,
         "windows_all must yield the interactive-move window first",
+    );
+
+    // The `rest` half of the contract: the non-moving window must still appear,
+    // exactly once, via the pool chain. Transitioning to `Moving` evicts window 1
+    // from the pool, so `rest` yields only window 2 — pinning the total at 2
+    // guards against both a dropped `rest` and a window yielded twice (prepend +
+    // a stale pool entry). With one window in `rest`, HashMap order is moot, which
+    // is why a two-window seed is sufficient to make ordering deterministic.
+    let all_ids: Vec<usize> = layout.windows_all().map(|(_, w)| *w.id()).collect();
+    assert_eq!(
+        all_ids,
+        vec![1, 2],
+        "windows_all must yield the moving window then the pooled window, each once",
     );
 
     // with_windows_all — first callback arg must be the moving window.
