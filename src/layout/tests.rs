@@ -7340,6 +7340,61 @@ fn add_column_by_idx_into_shared_leading_bookend_under_ewaf_prepends_dormant_boo
 }
 
 #[test]
+fn repair_view_pool_coherence_prunes_dangling_dormant_view_reference() {
+    // A cull path that removes a workspace from the pool but leaves its id in a dormant
+    // activity's view is invisible to release builds (the pool-keys-equal-union assertion is
+    // debug-only) and detonates on the next view walk. `repair_view_pool_coherence` is the
+    // release-time safety net: it prunes the dangling reference and restores coherence.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let out_id = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // Hand-roll a dormant beta view `[a, b, c]` of empties on the connected output, with `a`
+    // active. All-empty middles are legal in a dormant view (the "no empty middle" rule is
+    // active-view-only), so the post-prune `[a, c]` shape is invariant-clean.
+    let a = test_mint_empty_for(&mut layout, 0, beta);
+    let b = test_mint_empty_for(&mut layout, 0, beta);
+    let c = test_mint_empty_for(&mut layout, 0, beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        out_id.clone(),
+        WorkspaceView::new(vec![a, b, c], 0),
+    );
+    layout.verify_invariants();
+
+    // Simulate the desync: drop `b` (an empty unnamed middle) from the pool while beta's
+    // dormant view still references it.
+    assert!(
+        layout.workspaces.remove(&b).is_some(),
+        "b was a live pool key"
+    );
+
+    layout.repair_view_pool_coherence();
+
+    let beta_view = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&out_id)
+        .expect("beta has a view on the connected output");
+    assert_eq!(
+        beta_view.ids(),
+        &[a, c],
+        "the dangling middle reference is pruned, the live bookends remain",
+    );
+    // The pool-keys-equal-union invariant (and every other) holds again.
+    layout.verify_invariants();
+}
+
+#[test]
 fn column_add_into_shared_trailing_bookend_keeps_verify_invariants_passing() {
     // Regression pin against the existing per-view bookend assertion in
     // `Monitor::verify_invariants`. With the public-entry-point fixup wiring in place,

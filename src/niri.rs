@@ -854,6 +854,12 @@ impl State {
         // layout.refresh() since this is where these surfaces handle commits.
         self.notify_blocker_cleared();
 
+        // Heal any view/pool desync before anything walks the views. In release builds the
+        // invariant chain that would catch a dangling view id is compiled out, so a cull-path
+        // corner case (seen under a mass window teardown during OOM) would otherwise sit latent
+        // until the next view walk aborts the session.
+        self.niri.layout.repair_view_pool_coherence();
+
         // These should be called periodically, before flushing the clients.
         self.niri.popups.cleanup();
         self.refresh_popup_grab();

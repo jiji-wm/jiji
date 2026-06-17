@@ -11925,6 +11925,81 @@ impl<W: LayoutElement> Layout<W> {
             });
     }
 
+    /// Drop any reference, from an activity view or from
+    /// `disconnected_workspace_ids`, to a [`WorkspaceId`] that is no longer a key
+    /// in the pool — logging once per occurrence — and return early when the
+    /// layout is already coherent (the overwhelmingly common case, allocation-free).
+    ///
+    /// `verify_invariants` asserts that the pool keys equal the union of every
+    /// view plus the disconnected pool ("every view id must be in the pool — no
+    /// zombies"), but that chain is `#[cfg(debug_assertions)]` and compiled out of
+    /// release builds. So a desync introduced by a cull-path corner case — observed
+    /// under a mass window teardown during an out-of-memory event — sits latent in a
+    /// release session until the next view walk reaches its
+    /// `.expect("workspace id must be a key in the pool")` and aborts the whole
+    /// compositor. Pruning the dangling reference here downgrades that
+    /// session-fatal abort to a self-correcting, logged glitch and keeps the
+    /// session alive for live introspection. This contains the blast radius; it
+    /// does not close the originating desync.
+    ///
+    /// Called at the top of the refresh cycle, before any view walk. Healing the
+    /// reference means the warning fires once per occurrence rather than every
+    /// frame, with no dedup bookkeeping.
+    pub fn repair_view_pool_coherence(&mut self) {
+        let _span = tracy_client::span!("Layout::repair_view_pool_coherence");
+
+        let pool = &self.workspaces;
+        let mut stale: HashSet<WorkspaceId> = HashSet::new();
+        for activity in self.activities.iter() {
+            for view in activity.views().values() {
+                for id in view.ids() {
+                    if !pool.contains_key(id) {
+                        stale.insert(*id);
+                    }
+                }
+            }
+        }
+        for id in &self.disconnected_workspace_ids {
+            if !pool.contains_key(id) {
+                stale.insert(*id);
+            }
+        }
+
+        if stale.is_empty() {
+            return;
+        }
+
+        for ws_id in &stale {
+            warn!(
+                "view↔pool divergence: workspace {ws_id:?} is referenced by an activity \
+                 view or disconnected_workspace_ids but is absent from the workspace pool; \
+                 pruning the dangling reference. A cull path desynced the layout — without \
+                 this repair the next view walk would abort the session.",
+            );
+        }
+
+        // Mirror `destroy_workspaces_cross_activity`'s view patching: a
+        // `WorkspaceView` cannot be zero-length, so drop the whole entry when the
+        // stale id is its sole occupant; otherwise shift it out and let `remove_at`
+        // patch the view's `active` / `previous`.
+        for ws_id in &stale {
+            for activity in self.activities.iter_mut() {
+                activity.views_mut().retain(|_output_id, view| {
+                    let Some(pos) = view.position_of(*ws_id) else {
+                        return true;
+                    };
+                    if view.len() == 1 {
+                        return false;
+                    }
+                    view.remove_at(pos);
+                    true
+                });
+            }
+        }
+        self.disconnected_workspace_ids
+            .retain(|id| !stale.contains(id));
+    }
+
     pub fn refresh(&mut self, is_active: bool) {
         let _span = tracy_client::span!("Layout::refresh");
 
