@@ -1301,6 +1301,20 @@ impl State {
                     self.niri.queue_redraw(&output);
                 }
             }
+            Action::MoveViewLeft => {
+                self.niri.layout.move_view_left();
+                self.maybe_warp_cursor_to_focus();
+                self.niri.layer_shell_on_demand_focus = None;
+                // FIXME: granular
+                self.niri.queue_redraw_all();
+            }
+            Action::MoveViewRight => {
+                self.niri.layout.move_view_right();
+                self.maybe_warp_cursor_to_focus();
+                self.niri.layer_shell_on_demand_focus = None;
+                // FIXME: granular
+                self.niri.queue_redraw_all();
+            }
             Action::FocusColumnFirst => {
                 self.niri.layout.focus_column_first();
                 self.maybe_warp_cursor_to_focus();

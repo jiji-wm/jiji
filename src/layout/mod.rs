@@ -5261,6 +5261,20 @@ impl<W: LayoutElement> Layout<W> {
         workspace.focus_right();
     }
 
+    pub fn move_view_left(&mut self) {
+        let Some(workspace) = self.active_workspace_mut() else {
+            return;
+        };
+        workspace.move_view_left();
+    }
+
+    pub fn move_view_right(&mut self) {
+        let Some(workspace) = self.active_workspace_mut() else {
+            return;
+        };
+        workspace.move_view_right();
+    }
+
     pub fn focus_column_first(&mut self) {
         let Some(workspace) = self.active_workspace_mut() else {
             return;

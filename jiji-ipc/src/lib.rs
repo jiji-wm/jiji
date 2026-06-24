@@ -399,6 +399,20 @@ pub enum Action {
     FocusColumnRightOrFirst {},
     /// Focus the next column to the left, looping if at start.
     FocusColumnLeftOrLast {},
+    /// Page the viewport one screen to the left, refocusing the column that lands in the
+    /// same on-screen slot.
+    ///
+    /// Moves the view by roughly one output width and focuses the column now at the same
+    /// on-screen position as the previously focused one, so the focused window keeps its
+    /// place on screen. Does nothing if already at the start of the strip.
+    MoveViewLeft {},
+    /// Page the viewport one screen to the right, refocusing the column that lands in the
+    /// same on-screen slot.
+    ///
+    /// Moves the view by roughly one output width and focuses the column now at the same
+    /// on-screen position as the previously focused one, so the focused window keeps its
+    /// place on screen. Does nothing if already at the end of the strip.
+    MoveViewRight {},
     /// Focus a column by index.
     FocusColumn {
         /// Index of the column to focus.

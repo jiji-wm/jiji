@@ -434,10 +434,14 @@ binds {
     Mod+Shift+Down  { focus-monitor-down; }
     Mod+Shift+Up    { focus-monitor-up; }
     Mod+Shift+Right { focus-monitor-right; }
-    Mod+Shift+H     { focus-monitor-left; }
     Mod+Shift+J     { focus-monitor-down; }
     Mod+Shift+K     { focus-monitor-up; }
-    Mod+Shift+L     { focus-monitor-right; }
+
+    // Page the viewport one screen left/right, keeping the focused window in the
+    // same on-screen spot. Handy for crossing a long workspace quickly.
+    // (Monitor focus left/right remains on Mod+Shift+Left/Right above.)
+    Mod+Shift+H     { move-view-left; }
+    Mod+Shift+L     { move-view-right; }
 
     Mod+Shift+Ctrl+Left  { move-column-to-monitor-left; }
     Mod+Shift+Ctrl+Down  { move-column-to-monitor-down; }

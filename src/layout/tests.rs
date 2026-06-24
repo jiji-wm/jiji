@@ -505,6 +505,8 @@ enum Op {
     FocusColumnLast,
     FocusColumnRightOrFirst,
     FocusColumnLeftOrLast,
+    MoveViewLeft,
+    MoveViewRight,
     FocusColumn(#[proptest(strategy = "1..=5usize")] usize),
     FocusWindowOrMonitorUp(#[proptest(strategy = "1..=2u8")] u8),
     FocusWindowOrMonitorDown(#[proptest(strategy = "1..=2u8")] u8),
@@ -1145,6 +1147,8 @@ impl Op {
             Op::FocusColumnLast => layout.focus_column_last(),
             Op::FocusColumnRightOrFirst => layout.focus_column_right_or_first(),
             Op::FocusColumnLeftOrLast => layout.focus_column_left_or_last(),
+            Op::MoveViewLeft => layout.move_view_left(),
+            Op::MoveViewRight => layout.move_view_right(),
             Op::FocusColumn(index) => layout.focus_column(index),
             Op::FocusWindowOrMonitorUp(id) => {
                 let name = format!("output{id}");
@@ -3992,6 +3996,141 @@ fn unmaximize_during_fullscreen_does_not_float() {
     // Unfullscreen should return the window back to floating.
     let scrolling = layout.active_workspace().unwrap().scrolling();
     assert!(scrolling.tiles().next().is_none());
+}
+
+#[test]
+fn move_view_round_trips_preserving_focus_slot() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(4),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(5),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(6),
+        },
+        Op::FocusColumnFirst,
+    ]);
+
+    let idx = |l: &Layout<TestWindow>| {
+        l.active_workspace()
+            .unwrap()
+            .scrolling()
+            .active_column_idx()
+    };
+    let view = |l: &Layout<TestWindow>| l.active_workspace().unwrap().scrolling().target_view_pos();
+
+    let start_idx = idx(&layout);
+    let start_view = view(&layout);
+
+    check_ops_on_layout(&mut layout, [Op::MoveViewRight]);
+    // Paging right advances focus and scrolls the view to the right.
+    assert!(idx(&layout) > start_idx);
+    assert!(view(&layout) > start_view);
+
+    check_ops_on_layout(&mut layout, [Op::MoveViewLeft]);
+    // Paging back lands on the exact same column and view offset: the focused window kept
+    // its on-screen slot through both moves. A fit/center jump would not round-trip.
+    // These assertions pin reversibility/round-trip, not any specific stride, so they
+    // remain valid regardless of column widths or the default window size.
+    assert_eq!(idx(&layout), start_idx);
+    assert!(
+        (view(&layout) - start_view).abs() < 1e-6,
+        "view should round-trip, got {} vs {start_view}",
+        view(&layout),
+    );
+}
+
+#[test]
+fn move_view_single_column_is_noop() {
+    // With only one column there is no neighbour to page to in either direction.
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ]);
+
+    let idx = |l: &Layout<TestWindow>| {
+        l.active_workspace()
+            .unwrap()
+            .scrolling()
+            .active_column_idx()
+    };
+    let view = |l: &Layout<TestWindow>| l.active_workspace().unwrap().scrolling().target_view_pos();
+
+    let start_idx = idx(&layout);
+    let start_view = view(&layout);
+
+    check_ops_on_layout(&mut layout, [Op::MoveViewLeft]);
+    assert_eq!(idx(&layout), start_idx);
+    assert!((view(&layout) - start_view).abs() < 1e-6);
+
+    check_ops_on_layout(&mut layout, [Op::MoveViewRight]);
+    assert_eq!(idx(&layout), start_idx);
+    assert!((view(&layout) - start_view).abs() < 1e-6);
+}
+
+#[test]
+fn move_view_round_trips_from_mid_column() {
+    // Start on column 3 (0-based index 2) of 6 to verify round-trip holds for a
+    // non-leftmost starting position (the column-0 test doesn't cover this).
+    // Windows are 600px wide (output is 1280px, gaps default to 8px) so each page
+    // step covers almost exactly two column-widths, which makes paging right from
+    // index 2 land on index 4 and paging left from there return to index 2.
+    let wide_window = |id| Op::AddWindow {
+        params: TestWindowParams {
+            id,
+            bbox: Rectangle::from_size(Size::from((600, 200))),
+            ..TestWindowParams::new(id)
+        },
+    };
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        wide_window(1),
+        wide_window(2),
+        wide_window(3),
+        wide_window(4),
+        wide_window(5),
+        wide_window(6),
+        Op::FocusColumn(3), // 1-based → focuses 0-based index 2
+    ]);
+
+    let idx = |l: &Layout<TestWindow>| {
+        l.active_workspace()
+            .unwrap()
+            .scrolling()
+            .active_column_idx()
+    };
+    let view = |l: &Layout<TestWindow>| l.active_workspace().unwrap().scrolling().target_view_pos();
+
+    let start_idx = idx(&layout);
+    let start_view = view(&layout);
+
+    check_ops_on_layout(&mut layout, [Op::MoveViewRight]);
+    let mid_idx = idx(&layout);
+    // Confirm the page actually moved focus (non-vacuous mid-state).
+    assert!(mid_idx > start_idx, "paging right should advance focus");
+
+    check_ops_on_layout(&mut layout, [Op::MoveViewLeft]);
+    // Round-trip restores both index and view offset exactly.
+    assert_eq!(idx(&layout), start_idx);
+    assert!(
+        (view(&layout) - start_view).abs() < 1e-6,
+        "view should round-trip from mid column, got {} vs {start_view}",
+        view(&layout),
+    );
 }
 
 #[test]

@@ -1047,6 +1047,16 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    pub fn move_view_left(&mut self) -> bool {
+        // Paging the viewport only applies to the scrolling strip; the floating layer has
+        // no horizontal scroll, so there is nothing to page.
+        !self.floating_is_active.get() && self.scrolling.move_view_left()
+    }
+
+    pub fn move_view_right(&mut self) -> bool {
+        !self.floating_is_active.get() && self.scrolling.move_view_right()
+    }
+
     pub fn focus_column_first(&mut self) {
         if self.floating_is_active.get() {
             self.floating.focus_leftmost();

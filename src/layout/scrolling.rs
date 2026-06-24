@@ -1565,6 +1565,51 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         true
     }
 
+    pub fn move_view_left(&mut self) -> bool {
+        self.move_view(ScrollDirection::Left)
+    }
+
+    pub fn move_view_right(&mut self) -> bool {
+        self.move_view(ScrollDirection::Right)
+    }
+
+    /// Page the viewport by roughly one output width in `direction`, focusing the column
+    /// nearest one output width away. Preserving the view offset makes the focused window
+    /// appear to keep its on-screen slot as an emergent consequence. Returns whether the
+    /// view moved.
+    fn move_view(&mut self, direction: ScrollDirection) -> bool {
+        if self.columns.is_empty() {
+            return false;
+        }
+
+        let columns_x: Vec<f64> = self
+            .column_xs(self.data.iter().copied())
+            .take(self.columns.len())
+            .collect();
+
+        let Some(new_idx) = page_target_column(
+            direction,
+            self.working_area.size.w,
+            &columns_x,
+            self.active_column_idx,
+        ) else {
+            return false;
+        };
+
+        // Preserve the focused column's on-screen offset: reusing the current view offset
+        // in the new column's frame shifts the viewport by the distance between the old and
+        // new active column (~one output width) while the focused window stays put on screen.
+        // Anchor on the target
+        // offset so repeated presses page from where an in-flight animation is heading.
+        let view_offset = self.view_offset.target();
+        self.animate_view_offset(new_idx, view_offset);
+        self.active_column_idx = new_idx;
+        self.activate_prev_column_on_removal = None;
+        self.view_offset_to_restore = None;
+        self.interactive_resize = None;
+        true
+    }
+
     pub fn focus_column_first(&mut self) {
         self.activate_column(0);
     }
@@ -5569,6 +5614,29 @@ fn resolve_preset_size(
     }
 }
 
+/// Index of the column to focus when paging the view by one output width in `direction`.
+///
+/// `columns_x` is each column's left edge in layout space, ordered left-to-right. The
+/// target is the column nearest to one `working_width` away from the active column in
+/// `direction`. Returns `None` when there is no column on that side (already at the strip
+/// end).
+fn page_target_column(
+    direction: ScrollDirection,
+    working_width: f64,
+    columns_x: &[f64],
+    active_idx: usize,
+) -> Option<usize> {
+    let target_x = match direction {
+        ScrollDirection::Right => columns_x[active_idx] + working_width,
+        ScrollDirection::Left => columns_x[active_idx] - working_width,
+    };
+    let range = match direction {
+        ScrollDirection::Right => (active_idx + 1)..columns_x.len(),
+        ScrollDirection::Left => 0..active_idx,
+    };
+    range.min_by_key(|&idx| NotNan::new((columns_x[idx] - target_x).abs()).unwrap())
+}
+
 #[cfg(test)]
 mod tests {
     use jiji_config::FloatOrInt;
@@ -5603,5 +5671,57 @@ mod tests {
 
         let parent_area = Rectangle::from_size(Size::from((1280., 720.)));
         compute_working_area(parent_area, 1., struts);
+    }
+
+    #[test]
+    fn page_target_pages_by_one_screen() {
+        // Six half-screen columns on a 1000-wide working area: two fit per screen.
+        let columns_x = [0., 500., 1000., 1500., 2000., 2500.];
+        let width = 1000.;
+
+        // Paging right from the left slot (idx 0) and the right slot (idx 1) advances by
+        // exactly one screen — two columns — keeping the slot.
+        assert_eq!(
+            page_target_column(ScrollDirection::Right, width, &columns_x, 0),
+            Some(2)
+        );
+        assert_eq!(
+            page_target_column(ScrollDirection::Right, width, &columns_x, 1),
+            Some(3)
+        );
+
+        // Paging left is symmetric.
+        assert_eq!(
+            page_target_column(ScrollDirection::Left, width, &columns_x, 4),
+            Some(2)
+        );
+        assert_eq!(
+            page_target_column(ScrollDirection::Left, width, &columns_x, 5),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn page_target_clamps_to_last_when_under_one_screen_remains() {
+        let columns_x = [0., 500., 1000., 1500., 2000., 2500.];
+        // From idx 4 a full screen right would land past the strip; snap to the nearest
+        // remaining column (the last) so paging still reaches the end.
+        assert_eq!(
+            page_target_column(ScrollDirection::Right, 1000., &columns_x, 4),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn page_target_none_at_strip_ends() {
+        let columns_x = [0., 500., 1000., 1500., 2000., 2500.];
+        assert_eq!(
+            page_target_column(ScrollDirection::Right, 1000., &columns_x, 5),
+            None
+        );
+        assert_eq!(
+            page_target_column(ScrollDirection::Left, 1000., &columns_x, 0),
+            None
+        );
     }
 }
