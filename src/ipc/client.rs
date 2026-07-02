@@ -8,9 +8,9 @@ use anyhow::{anyhow, bail, Context};
 use jiji_config::OutputName;
 use jiji_ipc::socket::Socket;
 use jiji_ipc::{
-    Action, Activity, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode,
-    Output, OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
-    Workspace,
+    Action, Activity, Bookmark, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput,
+    Mode, Output, OutputConfigChanged, Overview, Request, Response, Transform, Window,
+    WindowLayout, Workspace,
 };
 use serde_json::json;
 
@@ -102,6 +102,7 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::Activities => Request::Activities,
         Msg::ActivityViews => Request::ActivityViews,
         Msg::FocusedActivity => Request::FocusedActivity,
+        Msg::Bookmarks => Request::Bookmarks,
         Msg::PickWindow => Request::PickWindow,
         Msg::PickColor => Request::PickColor,
         Msg::Action { action } => Request::Action(action.clone()),
@@ -406,6 +407,19 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
             }
 
             print_activity(&activity);
+        }
+        Msg::Bookmarks => {
+            let Response::Bookmarks(bookmarks) = response else {
+                bail!("unexpected response: expected Bookmarks, got {response:?}");
+            };
+
+            if json {
+                let s = serde_json::to_string(&bookmarks).context("error formatting response")?;
+                println!("{s}");
+                return Ok(());
+            }
+
+            print_bookmarks(&bookmarks);
         }
         Msg::PickWindow => {
             let Response::PickedWindow(window) = response else {
@@ -972,6 +986,43 @@ fn print_activity(activity: &Activity) {
         id = activity.id,
         name = activity.name,
     );
+}
+
+fn print_bookmarks(bookmarks: &[Bookmark]) {
+    if bookmarks.is_empty() {
+        println!("No bookmarks.");
+        return;
+    }
+
+    println!("Bookmarks:");
+    for bm in bookmarks {
+        let (ws, out) = match &bm.workspace {
+            None => ("ws (mid-move)".to_owned(), String::new()),
+            Some(placement) => {
+                let ws = match (placement.name.as_deref(), placement.idx) {
+                    (Some(name), _) => format!("ws \"{name}\""),
+                    (None, Some(idx)) => format!("ws {idx}"),
+                    (None, None) => "ws (unresolved)".to_owned(),
+                };
+                let out = placement
+                    .output
+                    .as_deref()
+                    .map(|o| format!(" ({o})"))
+                    .unwrap_or_default();
+                (ws, out)
+            }
+        };
+        let title = bm.title.as_deref().unwrap_or("(untitled)");
+        let act = match bm.activity_name.as_deref() {
+            Some(name) => format!("\"{name}\""),
+            None => format!("{}", bm.activity_id),
+        };
+        println!(
+            "  [{id}] window {window} \"{title}\" on {ws}{out} [activity {act}]",
+            id = bm.id,
+            window = bm.window_id,
+        );
+    }
 }
 
 fn print_cast(cast: &Cast) {

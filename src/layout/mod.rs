@@ -3289,6 +3289,11 @@ impl<W: LayoutElement> Layout<W> {
         &self.activities
     }
 
+    /// Read-only access to the curated bookmark state, for the IPC read surface.
+    pub(crate) fn bookmarks(&self) -> &Bookmarks<W::Id> {
+        &self.bookmarks
+    }
+
     /// Aggregate urgency for an activity: `true` iff some workspace in the pool
     /// whose `activities` set contains `id` is itself urgent ( bubble:
     /// window → workspace → activity). Returns `false` for an unknown

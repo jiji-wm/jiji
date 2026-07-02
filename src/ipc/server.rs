@@ -729,6 +729,28 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                 result.map_err(|_| String::from("error getting focused activity info"))?;
             Response::FocusedActivity(focused)
         }
+        Request::Bookmarks => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let bookmarks = build_bookmarks_ipc(&state.niri.layout, |mapped| {
+                    with_toplevel_role(mapped.toplevel(), |role| {
+                        let TitleParts {
+                            app_tag: _,
+                            clean_title,
+                        } = role_title_to_tag_and_clean(&role.title);
+                        BookmarkWindowMeta {
+                            id: mapped.id().get(),
+                            title: clean_title,
+                            app_id: role.app_id.clone(),
+                        }
+                    })
+                });
+                let _ = tx.send_blocking(bookmarks);
+            });
+            let result = rx.recv().await;
+            let bookmarks = result.map_err(|_| String::from("error getting bookmarks info"))?;
+            Response::Bookmarks(bookmarks)
+        }
         Request::PickWindow => {
             let (tx, rx) = async_channel::bounded(1);
             ctx.event_loop.insert_idle(move |state| {
@@ -966,6 +988,121 @@ pub(crate) fn build_focused_activity_ipc<W: LayoutElement>(
 ) -> jiji_ipc::Activity {
     let active_id = layout.active_activity_id();
     to_ipc_activity(layout.activities().active(), active_id, layout)
+}
+
+/// Window identity extracted for a bookmark IPC entry.
+///
+/// Named fields prevent the `id` / `title` / `app_id` slots from being
+/// accidentally reordered at a call site — the same rationale as [`TitleParts`].
+pub(crate) struct BookmarkWindowMeta {
+    pub(crate) id: u64,
+    pub(crate) title: Option<String>,
+    pub(crate) app_id: Option<String>,
+}
+
+/// Build the [`jiji_ipc::Bookmark`] list from the current layout state.
+///
+/// `window_meta_of` extracts [`BookmarkWindowMeta`] from a layout element;
+/// production uses `Mapped` (with title-tag stripping via
+/// [`role_title_to_tag_and_clean`]), and `layout/tests.rs` calls this with a
+/// `TestWindow`-compatible extractor so the builder is unit-testable without a
+/// live compositor.
+///
+/// Workspace fields resolve view-keyed: `position_of` + `monitor_for_output_id`
+/// rather than `ws.output_id()` (which is deliberately stale
+/// post-partial-disconnect). The saved activity is tried first so a shared
+/// workspace yields the position the user actually navigated from.
+///
+/// # Panics
+///
+/// Panics if a bookmark's window cannot be resolved via `windows_all()`. This is
+/// the prune-on-close invariant: every live bookmark must name a live window.
+pub(crate) fn build_bookmarks_ipc<W: LayoutElement>(
+    layout: &Layout<W>,
+    window_meta_of: impl Fn(&W) -> BookmarkWindowMeta,
+) -> Vec<jiji_ipc::Bookmark> {
+    layout
+        .bookmarks()
+        .list()
+        .iter()
+        .enumerate()
+        .map(|(position, bookmark)| {
+            let window = bookmark.anchor().window();
+            let activity_id = bookmark.anchor().activity();
+
+            let w = layout
+                .windows_all()
+                .find(|(_, w)| w.id() == window)
+                .map(|(_, w)| w)
+                .expect("bookmark window must resolve via windows_all (prune-on-close guarantee)");
+
+            let BookmarkWindowMeta { id, title, app_id } = window_meta_of(w);
+
+            let ws_id = layout.window_ws_and_activity_hint(window);
+
+            let workspace = ws_id.map(|ws_id| {
+                let name = layout
+                    .workspaces_all()
+                    .find(|(_, ws)| ws.id() == ws_id)
+                    .and_then(|(_, ws)| ws.name().cloned());
+
+                // Resolve the view slot: try the saved activity first, then
+                // fall back to declaration order so a dead saved activity still
+                // resolves the workspace.
+                let view_hit = layout
+                    .activities()
+                    .get(activity_id)
+                    .and_then(|act| {
+                        act.views().iter().find_map(|(oid, view)| {
+                            view.position_of(ws_id).map(|pos| (oid.clone(), pos))
+                        })
+                    })
+                    .or_else(|| {
+                        layout.activities().iter().find_map(|act| {
+                            act.views().iter().find_map(|(oid, view)| {
+                                view.position_of(ws_id).map(|pos| (oid.clone(), pos))
+                            })
+                        })
+                    });
+
+                let (idx, output) = match view_hit {
+                    Some((oid, pos)) => {
+                        let idx = u8::try_from(pos + 1).unwrap_or(u8::MAX);
+                        let output = layout
+                            .monitor_for_output_id(&oid)
+                            .map(|m| m.output_name().clone());
+                        (Some(idx), output)
+                    }
+                    None => (None, None),
+                };
+
+                jiji_ipc::WorkspacePlacement {
+                    id: ws_id.get(),
+                    name,
+                    idx,
+                    output,
+                }
+            });
+
+            let activity_name = layout
+                .activities()
+                .get(activity_id)
+                .map(|a| a.name().to_owned());
+
+            jiji_ipc::Bookmark {
+                id: bookmark.id().get(),
+                position,
+                window_id: id,
+                title,
+                app_id,
+                workspace,
+                activity_id: activity_id.get(),
+                activity_name,
+                name: None,
+                key: None,
+            }
+        })
+        .collect()
 }
 
 fn to_ipc_activity<W: LayoutElement>(

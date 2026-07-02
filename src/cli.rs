@@ -82,6 +82,8 @@ pub enum Msg {
     ActivityViews,
     /// Print information about the focused activity.
     FocusedActivity,
+    /// Print the curated bookmark list.
+    Bookmarks,
     /// Pick a window with the mouse and print information about it.
     PickWindow,
     /// Pick a color from the screen with the mouse.

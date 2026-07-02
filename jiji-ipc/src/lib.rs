@@ -88,6 +88,8 @@ pub enum Request {
     ActivityViews,
     /// Request information about the focused activity.
     FocusedActivity,
+    /// Request the curated bookmark list.
+    Bookmarks,
     /// Request picking a window and get its information.
     PickWindow,
     /// Request picking a color from the screen.
@@ -182,6 +184,8 @@ pub enum Response {
     ///
     /// There is always at least one activity, so this is not wrapped in `Option`.
     FocusedActivity(Activity),
+    /// The curated bookmark list, in presentation order.
+    Bookmarks(Vec<Bookmark>),
     /// Information about the focused window.
     FocusedWindow(Option<Window>),
     /// Information about the picked window.
@@ -233,6 +237,66 @@ pub struct Overview {
 pub struct PickedColor {
     /// Color values as red, green, blue, each ranging from 0.0 to 1.0.
     pub rgb: [f64; 3],
+}
+
+/// One curated bookmark, enriched at query time.
+///
+/// The prune-on-close invariant guarantees the anchored window is alive, so
+/// `window_id` always resolves. `workspace` carries the rest of the placement;
+/// see [`WorkspacePlacement`] for its own field contract.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct Bookmark {
+    /// Stable bookmark id. Dispatch jump/remove/move by this id.
+    pub id: u64,
+    /// 0-based position in the presentation-order list.
+    pub position: usize,
+    /// Anchored window id, as in [`Window::id`].
+    pub window_id: u64,
+    /// Window title (machine tags stripped, as in [`Window::title`]).
+    pub title: Option<String>,
+    /// Application ID, if set.
+    pub app_id: Option<String>,
+    /// The bookmarked window's workspace placement. `None` when the window is
+    /// mid-interactive-move (detached from its workspace); the prune-on-close
+    /// invariant guarantees no other `None` case for a live entry.
+    pub workspace: Option<WorkspacePlacement>,
+    /// Id of the activity the bookmark was saved under (may be dead).
+    pub activity_id: u64,
+    /// Name of the saved activity; `None` when it has been removed (restore then
+    /// falls back to the activity picker).
+    pub activity_name: Option<String>,
+    /// Reserved user-facing name. Always `None` in this version.
+    pub name: Option<String>,
+    /// Reserved dynamic-key label. Always `None` in this version; the wire field
+    /// is reserved now so downstream picker schemas never migrate.
+    pub key: Option<String>,
+}
+
+/// A bookmarked window's workspace, at query time.
+///
+/// `id` is unconditional — its presence on [`Bookmark::workspace`] is itself
+/// the mid-interactive-move gate, so once you have a `WorkspacePlacement` the
+/// workspace exists. The other three fields are independently optional:
+///
+/// - `name`: `None` when the workspace has no user-assigned name.
+/// - `idx`: `None` when no activity view currently holds the workspace (full output disconnect).
+/// - `output`: `None` when the resolved view's output is disconnected. `idx: Some` with `output:
+///   None` is reachable under a partial disconnect (the view survives, its output does not).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct WorkspacePlacement {
+    /// Id of the workspace the window is on.
+    pub id: u64,
+    /// Workspace name, if the workspace has a user-assigned name.
+    pub name: Option<String>,
+    /// 1-based position of the workspace in the resolved activity view (saved
+    /// activity first, then declaration-order fallback). `None` when no view
+    /// holds the workspace. Saturates at [`u8::MAX`] when the position exceeds
+    /// 254.
+    pub idx: Option<u8>,
+    /// Connector name of the resolved view's output, when connected.
+    pub output: Option<String>,
 }
 
 /// Actions that jiji can perform.
@@ -3644,6 +3708,35 @@ mod tests {
             (
                 "window not found: id=42",
                 r#"{"Err":"window not found: id=42"}"#,
+            ),
+        ] {
+            let reply: Reply = Err(msg.to_owned());
+            let json = serde_json::to_string(&reply).expect("serialize Reply::Err");
+            assert_eq!(json, expected_json);
+            let parsed: Reply = serde_json::from_str(&json).expect("deserialize Reply::Err");
+            match parsed {
+                Err(parsed_msg) => assert_eq!(parsed_msg, msg),
+                Ok(_) => panic!("expected Reply::Err variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn reply_err_format_for_bookmark_not_found() {
+        // Pins the JSON representation of the `bookmark not found: id=` wire
+        // envelope. The exact prefix is the observable IPC contract, shared by
+        // the remove/jump/move bookmark actions. The `Display` tokens and
+        // envelope are pinned compositor-side by
+        // `do_action_error_display_matches_wire_contract` and
+        // `do_action_error_envelope_matches_wire_contract`.
+        for (msg, expected_json) in [
+            (
+                "bookmark not found: id=0",
+                r#"{"Err":"bookmark not found: id=0"}"#,
+            ),
+            (
+                "bookmark not found: id=9",
+                r#"{"Err":"bookmark not found: id=9"}"#,
             ),
         ] {
             let reply: Reply = Err(msg.to_owned());

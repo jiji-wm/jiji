@@ -23698,3 +23698,80 @@ fn move_bookmark_reorders_and_unknown_id_is_loud() {
     assert!(matches!(err, DoActionError::BookmarkNotFound { id: 9999 }));
     layout.verify_invariants();
 }
+
+#[test]
+fn build_bookmarks_ipc_maps_fields_including_dead_activity() {
+    use crate::ipc::server::{build_bookmarks_ipc, BookmarkWindowMeta};
+
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let beta = layout.create_activity("beta".to_owned()).expect("create");
+    layout.switch_activity(beta);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+    let bid = layout.bookmarks.list()[0].id().get();
+
+    // Non-capturing extractor: synthetic per-window title/app_id so field
+    // pass-through is observable. Copy, so it can be reused across calls.
+    let meta = |w: &TestWindow| BookmarkWindowMeta {
+        id: *w.id() as u64,
+        title: Some(format!("title-{}", w.id())),
+        app_id: Some(format!("app-{}", w.id())),
+    };
+
+    let ipc = build_bookmarks_ipc(&layout, meta);
+    assert_eq!(ipc.len(), 1);
+    let e = &ipc[0];
+    assert_eq!(e.id, bid, "bookmark id");
+    assert_eq!(e.position, 0, "0-based list position");
+    assert_eq!(e.window_id, 1);
+    assert_eq!(e.title.as_deref(), Some("title-1"));
+    assert_eq!(e.app_id.as_deref(), Some("app-1"));
+    assert_eq!(e.activity_id, beta.get());
+    assert_eq!(
+        e.activity_name.as_deref(),
+        Some("beta"),
+        "live activity resolves a name",
+    );
+    let placement = e.workspace.as_ref().expect("window is on a live workspace");
+    assert_eq!(placement.idx, Some(1), "1-based view position");
+    assert_eq!(e.name, None, "reserved");
+    assert_eq!(e.key, None, "reserved");
+
+    // Kill the saved activity while keeping the window (shared workspace).
+    let ws_id = layout
+        .window_ws_and_activity_hint(&1)
+        .expect("window on a live workspace");
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("share must succeed");
+    layout.switch_activity(alpha);
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("beta removable");
+
+    let ipc = build_bookmarks_ipc(&layout, meta);
+    let e = &ipc[0];
+    assert_eq!(
+        e.activity_id,
+        beta.get(),
+        "anchor keeps the dead activity id"
+    );
+    assert_eq!(e.activity_name, None, "dead activity resolves no name");
+    assert_eq!(
+        e.workspace.as_ref().and_then(|p| p.idx),
+        Some(1),
+        "workspace still resolves via declaration-order fallback",
+    );
+    layout.verify_invariants();
+}
