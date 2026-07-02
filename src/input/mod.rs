@@ -565,12 +565,17 @@ impl State {
                     return FilterResult::Intercept(None);
                 }
 
-                // While the bookmark switcher is open (either the standalone
-                // hint overlay or leader mode) it owns every key press: a
-                // hint letter jumps, a command letter (mode only) runs its
-                // command, everything else dismisses. Releases fall through
-                // to the suppressed-keys logic below so they are swallowed
-                // too. The confirm dialog above wins if both somehow race.
+                // While the bookmark switcher is open (the standalone hint
+                // overlay, leader mode, or incremental search) it owns every
+                // key press. In the hint/leader states: a hint letter jumps,
+                // a command letter (mode only) runs its command, everything
+                // else dismisses. In search: a printable character extends
+                // the query, Backspace trims it, Enter jumps to the top
+                // match (or holds open with none), and only Esc dismisses —
+                // an otherwise-unmatched key holds the overlay open rather
+                // than dismissing. Releases fall through to the
+                // suppressed-keys logic below so they are swallowed too. The
+                // confirm dialog above wins if both somehow race.
                 //
                 // `raw` reports the base (layout-unshifted) keysym, so a
                 // shifted hint/command letter still matches its base sym;
@@ -597,8 +602,10 @@ impl State {
                             // yields `Err(BookmarkNotFound)`, discarded here
                             // (matching the MRU dispatch precedent) — a
                             // user-visible no-op, though the overlay still
-                            // dismisses below. `press_outcome` breadcrumbs
-                            // which hint fired so that no-op is diagnosable.
+                            // dismisses below. `press_outcome` debug-logs the
+                            // matched bookmark id on every jump outcome
+                            // (hint, mode, or search) so that no-op is
+                            // diagnosable.
                             this.do_action(Action::JumpToBookmark(id), false);
                             this.niri.bookmark_switcher.close();
                             this.niri.queue_redraw_all();
@@ -632,6 +639,11 @@ impl State {
                         }
                         PressOutcome::Dismiss => {
                             this.niri.bookmark_switcher.close();
+                            this.niri.queue_redraw_all();
+                        }
+                        PressOutcome::SearchUpdated => {
+                            // Entering search or editing the query mutated the
+                            // overlay in place; it stays open, so just redraw.
                             this.niri.queue_redraw_all();
                         }
                     }

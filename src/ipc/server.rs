@@ -1211,18 +1211,20 @@ fn split_app_tag(title: &str) -> (Option<String>, String) {
 /// swapped at a destructure site — a positional tuple return would compile
 /// silently with swapped bindings.
 #[cfg_attr(test, derive(PartialEq, Debug))]
-struct TitleParts {
-    app_tag: Option<String>,
-    clean_title: Option<String>,
+pub(crate) struct TitleParts {
+    pub(crate) app_tag: Option<String>,
+    pub(crate) clean_title: Option<String>,
 }
 
 /// Convert a raw `Option<String>` role title into its decomposed parts.
 ///
-/// Both `make_ipc_window` and the refresh-diff comparator call this helper so
-/// the two sites stay in sync — an asymmetry between them would cause tagged
+/// `make_ipc_window` and the refresh-diff comparator call this helper so the
+/// two sites stay in sync — an asymmetry between them would cause tagged
 /// windows to diff on every compositor refresh and spam `WindowOpenedOrChanged`,
 /// and would also desync the `app_tag` field between the two sites.
-fn role_title_to_tag_and_clean(raw: &Option<String>) -> TitleParts {
+/// `BookmarkSwitcher::collect_visible_titles` calls it too, for the same
+/// clean-title text used for search/display purposes rather than diffing.
+pub(crate) fn role_title_to_tag_and_clean(raw: &Option<String>) -> TitleParts {
     match raw {
         Some(raw_str) => {
             let (tag, clean) = split_app_tag(raw_str);

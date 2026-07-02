@@ -26,16 +26,40 @@
 //! removal completes, so the id the stale hint carries is no longer live.
 //! Pressing that hint then yields `Err(DoActionError::BookmarkNotFound)` from
 //! the jump, which the caller discards — a user-visible no-op, but the
-//! overlay still dismisses.
+//! overlay still dismisses. The same open-time-snapshot staleness window
+//! applies to [`State::Search`]'s Enter-jumps-to-top-match path: the search
+//! snapshot is taken once on entry, so a window closing mid-search can leave
+//! `Enter` targeting a since-pruned bookmark, with the identical
+//! `BookmarkNotFound`-discarded outcome.
 //!
 //! There is no backdrop and no animation: the overlay shows and dismisses
 //! instantly. It is purely a visual plus key-capture layer, so any pointer
 //! press dismisses it (handled by the caller) and it never gates pointer
 //! hit-testing.
+//!
+//! Leader mode layers one more state on top: pressing `/` switches from
+//! [`State::Mode`] into [`State::Search`], an incremental, case-insensitive
+//! substring filter over each visible bookmark's display name and clean
+//! window title (the two fields matched independently, never as one
+//! concatenated haystack). Typing narrows the set live, `Enter` jumps to the
+//! first still-matching bookmark in list order, and `Esc` closes the overlay
+//! outright (single-shot: there is no path back to [`State::Mode`];
+//! `Backspace` covers correction). While searching, the hint letters carried
+//! over from mode are drawn only on the currently matching tiles as *match
+//! indicators* — they are not pressable, selection is `Enter`-only.
+//!
+//! Two deliberate limitations of this first search cut, recorded here rather
+//! than in the code that embodies them:
+//! - Search is reachable only via `/` from leader mode; there is no separate selector to open
+//!   straight into it.
+//! - Query characters come from the *base* (unshifted) keysym via [`Keysym::key_char`], so there
+//!   are no capitals, shifted punctuation, or IME input in the query. This is harmless under
+//!   case-insensitive matching (the lowercased query still matches), just visually lower-case.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use std::mem;
 
 use ordered_float::NotNan;
 use pangocairo::cairo::{self, ImageSurface};
@@ -48,13 +72,14 @@ use smithay::output::Output;
 use smithay::reexports::gbm::Format as Fourcc;
 use smithay::utils::{Logical, Point, Transform};
 
+use crate::ipc::server::role_title_to_tag_and_clean;
 use crate::layout::{Layout, LayoutElement};
 use crate::niri_render_elements;
 use crate::render_helpers::memory::MemoryBuffer;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
-use crate::utils::{output_size, to_physical_precise_round};
+use crate::utils::{output_size, to_physical_precise_round, with_toplevel_role};
 use crate::window::Mapped;
 
 /// Letters used for hints, home-row-first. Assigned to visible bookmarked
@@ -134,6 +159,84 @@ impl<Id> Hints<Id> {
     }
 }
 
+/// One searchable bookmark, snapshotted when [`State::Search`] is entered.
+///
+/// The set is *all* visible bookmarked windows — a superset of the hinted
+/// set, so a bookmark past the end of the hint alphabet is still searchable
+/// (just unhinted). Generic over the window id type only so the pure
+/// matching logic can be unit-tested with a cheap stand-in; production always
+/// uses [`Window`].
+///
+/// `name_lower` and `title_lower` are the lowercased forms of the two match
+/// fields, precomputed once at construction so each keystroke's filter is a
+/// plain `contains`. They are private and only ever set by [`Self::new`] from
+/// the same sources as `label`, so they cannot drift out of sync with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchEntry<Id> {
+    bookmark_id: u64,
+    window: Id,
+    /// Display text: the bookmark name if set, else the clean window title,
+    /// else `"(untitled)"`.
+    label: String,
+    /// Lowercased bookmark name, if the bookmark has one.
+    name_lower: Option<String>,
+    /// Lowercased clean window title, `""` when the window is untitled.
+    title_lower: String,
+}
+
+impl<Id> SearchEntry<Id> {
+    /// Snapshots one bookmark's searchable form, precomputing the lowercased
+    /// match fields and the display label from the same sources so the three
+    /// stay consistent by construction. `name` is the bookmark's display name
+    /// (already non-empty by [`BookmarkName`](crate::layout::bookmarks) 's
+    /// validation); `title` is the *clean* (machine-tag-stripped) window
+    /// title.
+    fn new(bookmark_id: u64, window: Id, name: Option<&str>, title: Option<&str>) -> Self {
+        let label = match name {
+            Some(name) => name.to_owned(),
+            None => match title {
+                Some(title) if !title.is_empty() => title.to_owned(),
+                _ => "(untitled)".to_owned(),
+            },
+        };
+        SearchEntry {
+            bookmark_id,
+            window,
+            label,
+            name_lower: name.map(str::to_lowercase),
+            title_lower: title.unwrap_or("").to_lowercase(),
+        }
+    }
+}
+
+/// Whether `entry` matches `query_lower` (already lowercased by the caller).
+///
+/// An empty query matches everything. A non-empty query matches if it is a
+/// substring of the name **or** the title, each tested independently — the
+/// two fields are never concatenated into one haystack, so a query cannot
+/// span the name/title boundary.
+fn entry_matches<Id>(entry: &SearchEntry<Id>, query_lower: &str) -> bool {
+    if query_lower.is_empty() {
+        return true;
+    }
+    entry
+        .name_lower
+        .as_deref()
+        .is_some_and(|name| name.contains(query_lower))
+        || entry.title_lower.contains(query_lower)
+}
+
+/// The first entry (in bookmark-list order) that matches `query_lower`, i.e.
+/// what `Enter` jumps to. `None` when nothing matches.
+fn top_match<'a, Id>(
+    entries: &'a [SearchEntry<Id>],
+    query_lower: &str,
+) -> Option<&'a SearchEntry<Id>> {
+    entries
+        .iter()
+        .find(|entry| entry_matches(entry, query_lower))
+}
+
 /// The overlay's open states.
 ///
 /// `Mode`'s hint list, unlike `Hints`', may legitimately be empty (the
@@ -150,7 +253,27 @@ enum State<Id> {
     },
     Mode {
         hints: Vec<Hint<Id>>,
+        /// All visible bookmarked windows, snapshotted at open, carried ready
+        /// so `/` can enter [`State::Search`] without re-walking the layout.
+        entries: Vec<SearchEntry<Id>>,
         sheet: MemoryBuffer,
+    },
+    /// Incremental search over the mode snapshot. Like `Mode`/`Hints`, this
+    /// variant carries its scale-1 rasterised artifact — the query `line` —
+    /// by value, so "search open but nothing drawable" is unrepresentable
+    /// (the same validated-construction discipline `Hints` and `Mode.sheet`
+    /// apply).
+    Search {
+        /// Carried from `Mode` unchanged. Indicator-only in this state: hint
+        /// letters are drawn on matching tiles but are *not* pressable —
+        /// selection is `Enter`-only.
+        hints: Vec<Hint<Id>>,
+        entries: Vec<SearchEntry<Id>>,
+        query: String,
+        /// Scale-1 rasterised query line, re-rendered on every edit; the
+        /// fail-safe fallback for [`BookmarkSwitcher::render_output`]'s
+        /// per-frame at-scale render.
+        line: MemoryBuffer,
     },
 }
 
@@ -246,6 +369,32 @@ impl BookmarkSwitcher {
         visible
     }
 
+    /// Like [`Self::collect_visible_windows`], but also captures each visible
+    /// window's *clean* (machine-tag-stripped) title, so leader-mode search
+    /// matches the human-facing title rather than a Firefox-restore UUID tag.
+    /// Titles pass through [`role_title_to_tag_and_clean`] — the same
+    /// tag-stripping the IPC layer applies — never the raw role title. Used
+    /// only by [`Self::open_mode`]; the standalone [`Self::open`] has no
+    /// search and keeps the lighter set-only collector.
+    fn collect_visible_titles(layout: &Layout<Mapped>) -> HashMap<Window, Option<String>> {
+        let mut visible = HashMap::new();
+        for mon in layout.monitors() {
+            let ctx = layout.ctx_for(mon);
+            for (ws, _geo) in mon.workspaces_with_render_geo(ctx) {
+                for (tile, _pos, tile_visible) in ws.tiles_with_render_positions() {
+                    if tile_visible {
+                        let window = LayoutElement::id(tile.window()).clone();
+                        let clean = with_toplevel_role(tile.window().toplevel(), |role| {
+                            role_title_to_tag_and_clean(&role.title).clean_title
+                        });
+                        visible.insert(window, clean);
+                    }
+                }
+            }
+        }
+        visible
+    }
+
     /// Pre-rasterises each hint letter at scale 1, the fallback texture used
     /// whenever the exact-scale render (in [`Self::render_output`]) fails or
     /// hasn't been cached yet, and drops any hint whose letter can't be
@@ -329,7 +478,8 @@ impl BookmarkSwitcher {
     /// Re-invoking while already open (in either variant) recomputes into
     /// `Mode` — last action wins, mirroring [`Self::open`].
     pub fn open_mode(&mut self, layout: &Layout<Mapped>) -> bool {
-        let visible = Self::collect_visible_windows(layout);
+        let titles = Self::collect_visible_titles(layout);
+        let visible: HashSet<Window> = titles.keys().cloned().collect();
 
         let mut hints = build_hints(
             layout
@@ -341,6 +491,26 @@ impl BookmarkSwitcher {
             &mode_hint_alphabet(),
         );
         self.retain_rasterisable(&mut hints);
+
+        // Search over *all* visible bookmarked windows — a superset of the
+        // hinted set, so bookmarks past the end of the hint alphabet are
+        // searchable too (just unhinted). Snapshotted here so entering search
+        // never re-walks the layout.
+        let entries: Vec<SearchEntry<Window>> = layout
+            .bookmarks()
+            .list()
+            .iter()
+            .filter_map(|bookmark| {
+                let window = bookmark.anchor().window();
+                let title = titles.get(window)?;
+                Some(SearchEntry::new(
+                    bookmark.id().get(),
+                    window.clone(),
+                    bookmark.name().map(|name| name.as_str()),
+                    title.as_deref(),
+                ))
+            })
+            .collect();
 
         let sheet_markup = mode_sheet_markup();
         let sheet = {
@@ -362,7 +532,11 @@ impl BookmarkSwitcher {
             return false;
         };
 
-        self.state = State::Mode { hints, sheet };
+        self.state = State::Mode {
+            hints,
+            entries,
+            sheet,
+        };
         self.warned_empty_frame.set(false);
         true
     }
@@ -371,31 +545,145 @@ impl BookmarkSwitcher {
     /// gate on [`Self::is_open`] first; `Closed` panics rather than
     /// returning a meaningless [`PressOutcome::Dismiss`], because a caller
     /// that reaches here despite the gate has a bug worth surfacing loudly.
-    pub fn press_outcome(&self, raw: Option<Keysym>, chorded: bool) -> PressOutcome {
-        let (is_mode, hints) = match &self.state {
+    ///
+    /// Takes `&mut self` because the [`State::Search`] edit outcomes
+    /// (`/` enters search, a printable character extends the query, `Backspace`
+    /// trims it) mutate the overlay in place. The pure routing decision is
+    /// made by [`press_outcome_core`]; this wrapper applies the state-changing
+    /// ones and reports [`PressOutcome::SearchUpdated`] so the caller redraws.
+    pub fn press_outcome(&mut self, raw: Option<Keysym>, chorded: bool) -> PressOutcome {
+        let core = match &self.state {
             State::Closed => {
                 unreachable!("press_outcome requires is_open(); caller must gate on it")
             }
-            State::Hints { hints } => (false, hints.as_slice()),
-            State::Mode { hints, .. } => (true, hints.as_slice()),
+            State::Hints { hints } => press_outcome_core(
+                RoutingContext::Hints {
+                    hints: hints.as_slice(),
+                },
+                raw,
+                chorded,
+            ),
+            State::Mode { hints, .. } => press_outcome_core(
+                RoutingContext::Mode {
+                    hints: hints.as_slice(),
+                },
+                raw,
+                chorded,
+            ),
+            State::Search { entries, query, .. } => {
+                press_outcome_core(RoutingContext::Search { entries, query }, raw, chorded)
+            }
         };
 
-        let outcome = press_outcome_core(is_mode, hints, raw, chorded);
-
-        // A matched hint is about to dispatch a jump whose result the caller
-        // discards (matching the MRU precedent); log which hint fired so a
-        // press that turns out to be a no-op (e.g. the bookmarked window has
-        // since become unresolvable) is diagnosable.
-        if let PressOutcome::Jump(id) = outcome {
-            if let Some(hint) = hints.iter().find(|h| h.bookmark_id == id) {
-                debug!(
-                    "bookmark switcher: hint '{}' matched, dispatching jump to bookmark {id}",
-                    hint.letter
-                );
-            }
+        // A matched hint/entry is about to dispatch a jump whose result the
+        // caller discards (matching the MRU precedent); log so a press that
+        // turns out to be a no-op (e.g. the bookmarked window has since become
+        // unresolvable) is diagnosable.
+        if let CoreOutcome::Jump(id) = core {
+            debug!("bookmark switcher: matched, dispatching jump to bookmark {id}");
         }
 
-        outcome
+        match core {
+            CoreOutcome::HoldOpen => PressOutcome::HoldOpen,
+            CoreOutcome::Jump(id) => PressOutcome::Jump(id),
+            CoreOutcome::Command(cmd) => PressOutcome::Command(cmd),
+            CoreOutcome::Dismiss => PressOutcome::Dismiss,
+            CoreOutcome::EnterSearch => self.enter_search(),
+            CoreOutcome::Push(ch) => self.push_query_char(ch),
+            CoreOutcome::Pop => self.pop_query_char(),
+        }
+    }
+
+    /// Transitions [`State::Mode`] → [`State::Search`] on `/`.
+    ///
+    /// Rasterises the initial (empty-query) line at scale 1 first, before
+    /// touching `self.state`: on failure it warns and returns, leaving
+    /// `Mode` untouched, so a rasterise failure can never strand the overlay
+    /// mid-transition or enter an undrawable search state. The command sheet
+    /// is dropped on success — from search, `Esc` closes the overlay
+    /// outright rather than returning to mode.
+    fn enter_search(&mut self) -> PressOutcome {
+        let State::Mode { entries, .. } = &self.state else {
+            unreachable!("enter_search is only routed from State::Mode");
+        };
+
+        let query = String::new();
+        let line = match render_query_line(&query, entries, 1.) {
+            Ok(line) => line,
+            Err(err) => {
+                warn!(
+                    "bookmark search: initial query line failed to rasterise: {err:?}, \
+                     staying in leader mode"
+                );
+                return PressOutcome::HoldOpen;
+            }
+        };
+
+        let State::Mode { hints, entries, .. } = mem::replace(&mut self.state, State::Closed)
+        else {
+            unreachable!("enter_search is only routed from State::Mode");
+        };
+        self.state = State::Search {
+            hints,
+            entries,
+            query,
+            line,
+        };
+        PressOutcome::SearchUpdated
+    }
+
+    /// Appends `ch` to the search query and re-rasterises the scale-1 line.
+    ///
+    /// On rasterise failure it logs (debug, not warn — the failure repeats on
+    /// every keystroke of a held-down key, and the per-frame at-scale render
+    /// in [`Self::render_output`] already surfaces a persistent failure at
+    /// debug) and keeps the previous line buffer (stale but visible) — the
+    /// query still advances, and that per-frame render may well succeed at
+    /// the output scale even when scale 1 failed.
+    fn push_query_char(&mut self, ch: char) -> PressOutcome {
+        let State::Search {
+            entries,
+            query,
+            line,
+            ..
+        } = &mut self.state
+        else {
+            unreachable!("push_query_char is only routed from State::Search");
+        };
+
+        query.push(ch);
+        match render_query_line(query, entries, 1.) {
+            Ok(new_line) => *line = new_line,
+            Err(err) => debug!(
+                "bookmark search: query line failed to rasterise: {err:?}, keeping previous line"
+            ),
+        }
+        PressOutcome::SearchUpdated
+    }
+
+    /// Trims the last character from the search query. A `Backspace` on an
+    /// already-empty query is a [`PressOutcome::HoldOpen`] no-op.
+    fn pop_query_char(&mut self) -> PressOutcome {
+        let State::Search {
+            entries,
+            query,
+            line,
+            ..
+        } = &mut self.state
+        else {
+            unreachable!("pop_query_char is only routed from State::Search");
+        };
+
+        if query.pop().is_none() {
+            return PressOutcome::HoldOpen;
+        }
+        match render_query_line(query, entries, 1.) {
+            Ok(new_line) => *line = new_line,
+            Err(err) => debug!(
+                "bookmark search: query line failed to rasterise: {err:?}, keeping previous line"
+            ),
+        }
+        PressOutcome::SearchUpdated
     }
 
     pub fn render_output<R: NiriRenderer>(
@@ -405,11 +693,41 @@ impl BookmarkSwitcher {
         renderer: &mut R,
         push: &mut dyn FnMut(BookmarkSwitcherRenderElement),
     ) {
-        let (hints, sheet): (&[Hint<Window>], Option<&MemoryBuffer>) = match &self.state {
+        // `hints` are the letters to draw; `matched`, present only while
+        // searching, restricts drawing to the currently matching tiles. The
+        // matched window set is computed once here (one `to_lowercase`, one
+        // pass over the snapshot) rather than per tile.
+        let hints: &[Hint<Window>];
+        let matched: Option<HashSet<Window>>;
+        match &self.state {
             State::Closed => return,
-            State::Hints { hints } => (hints.as_slice(), None),
-            State::Mode { hints, sheet } => (hints, Some(sheet)),
-        };
+            State::Hints { hints: open_hints } => {
+                hints = open_hints.as_slice();
+                matched = None;
+            }
+            State::Mode {
+                hints: open_hints, ..
+            } => {
+                hints = open_hints.as_slice();
+                matched = None;
+            }
+            State::Search {
+                hints: open_hints,
+                entries,
+                query,
+                ..
+            } => {
+                let query_lower = query.to_lowercase();
+                matched = Some(
+                    entries
+                        .iter()
+                        .filter(|entry| entry_matches(entry, &query_lower))
+                        .map(|entry| entry.window.clone())
+                        .collect(),
+                );
+                hints = open_hints.as_slice();
+            }
+        }
         let _span = tracy_client::span!("BookmarkSwitcher::render_output");
 
         let Some(mon) = layout.monitor_for_output(output) else {
@@ -430,6 +748,14 @@ impl BookmarkSwitcher {
                 let Some(hint) = hints.iter().find(|hint| &hint.window == window) else {
                     continue;
                 };
+                // While searching, a hint is drawn only if its window is still
+                // in the matched set — the letters are match indicators here,
+                // not pressable shortcuts.
+                if let Some(matched) = &matched {
+                    if !matched.contains(window) {
+                        continue;
+                    }
+                }
 
                 // Hint anchor in output-local logical coordinates: the tile's
                 // on-screen top-left. This is the inverse of the overview
@@ -498,10 +824,38 @@ impl BookmarkSwitcher {
             }
         }
 
-        if let Some(sheet) = sheet {
-            if self.render_sheet(sheet, output, renderer, scale, push) {
-                drew_any = true;
+        // Bottom-center chrome: the command sheet in `Mode`, the query line in
+        // `Search`. Both count toward `drew_any` — a zero-match search still
+        // draws its line, so the overlay is never an invisible key-eater.
+        match &self.state {
+            State::Mode { sheet, .. } => {
+                if self.render_sheet(sheet, output, renderer, scale, push) {
+                    drew_any = true;
+                }
             }
+            State::Search {
+                entries,
+                query,
+                line,
+                ..
+            } => {
+                // Resolve the query-line buffer here (fresh at the output
+                // scale, falling back to the carried scale-1 `line`) so the
+                // drawing helper stays a plain positioning/upload step.
+                let buffer = match render_query_line(query, entries, scale) {
+                    Ok(buffer) => buffer,
+                    Err(err) => {
+                        debug!(
+                            "bookmark search line failed to rasterise at scale {scale}: {err:?}"
+                        );
+                        line.clone()
+                    }
+                };
+                if self.render_search_line(&buffer, output, renderer, scale, push) {
+                    drew_any = true;
+                }
+            }
+            _ => {}
         }
 
         // Not necessarily a problem on its own: hints can legitimately live on
@@ -515,7 +869,12 @@ impl BookmarkSwitcher {
         // zero-ness here, which would need bookkeeping shared across the
         // per-output calls this method doesn't otherwise need. In `Mode`,
         // the sheet drawing counts too — it draws whenever its upload
-        // succeeds, so it should not fire alongside a drawn sheet.
+        // succeeds, so it should not fire alongside a drawn sheet. In
+        // `Search`, the rendered query line itself counts toward `drew_any`
+        // (see the `render_search_line` call above), so this breadcrumb
+        // fires only when even the query line failed to upload — the
+        // any-key-dismiss self-heal this comment describes does not apply to
+        // `Search`, where `Esc` is the only guaranteed exit.
         if !drew_any && !self.warned_empty_frame.replace(true) {
             debug!(
                 "bookmark switcher: open but drew no hints on output {} this frame",
@@ -591,62 +950,214 @@ impl BookmarkSwitcher {
         push(BookmarkSwitcherRenderElement::Texture(elem));
         true
     }
+
+    /// Draws the incremental-search query line `buffer`, anchored bottom-center
+    /// where the command sheet sits in [`State::Mode`]. Returns whether
+    /// anything was pushed.
+    ///
+    /// Unlike hints and the sheet, this line has **no** per-scale cache: its
+    /// text changes on every keystroke, so a `(query, scale)` cache would
+    /// explode in key space for no reuse. The caller rasterises it fresh at the
+    /// output scale each frame (a per-frame upload is already this module's
+    /// norm), falling back to the scale-1 buffer carried by [`State::Search`]
+    /// whenever the at-scale rasterise fails; this helper takes no cache borrow
+    /// at all, keeping it clear of the `RefCell` re-borrow hazard the
+    /// letter/sheet paths guard against.
+    fn render_search_line<R: NiriRenderer>(
+        &self,
+        buffer: &MemoryBuffer,
+        output: &Output,
+        renderer: &mut R,
+        scale: f64,
+        push: &mut dyn FnMut(BookmarkSwitcherRenderElement),
+    ) -> bool {
+        let output_sz = output_size(output);
+        let size = buffer.logical_size();
+        let x = ((output_sz.w - size.w) / 2.).max(0.);
+        let y = (output_sz.h - size.h - f64::from(PADDING)).max(0.);
+        let location: Point<f64, Logical> = Point::from((x, y));
+        let location = location.to_physical_precise_round(scale).to_logical(scale);
+
+        let Ok(texture) = TextureBuffer::from_memory_buffer(renderer.as_gles_renderer(), buffer)
+        else {
+            debug!("bookmark search line failed to upload as a texture at scale {scale}");
+            return false;
+        };
+
+        let elem = TextureRenderElement::from_texture_buffer(
+            texture,
+            location,
+            1.,
+            None,
+            None,
+            Kind::Unspecified,
+        );
+        let elem = PrimaryGpuTextureRenderElement(elem);
+        let elem = RescaleRenderElement::from_element(
+            elem,
+            location.to_physical_precise_round(scale),
+            1.0,
+        );
+        push(BookmarkSwitcherRenderElement::Texture(elem));
+        true
+    }
 }
 
-/// Where an incoming key press routes while the overlay is open, computed
-/// purely over the hint list plus (in [`State::Mode`]) the command table —
-/// unit-testable without a real [`Window`] or a live compositor.
+/// What [`BookmarkSwitcher::press_outcome`] reports back to its caller. The
+/// caller acts on the terminal outcomes (jump, run command, dismiss); the
+/// search-edit transitions are applied inside `press_outcome` itself and
+/// collapse to [`Self::SearchUpdated`], a "state changed, please redraw"
+/// signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PressOutcome {
-    /// A pure modifier or lock key: keep the overlay open.
+    /// A pure modifier or lock key, or an inert key while searching: keep the
+    /// overlay open, unchanged.
     HoldOpen,
-    /// An un-chorded hint letter matched: jump to this bookmark id.
+    /// An un-chorded hint letter matched (or, while searching, `Enter` with a
+    /// live top match): jump to this bookmark id.
     Jump(u64),
     /// (`Mode` only) an un-chorded command letter matched.
     Command(ModeCommand),
-    /// Anything else — Esc, an unmatched key, `raw == None`, or a chorded
-    /// press: dismiss without acting. Outside `Mode` a character that is
-    /// also a [`MODE_COMMANDS`] letter is not special-cased here; it
-    /// dismisses only if it isn't assigned as a hint (see [`Jump`](Self::Jump)).
+    /// Anything else that ends the overlay: Esc always dismisses. In the
+    /// hint/leader (`Mode`) states, an unmatched key, `raw == None`, or a
+    /// chorded press also dismisses. `Search` narrows this: an unmatched
+    /// printable becomes a query edit (`SearchUpdated`) and an unmatched
+    /// non-printable is [`Self::HoldOpen`] — only Esc dismisses.
     Dismiss,
+    /// (`Search` only) the query changed (entered, extended, or trimmed). The
+    /// overlay stays open; the caller redraws.
+    SearchUpdated,
 }
 
-/// Pure routing core behind [`BookmarkSwitcher::press_outcome`], generic
-/// over the hint id type so it is unit-testable with the `u64` stand-in
-/// (see the `tests` module). `is_mode` selects whether command letters are
-/// checked ([`State::Mode`]) or skipped entirely, falling through straight
-/// to hint matching ([`State::Hints`]). Outside `Mode` there is no command
-/// special-case at all: a character that also appears in [`MODE_COMMANDS`]
-/// is just an ordinary member of the hint alphabet there, so an assigned
-/// one still produces [`PressOutcome::Jump`].
+/// The pure routing decision behind [`BookmarkSwitcher::press_outcome`],
+/// before any state mutation. `EnterSearch` / `Push` / `Pop` are the
+/// search-edit transitions the wrapper applies; the other four mirror the
+/// public [`PressOutcome`] terminal cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoreOutcome {
+    HoldOpen,
+    Jump(u64),
+    Command(ModeCommand),
+    Dismiss,
+    /// (`Mode` only) `/` was pressed: enter [`State::Search`].
+    EnterSearch,
+    /// (`Search` only) append this character to the query.
+    Push(char),
+    /// (`Search` only) delete the last query character.
+    Pop,
+}
+
+/// Which open state [`press_outcome_core`] is routing for, carrying just the
+/// data that state's routing needs. Lets the pure core stay unit-testable
+/// with the `u64` id stand-in, no real [`Window`] or live compositor.
+enum RoutingContext<'a, Id> {
+    /// Standalone hint overlay: hint letters only.
+    Hints { hints: &'a [Hint<Id>] },
+    /// Leader mode: command letters, then hint letters, plus `/` → search.
+    Mode { hints: &'a [Hint<Id>] },
+    /// Incremental search: the query drives matching; hints are not consulted
+    /// (they are indicator-only while searching).
+    Search {
+        entries: &'a [SearchEntry<Id>],
+        query: &'a str,
+    },
+}
+
+/// Pure routing core behind [`BookmarkSwitcher::press_outcome`], generic over
+/// the id type so it is unit-testable with the `u64` stand-in (see the
+/// `tests` module).
+///
+/// A pure modifier keysym holds the overlay open in every state. Past that,
+/// routing splits by [`RoutingContext`]:
+/// - `Hints`: chorded or `raw == None` dismisses; otherwise a hint letter jumps and anything else
+///   dismisses. `/` is just an unmatched key here.
+/// - `Mode`: `/` enters search — checked *before* the chorded early-return so a shift-chorded slash
+///   on a non-US layout still enters search. Then a chorded press dismisses, a command letter runs
+///   its command, a hint letter jumps, and anything else dismisses.
+/// - `Search`: a chorded press or `raw == None` holds open (a habitual Shift must not destroy the
+///   typed query); `Esc` dismisses; `Enter` jumps to the top match if one exists, else holds;
+///   `Backspace` pops; an otherwise printable character is pushed; any other keysym (arrows,
+///   F-keys) holds.
 fn press_outcome_core<Id>(
-    is_mode: bool,
-    hints: &[Hint<Id>],
+    ctx: RoutingContext<Id>,
     raw: Option<Keysym>,
     chorded: bool,
-) -> PressOutcome {
+) -> CoreOutcome {
     if raw.is_some_and(is_modifier_keysym) {
-        return PressOutcome::HoldOpen;
+        return CoreOutcome::HoldOpen;
     }
-    if chorded {
-        return PressOutcome::Dismiss;
-    }
-    let Some(raw) = raw else {
-        return PressOutcome::Dismiss;
-    };
 
-    // Commands can't collide with hints by construction (`mode_hint_alphabet`
-    // excludes every `MODE_COMMANDS` character), but checking commands first
-    // costs nothing and keeps that guarantee from being load-bearing here.
-    if is_mode {
-        if let Some(cmd) = command_for_keysym(raw) {
-            return PressOutcome::Command(cmd);
+    match ctx {
+        RoutingContext::Hints { hints } => {
+            if chorded {
+                return CoreOutcome::Dismiss;
+            }
+            let Some(raw) = raw else {
+                return CoreOutcome::Dismiss;
+            };
+            match match_keysym(hints, raw) {
+                Some(id) => CoreOutcome::Jump(id),
+                None => CoreOutcome::Dismiss,
+            }
         }
-    }
-
-    match match_keysym(hints, raw) {
-        Some(id) => PressOutcome::Jump(id),
-        None => PressOutcome::Dismiss,
+        RoutingContext::Mode { hints } => {
+            // `/` enters search, checked ahead of the chorded early-return so a
+            // shift-chorded slash (non-US layouts) still enters rather than
+            // dismissing.
+            if raw == Some(Keysym::from_char('/')) {
+                return CoreOutcome::EnterSearch;
+            }
+            if chorded {
+                return CoreOutcome::Dismiss;
+            }
+            let Some(raw) = raw else {
+                return CoreOutcome::Dismiss;
+            };
+            // Commands can't collide with hints by construction
+            // (`mode_hint_alphabet` excludes every `MODE_COMMANDS` character),
+            // but checking commands first costs nothing and keeps that
+            // guarantee from being load-bearing here.
+            if let Some(cmd) = command_for_keysym(raw) {
+                return CoreOutcome::Command(cmd);
+            }
+            match match_keysym(hints, raw) {
+                Some(id) => CoreOutcome::Jump(id),
+                None => CoreOutcome::Dismiss,
+            }
+        }
+        RoutingContext::Search { entries, query } => {
+            // A chorded press must not destroy the typed query (a habitual
+            // Shift is not a dismiss here), and neither must an unmapped
+            // keysym.
+            if chorded {
+                return CoreOutcome::HoldOpen;
+            }
+            let Some(raw) = raw else {
+                return CoreOutcome::HoldOpen;
+            };
+            if raw == Keysym::Escape {
+                return CoreOutcome::Dismiss;
+            }
+            if raw == Keysym::Return || raw == Keysym::KP_Enter {
+                let query_lower = query.to_lowercase();
+                return match top_match(entries, &query_lower) {
+                    Some(entry) => CoreOutcome::Jump(entry.bookmark_id),
+                    None => CoreOutcome::HoldOpen,
+                };
+            }
+            if raw == Keysym::BackSpace {
+                return CoreOutcome::Pop;
+            }
+            // Base (unshifted) keysym → char; control chars (Tab, etc.) are
+            // not query text. See the module doc's note on the capitals/IME
+            // limitation this base-keysym mapping implies.
+            if let Some(ch) = raw.key_char() {
+                if !ch.is_control() {
+                    return CoreOutcome::Push(ch);
+                }
+            }
+            CoreOutcome::HoldOpen
+        }
     }
 }
 
@@ -671,9 +1182,13 @@ fn mode_hint_alphabet() -> String {
 }
 
 /// One-line command-sheet markup, e.g. `a add · d/x remove · ,/. walk ·
-/// letter jump · esc close`. Generated from [`MODE_COMMANDS`], grouping
+/// letter jump · / search · esc close`. Generated from [`MODE_COMMANDS`], grouping
 /// consecutive entries that share a label (`d`/`x` both "remove") so the
-/// sheet text can never drift from the routing table.
+/// command portion can never drift from the routing table. The trailing
+/// `letter jump · / search · esc close` clause is hand-written, outside
+/// [`MODE_COMMANDS`] — it is pinned by the
+/// `mode_sheet_markup_mentions_slash_search` test rather than by
+/// construction.
 fn mode_sheet_markup() -> String {
     let mut groups: Vec<(String, &str)> = Vec::new();
     for &(ch, _, label) in MODE_COMMANDS {
@@ -696,7 +1211,7 @@ fn mode_sheet_markup() -> String {
     // re-derived from the live hint count, so it can't reflect that. Accepted
     // tradeoff: keeping it static is what makes the upload cache safe to
     // reuse across frames.
-    text.push_str(" · letter jump · esc close");
+    text.push_str(" · letter jump · / search · esc close");
 
     format!("<span face='mono'>{text}</span>")
 }
@@ -766,12 +1281,17 @@ pub fn is_modifier_keysym(raw: Keysym) -> bool {
     )
 }
 
-/// Rasterises pango markup into a padded, bordered box (dark fill, bright
-/// border, white text). Shared by hint letters ([`render_hint`]) and the
-/// leader-mode command sheet ([`mode_sheet_markup`]'s output); the returned
-/// [`MemoryBuffer`] is uploaded to a texture at render time.
-fn render_markup(markup: &str, scale: f64) -> anyhow::Result<MemoryBuffer> {
-    let _span = tracy_client::span!("bookmark_switcher::render_markup");
+/// Rasterises a padded, bordered box (dark fill, bright border, white text)
+/// around whatever `set_content` puts on the pango layout. The shared body of
+/// [`render_markup`] (trusted markup) and [`render_text`] (untrusted plain
+/// text); the returned [`MemoryBuffer`] is uploaded to a texture at render
+/// time. `set_content` runs twice — once on the throwaway sizing layout and
+/// once on the drawing layout — because the two are distinct pango layouts.
+fn render_boxed(
+    scale: f64,
+    set_content: impl Fn(&pangocairo::pango::Layout),
+) -> anyhow::Result<MemoryBuffer> {
+    let _span = tracy_client::span!("bookmark_switcher::render_boxed");
 
     let padding: i32 = to_physical_precise_round(scale, PADDING);
 
@@ -783,7 +1303,7 @@ fn render_markup(markup: &str, scale: f64) -> anyhow::Result<MemoryBuffer> {
     let layout = pangocairo::functions::create_layout(&cr);
     layout.context().set_round_glyph_positions(false);
     layout.set_font_description(Some(&font));
-    layout.set_markup(markup);
+    set_content(&layout);
 
     let (mut width, mut height) = layout.pixel_size();
     width += padding * 2;
@@ -798,7 +1318,7 @@ fn render_markup(markup: &str, scale: f64) -> anyhow::Result<MemoryBuffer> {
     let layout = pangocairo::functions::create_layout(&cr);
     layout.context().set_round_glyph_positions(false);
     layout.set_font_description(Some(&font));
-    layout.set_markup(markup);
+    set_content(&layout);
 
     cr.set_source_rgb(1., 1., 1.);
     pangocairo::functions::show_layout(&cr, &layout);
@@ -826,6 +1346,74 @@ fn render_markup(markup: &str, scale: f64) -> anyhow::Result<MemoryBuffer> {
     );
 
     Ok(buffer)
+}
+
+/// Rasterises pango **markup** into the shared box. Callers must pass trusted
+/// markup only — hint letters ([`render_hint`]) and the leader-mode command
+/// sheet ([`mode_sheet_markup`]), both module-generated.
+fn render_markup(markup: &str, scale: f64) -> anyhow::Result<MemoryBuffer> {
+    render_boxed(scale, |layout| layout.set_markup(markup))
+}
+
+/// Rasterises **plain text** into the shared box via `set_text` — never
+/// `set_markup`. The search query and the window titles woven into the query
+/// line are untrusted, so they must never be interpreted as pango markup (a
+/// `&` or `<` in a title would corrupt or inject the layout). Mirrors the
+/// `set_text` discipline in [`crate::ui::mru`]'s title rendering.
+fn render_text(text: &str, scale: f64) -> anyhow::Result<MemoryBuffer> {
+    render_boxed(scale, |layout| layout.set_text(text))
+}
+
+/// Rasterises the incremental-search query line at `scale`: filters `entries`
+/// by `query` (lowercased once), formats the status text with
+/// [`search_line_text`], and renders it as plain text. Shared by the edit-time
+/// scale-1 rasterise ([`BookmarkSwitcher::enter_search`] and friends) and the
+/// per-frame at-scale render ([`BookmarkSwitcher::render_search_line`]).
+fn render_query_line<Id>(
+    query: &str,
+    entries: &[SearchEntry<Id>],
+    scale: f64,
+) -> anyhow::Result<MemoryBuffer> {
+    let query_lower = query.to_lowercase();
+    let matches: Vec<&SearchEntry<Id>> = entries
+        .iter()
+        .filter(|entry| entry_matches(entry, &query_lower))
+        .collect();
+    let top_label = matches.first().map(|entry| entry.label.as_str());
+    let text = search_line_text(query, matches.len(), top_label);
+    render_text(&text, scale)
+}
+
+/// The one-line search status text, e.g.
+/// `/qu — 3 matches · enter → Mail — inbox · esc close`, or with no matches
+/// `/quz — no matches · esc close`. Pure so it is unit-testable. `top_label`
+/// is the display label of the top match, truncated char-boundary-safe.
+fn search_line_text(query: &str, match_count: usize, top_label: Option<&str>) -> String {
+    if match_count == 0 {
+        return format!("/{query} — no matches · esc close");
+    }
+    let noun = if match_count == 1 { "match" } else { "matches" };
+    let mut text = format!("/{query} — {match_count} {noun}");
+    if let Some(label) = top_label {
+        text.push_str(" · enter → ");
+        text.push_str(&truncate_label(label));
+    }
+    text.push_str(" · esc close");
+    text
+}
+
+/// Truncates a display label to at most 48 characters, appending `…` when it
+/// had to cut. Truncates on *character* boundaries (`chars().take`), never
+/// bytes — a byte slice would panic mid-UTF-8.
+fn truncate_label(label: &str) -> String {
+    const MAX_CHARS: usize = 48;
+    if label.chars().count() > MAX_CHARS {
+        let mut truncated: String = label.chars().take(MAX_CHARS).collect();
+        truncated.push('…');
+        truncated
+    } else {
+        label.to_owned()
+    }
 }
 
 /// Rasterises a single hint letter. A thin wrapper over [`render_markup`].
@@ -957,7 +1545,7 @@ mod tests {
         // `Closed` is unreachable in `press_outcome`; callers must gate on
         // `is_open()` first. Exercised through the real `BookmarkSwitcher`
         // entry point, not a reimplemented replica.
-        let switcher = BookmarkSwitcher::new();
+        let mut switcher = BookmarkSwitcher::new();
         assert!(!switcher.is_open());
 
         switcher.press_outcome(None, false);
@@ -1022,68 +1610,106 @@ mod tests {
         assert_eq!(HINT_KEYS.len(), 26);
     }
 
+    /// A `State::Mode` routing context over the given hints, for the pure
+    /// `press_outcome_core` tests.
+    fn mode_ctx(hints: &[Hint<u64>]) -> RoutingContext<'_, u64> {
+        RoutingContext::Mode { hints }
+    }
+
+    /// A `State::Hints` (standalone) routing context.
+    fn hints_ctx(hints: &[Hint<u64>]) -> RoutingContext<'_, u64> {
+        RoutingContext::Hints { hints }
+    }
+
     #[test]
     fn press_outcome_core_routes_modifier_to_hold_open() {
         let hints: Vec<Hint<u64>> = Vec::new();
-        let outcome = press_outcome_core(true, &hints, Some(Keysym::Shift_L), false);
-        assert_eq!(outcome, PressOutcome::HoldOpen);
+        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::Shift_L), false);
+        assert_eq!(outcome, CoreOutcome::HoldOpen);
     }
 
     #[test]
     fn press_outcome_core_routes_command_char_in_mode() {
         let hints: Vec<Hint<u64>> = Vec::new();
-        let outcome = press_outcome_core(true, &hints, Some(Keysym::from_char('a')), false);
-        assert_eq!(outcome, PressOutcome::Command(ModeCommand::Add));
+        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('a')), false);
+        assert_eq!(outcome, CoreOutcome::Command(ModeCommand::Add));
 
-        let outcome = press_outcome_core(true, &hints, Some(Keysym::from_char('d')), false);
-        assert_eq!(outcome, PressOutcome::Command(ModeCommand::RemoveFocused));
+        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('d')), false);
+        assert_eq!(outcome, CoreOutcome::Command(ModeCommand::RemoveFocused));
 
-        let outcome = press_outcome_core(true, &hints, Some(Keysym::from_char('x')), false);
-        assert_eq!(outcome, PressOutcome::Command(ModeCommand::RemoveFocused));
+        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('x')), false);
+        assert_eq!(outcome, CoreOutcome::Command(ModeCommand::RemoveFocused));
 
-        let outcome = press_outcome_core(true, &hints, Some(Keysym::from_char(',')), false);
-        assert_eq!(outcome, PressOutcome::Command(ModeCommand::WalkBackward));
+        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char(',')), false);
+        assert_eq!(outcome, CoreOutcome::Command(ModeCommand::WalkBackward));
 
-        let outcome = press_outcome_core(true, &hints, Some(Keysym::from_char('.')), false);
-        assert_eq!(outcome, PressOutcome::Command(ModeCommand::WalkForward));
+        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('.')), false);
+        assert_eq!(outcome, CoreOutcome::Command(ModeCommand::WalkForward));
     }
 
     #[test]
     fn press_outcome_core_command_char_dismisses_outside_mode() {
-        // Outside Mode (is_mode = false), a command letter is just an
+        // In the standalone hint overlay, a command letter is just an
         // unmatched hint letter: dismiss.
         let hints: Vec<Hint<u64>> = Vec::new();
-        let outcome = press_outcome_core(false, &hints, Some(Keysym::from_char('a')), false);
-        assert_eq!(outcome, PressOutcome::Dismiss);
+        let outcome = press_outcome_core(hints_ctx(&hints), Some(Keysym::from_char('a')), false);
+        assert_eq!(outcome, CoreOutcome::Dismiss);
+    }
+
+    #[test]
+    fn press_outcome_core_slash_in_mode_enters_search_unchorded_and_chorded() {
+        // `/` enters search from leader mode. It is checked ahead of the
+        // chorded early-return, so a shift-chorded slash (as on layouts where
+        // `/` sits on a shifted key) still enters rather than dismissing.
+        let hints: Vec<Hint<u64>> = Vec::new();
+        assert_eq!(
+            press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('/')), false),
+            CoreOutcome::EnterSearch
+        );
+        assert_eq!(
+            press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('/')), true),
+            CoreOutcome::EnterSearch
+        );
+    }
+
+    #[test]
+    fn press_outcome_core_slash_in_standalone_hints_dismisses() {
+        // Outside leader mode there is no search: `/` is an ordinary unmatched
+        // key and dismisses.
+        let hints: Vec<Hint<u64>> = Vec::new();
+        assert_eq!(
+            press_outcome_core(hints_ctx(&hints), Some(Keysym::from_char('/')), false),
+            CoreOutcome::Dismiss
+        );
     }
 
     #[test]
     fn press_outcome_core_chorded_command_char_in_mode_dismisses() {
-        // A chorded press short-circuits before command matching even when
-        // the raw keysym is a command letter and is_mode is true.
+        // A chorded press short-circuits before command matching (a non-slash
+        // key), even when the raw keysym is a command letter.
         let hints: Vec<Hint<u64>> = Vec::new();
-        let outcome = press_outcome_core(true, &hints, Some(Keysym::from_char('a')), true);
-        assert_eq!(outcome, PressOutcome::Dismiss);
+        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('a')), true);
+        assert_eq!(outcome, CoreOutcome::Dismiss);
     }
 
     #[test]
     fn press_outcome_core_modifier_and_none_dismiss_outside_mode_too() {
-        // HoldOpen and the raw == None dismiss are checked ahead of the
-        // is_mode branch, so they behave identically whether or not we're
-        // in Mode.
+        // HoldOpen (modifier) is checked ahead of the per-context split, so it
+        // behaves identically in every state; `raw == None` dismisses in the
+        // standalone hint overlay.
         let hints: Vec<Hint<u64>> = Vec::new();
-        let outcome = press_outcome_core(false, &hints, Some(Keysym::Shift_L), false);
-        assert_eq!(outcome, PressOutcome::HoldOpen);
+        let outcome = press_outcome_core(hints_ctx(&hints), Some(Keysym::Shift_L), false);
+        assert_eq!(outcome, CoreOutcome::HoldOpen);
 
-        let outcome = press_outcome_core(false, &hints, None, false);
-        assert_eq!(outcome, PressOutcome::Dismiss);
+        let outcome = press_outcome_core(hints_ctx(&hints), None, false);
+        assert_eq!(outcome, CoreOutcome::Dismiss);
     }
 
     #[test]
     fn press_outcome_core_routes_hint_letter_to_jump() {
         let hints = build_hints(fixture(&[10]).into_iter(), &visible(&[10]), HINT_KEYS);
-        let outcome = press_outcome_core(false, &hints, Some(Keysym::from_char('a')), false);
-        assert_eq!(outcome, PressOutcome::Jump(10));
+        let outcome = press_outcome_core(hints_ctx(&hints), Some(Keysym::from_char('a')), false);
+        assert_eq!(outcome, CoreOutcome::Jump(10));
 
         // In mode, a hint letter drawn from the mode alphabet (which never
         // collides with a command char) still jumps.
@@ -1092,39 +1718,222 @@ mod tests {
             &visible(&[10]),
             &mode_hint_alphabet(),
         );
-        let outcome = press_outcome_core(true, &mode_hints, Some(mode_hints[0].keysym), false);
-        assert_eq!(outcome, PressOutcome::Jump(10));
+        let outcome = press_outcome_core(mode_ctx(&mode_hints), Some(mode_hints[0].keysym), false);
+        assert_eq!(outcome, CoreOutcome::Jump(10));
     }
 
     #[test]
     fn press_outcome_core_chorded_letter_dismisses() {
         let hints = build_hints(fixture(&[10]).into_iter(), &visible(&[10]), HINT_KEYS);
-        let outcome = press_outcome_core(false, &hints, Some(Keysym::from_char('a')), true);
-        assert_eq!(outcome, PressOutcome::Dismiss);
+        let outcome = press_outcome_core(hints_ctx(&hints), Some(Keysym::from_char('a')), true);
+        assert_eq!(outcome, CoreOutcome::Dismiss);
     }
 
     #[test]
     fn press_outcome_core_escape_unmatched_and_none_dismiss() {
         let hints: Vec<Hint<u64>> = Vec::new();
         assert_eq!(
-            press_outcome_core(true, &hints, Some(Keysym::Escape), false),
-            PressOutcome::Dismiss
+            press_outcome_core(mode_ctx(&hints), Some(Keysym::Escape), false),
+            CoreOutcome::Dismiss
         );
         assert_eq!(
-            press_outcome_core(true, &hints, Some(Keysym::from_char('z')), false),
-            PressOutcome::Dismiss
+            press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('z')), false),
+            CoreOutcome::Dismiss
         );
         assert_eq!(
-            press_outcome_core(true, &hints, None, false),
-            PressOutcome::Dismiss
+            press_outcome_core(mode_ctx(&hints), None, false),
+            CoreOutcome::Dismiss
         );
     }
 
     #[test]
     fn press_outcome_core_mode_constructible_with_zero_hints_still_routes_commands() {
         let hints: Vec<Hint<u64>> = Vec::new();
-        let outcome = press_outcome_core(true, &hints, Some(Keysym::from_char('a')), false);
-        assert_eq!(outcome, PressOutcome::Command(ModeCommand::Add));
+        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('a')), false);
+        assert_eq!(outcome, CoreOutcome::Command(ModeCommand::Add));
+    }
+
+    // --- Search routing and matching ---
+
+    /// Builds search entries from `(bookmark id, name, title)` triples, using
+    /// the `u64` id as its own window stand-in so the pure matching logic
+    /// needs no real `Window`.
+    fn search_entries(rows: &[(u64, Option<&str>, Option<&str>)]) -> Vec<SearchEntry<u64>> {
+        rows.iter()
+            .map(|&(id, name, title)| SearchEntry::new(id, id, name, title))
+            .collect()
+    }
+
+    fn search_ctx<'a>(entries: &'a [SearchEntry<u64>], query: &'a str) -> RoutingContext<'a, u64> {
+        RoutingContext::Search { entries, query }
+    }
+
+    #[test]
+    fn entry_matches_by_name_and_title_independently() {
+        let entry = SearchEntry::new(1, 1, Some("Mail"), Some("Inbox — Fastmail"));
+        // Matches the name.
+        assert!(entry_matches(&entry, "mail"));
+        // Matches the title.
+        assert!(entry_matches(&entry, "inbox"));
+        // A query spanning the name/title boundary must NOT match: the two
+        // fields are never concatenated into one haystack.
+        assert!(!entry_matches(&entry, "mailinbox"));
+    }
+
+    #[test]
+    fn entry_matches_is_case_insensitive() {
+        let entry = SearchEntry::new(1, 1, Some("Mail"), None);
+        // The query is lowercased by the caller; the stored fields are
+        // lowercased at construction, so matching ignores case both ways.
+        assert!(entry_matches(&entry, "mail"));
+    }
+
+    #[test]
+    fn entry_matches_empty_query_matches_everything() {
+        let named = SearchEntry::new(1, 1, Some("Mail"), None);
+        let untitled = SearchEntry::new(2, 2, None, None);
+        assert!(entry_matches(&named, ""));
+        assert!(entry_matches(&untitled, ""));
+    }
+
+    #[test]
+    fn top_match_is_first_in_list_order() {
+        let entries = search_entries(&[
+            (1, Some("Editor"), None),
+            (2, Some("Mail client"), None),
+            (3, Some("Mail archive"), None),
+        ]);
+        // Two entries match "mail"; the top match is the first in list order.
+        let top = top_match(&entries, "mail").expect("a match exists");
+        assert_eq!(top.bookmark_id, 2);
+        // No match yields None.
+        assert!(top_match(&entries, "zzz").is_none());
+    }
+
+    #[test]
+    fn search_label_prefers_name_then_clean_title_then_untitled() {
+        assert_eq!(
+            SearchEntry::new(1, 1, Some("Mail"), Some("Inbox")).label,
+            "Mail"
+        );
+        assert_eq!(SearchEntry::new(2, 2, None, Some("Inbox")).label, "Inbox");
+        // An empty clean title is treated as untitled.
+        assert_eq!(SearchEntry::new(3, 3, None, Some("")).label, "(untitled)");
+        assert_eq!(SearchEntry::new(4, 4, None, None).label, "(untitled)");
+    }
+
+    #[test]
+    fn press_outcome_core_search_pushes_printable_char() {
+        let entries = search_entries(&[(1, Some("Mail"), None)]);
+        let outcome = press_outcome_core(
+            search_ctx(&entries, ""),
+            Some(Keysym::from_char('m')),
+            false,
+        );
+        assert_eq!(outcome, CoreOutcome::Push('m'));
+    }
+
+    #[test]
+    fn press_outcome_core_search_non_char_keysym_holds_open() {
+        // A function key (no `key_char`) must not dismiss or corrupt the query.
+        let entries = search_entries(&[(1, Some("Mail"), None)]);
+        let outcome = press_outcome_core(search_ctx(&entries, "ma"), Some(Keysym::F5), false);
+        assert_eq!(outcome, CoreOutcome::HoldOpen);
+    }
+
+    #[test]
+    fn press_outcome_core_search_control_char_holds_open() {
+        // Tab does have a `key_char` (`Some('\t')`), unlike F5, so this
+        // exercises the `is_control()` filter specifically rather than the
+        // `key_char().is_none()` branch above — a regression that dropped
+        // the `is_control` check would wrongly `Push('\t')` into the query.
+        let entries = search_entries(&[(1, Some("Mail"), None)]);
+        let outcome = press_outcome_core(search_ctx(&entries, "ma"), Some(Keysym::Tab), false);
+        assert_eq!(outcome, CoreOutcome::HoldOpen);
+    }
+
+    #[test]
+    fn press_outcome_core_search_backspace_pops() {
+        let entries = search_entries(&[(1, Some("Mail"), None)]);
+        let outcome =
+            press_outcome_core(search_ctx(&entries, "ma"), Some(Keysym::BackSpace), false);
+        assert_eq!(outcome, CoreOutcome::Pop);
+    }
+
+    #[test]
+    fn press_outcome_core_search_enter_jumps_to_top_match_or_holds() {
+        let entries = search_entries(&[(7, Some("Mail"), None), (8, Some("Music"), None)]);
+        // "m" matches both; Enter jumps to the first in list order.
+        assert_eq!(
+            press_outcome_core(search_ctx(&entries, "m"), Some(Keysym::Return), false),
+            CoreOutcome::Jump(7)
+        );
+        // A query with no match holds open rather than dismissing — the user
+        // can keep correcting.
+        assert_eq!(
+            press_outcome_core(search_ctx(&entries, "zzz"), Some(Keysym::Return), false),
+            CoreOutcome::HoldOpen
+        );
+    }
+
+    #[test]
+    fn press_outcome_core_search_chorded_holds_open_not_dismiss() {
+        // A habitual Shift while typing must not destroy the query.
+        let entries = search_entries(&[(1, Some("Mail"), None)]);
+        let outcome = press_outcome_core(
+            search_ctx(&entries, "ma"),
+            Some(Keysym::from_char('m')),
+            true,
+        );
+        assert_eq!(outcome, CoreOutcome::HoldOpen);
+    }
+
+    #[test]
+    fn press_outcome_core_search_escape_dismisses() {
+        let entries = search_entries(&[(1, Some("Mail"), None)]);
+        let outcome = press_outcome_core(search_ctx(&entries, "ma"), Some(Keysym::Escape), false);
+        assert_eq!(outcome, CoreOutcome::Dismiss);
+    }
+
+    #[test]
+    fn search_line_text_zero_match_and_truncation() {
+        // Zero matches: no "enter →" clause.
+        assert_eq!(
+            search_line_text("quz", 0, None),
+            "/quz — no matches · esc close"
+        );
+        // Singular vs plural noun, and the top-match label is shown.
+        assert_eq!(
+            search_line_text("qu", 1, Some("Mail")),
+            "/qu — 1 match · enter → Mail · esc close"
+        );
+        assert_eq!(
+            search_line_text("qu", 3, Some("Mail")),
+            "/qu — 3 matches · enter → Mail · esc close"
+        );
+        // An over-long label is truncated on a char boundary with an ellipsis.
+        let long: String = "x".repeat(60);
+        let line = search_line_text("q", 1, Some(&long));
+        assert!(line.contains(&format!("{}…", "x".repeat(48))));
+        assert!(!line.contains(&"x".repeat(49)));
+    }
+
+    #[test]
+    fn truncate_label_multi_byte_char_boundary() {
+        // Multi-byte characters (here: CJK, 3 bytes each in UTF-8) crossing
+        // the 48-char boundary must be truncated on a *character* boundary —
+        // a byte-slicing regression would panic mid-codepoint on this input.
+        let long: String = "日".repeat(60);
+        let truncated = truncate_label(&long);
+        assert_eq!(truncated.chars().count(), 49); // 48 chars + '…'
+        assert!(truncated.ends_with('…'));
+        assert_eq!(truncated.chars().filter(|&c| c == '日').count(), 48);
+
+        // A single trailing emoji (4 bytes, non-BMP) right at the boundary.
+        let mixed: String = "a".repeat(47) + "🎉🎉";
+        let truncated = truncate_label(&mixed);
+        assert_eq!(truncated.chars().count(), 49); // 48 chars + '…'
+        assert!(truncated.ends_with('…'));
     }
 
     #[test]
@@ -1150,6 +1959,17 @@ mod tests {
         assert!(
             markup.contains("d/x remove"),
             "expected 'd/x remove' grouping in: {markup}"
+        );
+    }
+
+    #[test]
+    fn mode_sheet_markup_mentions_slash_search() {
+        // `/` is a state transition into search, not a `ModeCommand`, so it is
+        // not derived from `MODE_COMMANDS`; pin its mention on the sheet.
+        let markup = mode_sheet_markup();
+        assert!(
+            markup.contains("/ search"),
+            "expected '/ search' mention in: {markup}"
         );
     }
 }
