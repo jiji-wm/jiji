@@ -32,6 +32,7 @@ pub mod activity;
 pub mod animations;
 pub mod appearance;
 pub mod binds;
+pub mod bookmarks;
 pub mod debug;
 pub mod error;
 pub mod gestures;
@@ -49,6 +50,7 @@ pub use crate::activity::{ActivityDecl, ActivityName};
 pub use crate::animations::{Animation, Animations};
 pub use crate::appearance::*;
 pub use crate::binds::*;
+pub use crate::bookmarks::{BookmarksConfig, OrderMode, RepressPolicy};
 pub use crate::debug::Debug;
 pub use crate::error::{ConfigIncludeError, ConfigParseResult};
 pub use crate::gestures::Gestures;
@@ -95,6 +97,7 @@ pub struct Config {
     pub workspaces: Vec<Workspace>,
     pub activities: Vec<ActivityDecl>,
     pub recent_windows: RecentWindows,
+    pub bookmarks: BookmarksConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +210,7 @@ where
                 "xwayland-satellite" => m_merge!(xwayland_satellite),
                 "switch-events" => m_merge!(switch_events),
                 "debug" => m_merge!(debug),
+                "bookmarks" => m_merge!(bookmarks),
 
                 // Multipart sections.
                 "output" => {
@@ -981,6 +985,11 @@ mod tests {
                     Alt+grave { next-window filter="app-id"; }
                     Super+Tab { next-window scope="output"; }
                 }
+            }
+
+            bookmarks {
+                order "mru"
+                walk-wrap false
             }
             "##,
         );
@@ -2468,8 +2477,58 @@ mod tests {
                     },
                 ],
             },
+            bookmarks: BookmarksConfig {
+                repress: MoveToFront,
+                order: Mru,
+                walk_wrap: false,
+            },
         }
         "#);
+    }
+
+    #[test]
+    fn bookmarks_section_explicit_values() {
+        let parsed = do_parse(
+            r##"
+            bookmarks {
+                repress "move-to-front"
+                order "mru"
+                walk-wrap false
+            }
+            "##,
+        );
+        assert_eq!(
+            parsed.bookmarks,
+            BookmarksConfig {
+                repress: RepressPolicy::MoveToFront,
+                order: OrderMode::Mru,
+                walk_wrap: false,
+            }
+        );
+    }
+
+    #[test]
+    fn bookmarks_section_defaults_when_absent() {
+        let parsed = do_parse("");
+        assert_eq!(parsed.bookmarks, BookmarksConfig::default());
+        assert_eq!(parsed.bookmarks.repress, RepressPolicy::MoveToFront);
+        assert_eq!(parsed.bookmarks.order, OrderMode::Manual);
+        assert!(parsed.bookmarks.walk_wrap);
+    }
+
+    #[test]
+    fn bookmarks_repress_remove_is_a_parse_error() {
+        // `"remove"` is not a valid `repress` value in this build: the only
+        // accepted policy is move-to-front. A confirmation-gated removal policy
+        // is a later addition; until then the string must be rejected.
+        let res = Config::parse_mem(
+            r##"
+            bookmarks {
+                repress "remove"
+            }
+            "##,
+        );
+        assert!(res.is_err(), "repress \"remove\" must fail to parse");
     }
 
     fn diff_lines(expected: &str, actual: &str) -> String {

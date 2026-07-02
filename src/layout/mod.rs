@@ -467,6 +467,7 @@ pub struct Options {
     pub gestures: jiji_config::Gestures,
     pub overview: jiji_config::Overview,
     pub blur: jiji_config::Blur,
+    pub bookmarks: jiji_config::BookmarksConfig,
     // Debug flags.
     pub disable_resize_throttling: bool,
     pub disable_transactions: bool,
@@ -1077,6 +1078,7 @@ impl Options {
             gestures: config.gestures,
             overview: config.overview,
             blur: config.blur,
+            bookmarks: config.bookmarks,
             disable_resize_throttling: config.debug.disable_resize_throttling,
             disable_transactions: config.debug.disable_transactions,
             deactivate_unfocused_windows: config.debug.deactivate_unfocused_windows,
