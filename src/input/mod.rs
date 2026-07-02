@@ -1901,10 +1901,21 @@ impl State {
                     || self.niri.window_mru_ui.is_open()
                 {
                     debug!("open-bookmark-switcher: another overlay is open, ignoring");
-                } else if self.niri.bookmark_switcher.open(&self.niri.layout) {
-                    // The overlay does not self-redraw; opening (or the
-                    // idempotent re-open refresh) needs an explicit redraw.
-                    self.niri.queue_redraw_all();
+                } else {
+                    // Scope the config borrow to the open call: the `RefCell`
+                    // guard must be dropped before `queue_redraw_all()` below
+                    // borrows `self.niri` again.
+                    let opened = {
+                        let config = self.niri.config.borrow();
+                        self.niri
+                            .bookmark_switcher
+                            .open(&self.niri.layout, &config.bookmarks)
+                    };
+                    if opened {
+                        // The overlay does not self-redraw; opening (or the
+                        // idempotent re-open refresh) needs an explicit redraw.
+                        self.niri.queue_redraw_all();
+                    }
                 }
                 // A `false` return means nothing was visible to tag (or every
                 // hint failed to rasterise); `open` logged the reason and left
@@ -1919,10 +1930,21 @@ impl State {
                     || self.niri.window_mru_ui.is_open()
                 {
                     debug!("enter-bookmark-mode: another overlay is open, ignoring");
-                } else if self.niri.bookmark_switcher.open_mode(&self.niri.layout) {
-                    // The overlay does not self-redraw; opening (or the
-                    // idempotent re-open refresh) needs an explicit redraw.
-                    self.niri.queue_redraw_all();
+                } else {
+                    // Scope the config borrow to the open call: the `RefCell`
+                    // guard must be dropped before `queue_redraw_all()` below
+                    // borrows `self.niri` again.
+                    let opened = {
+                        let config = self.niri.config.borrow();
+                        self.niri
+                            .bookmark_switcher
+                            .open_mode(&self.niri.layout, &config.bookmarks)
+                    };
+                    if opened {
+                        // The overlay does not self-redraw; opening (or the
+                        // idempotent re-open refresh) needs an explicit redraw.
+                        self.niri.queue_redraw_all();
+                    }
                 }
                 // Unlike `OpenBookmarkSwitcher`, `open_mode` only refuses
                 // entry when the command sheet itself fails to rasterise —

@@ -50,7 +50,9 @@ pub use crate::activity::{ActivityDecl, ActivityName};
 pub use crate::animations::{Animation, Animations};
 pub use crate::appearance::*;
 pub use crate::binds::*;
-pub use crate::bookmarks::{BookmarksConfig, OrderMode, RepressPolicy};
+pub use crate::bookmarks::{
+    BookmarksConfig, HintAlphabet, ModeKeysConfig, OrderMode, RepressPolicy,
+};
 pub use crate::debug::Debug;
 pub use crate::error::{ConfigIncludeError, ConfigParseResult};
 pub use crate::gestures::Gestures;
@@ -2482,6 +2484,25 @@ mod tests {
                 order: Mru,
                 walk_wrap: false,
                 return_to_previous: true,
+                hint_alphabet: HintAlphabet(
+                    "asdfghjklqwertyuiopzxcvbnm",
+                ),
+                mode_keys: ModeKeysConfig {
+                    add: [
+                        'a',
+                    ],
+                    remove: [
+                        'd',
+                        'x',
+                    ],
+                    walk_backward: [
+                        ',',
+                    ],
+                    walk_forward: [
+                        '.',
+                    ],
+                    search: '/',
+                },
             },
         }
         "#);
@@ -2506,7 +2527,205 @@ mod tests {
                 order: OrderMode::Mru,
                 walk_wrap: false,
                 return_to_previous: false,
+                ..BookmarksConfig::default()
             }
+        );
+    }
+
+    #[test]
+    fn bookmarks_mode_keys_and_hint_alphabet_parse() {
+        let parsed = do_parse(
+            r##"
+            bookmarks {
+                hint-alphabet "qwerty"
+                mode-keys {
+                    add "n"
+                    remove "m" "b"
+                    walk-backward "j"
+                    walk-forward "k"
+                    search ";"
+                }
+            }
+            "##,
+        );
+        assert_eq!(parsed.bookmarks.hint_alphabet.as_str(), "qwerty");
+        assert_eq!(
+            parsed.bookmarks.mode_keys,
+            ModeKeysConfig::new(vec!['n'], vec!['m', 'b'], vec!['j'], vec!['k'], ';')
+                .expect("valid mode-keys table")
+        );
+    }
+
+    #[test]
+    fn bookmarks_mode_keys_partial_fills_defaults() {
+        // Only `add` is overridden; the other four commands fall back to the
+        // `ModeKeysConfig::default` table.
+        let parsed = do_parse(
+            r##"
+            bookmarks {
+                mode-keys {
+                    add "n"
+                }
+            }
+            "##,
+        );
+        assert_eq!(
+            parsed.bookmarks.mode_keys,
+            ModeKeysConfig::new(vec!['n'], vec!['d', 'x'], vec![','], vec!['.'], '/')
+                .expect("valid mode-keys table")
+        );
+        // `hint-alphabet` is untouched by the `mode-keys` override.
+        assert_eq!(parsed.bookmarks.hint_alphabet, HintAlphabet::default());
+    }
+
+    #[test]
+    fn bookmarks_mode_keys_multi_char_token_errors() {
+        let err = Config::parse_mem(
+            r##"
+            bookmarks {
+                mode-keys {
+                    add "ab"
+                }
+            }
+            "##,
+        )
+        .expect_err("a multi-character mode key must be rejected");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("exactly one"),
+            "expected single-character error, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn bookmarks_mode_keys_duplicate_across_fields_errors() {
+        // `add "d"` collides with the default `remove "d" "x"` of the omitted
+        // remove field: validation runs on the effective (post-default) table.
+        let err = Config::parse_mem(
+            r##"
+            bookmarks {
+                mode-keys {
+                    add "d"
+                }
+            }
+            "##,
+        )
+        .expect_err("a key colliding with a default of an omitted command must be rejected");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("more than one command"),
+            "expected duplicate-command error, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn bookmarks_mode_keys_search_arity_errors() {
+        let err = Config::parse_mem(
+            r##"
+            bookmarks {
+                mode-keys {
+                    search "a" "b"
+                }
+            }
+            "##,
+        )
+        .expect_err("`search` with more than one key must be rejected");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("exactly one"),
+            "expected 'exactly one' error, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn bookmarks_mode_keys_explicit_cross_command_collision_errors() {
+        // Both `add` and `remove` are explicitly configured (not defaulted)
+        // and share a key: still a load error.
+        let err = Config::parse_mem(
+            r##"
+            bookmarks {
+                mode-keys {
+                    add "n"
+                    remove "n"
+                }
+            }
+            "##,
+        )
+        .expect_err("an explicit cross-command key collision must be rejected");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("more than one command"),
+            "expected duplicate-command error, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn bookmarks_mode_keys_within_command_duplicate_errors() {
+        let err = Config::parse_mem(
+            r##"
+            bookmarks {
+                mode-keys {
+                    remove "d" "d"
+                }
+            }
+            "##,
+        )
+        .expect_err("a duplicate key within one command must be rejected");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("more than one command"),
+            "expected duplicate-command error, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn bookmarks_hint_alphabet_duplicate_char_errors() {
+        let err = Config::parse_mem(
+            r##"
+            bookmarks {
+                hint-alphabet "aab"
+            }
+            "##,
+        )
+        .expect_err("a duplicate character in the hint alphabet must be rejected");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("duplicate character"),
+            "expected duplicate-character error, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn bookmarks_hint_alphabet_empty_errors() {
+        let err = Config::parse_mem(
+            r##"
+            bookmarks {
+                hint-alphabet ""
+            }
+            "##,
+        )
+        .expect_err("an empty hint alphabet must be rejected");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("must not be empty"),
+            "expected empty-alphabet error, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn bookmarks_hint_alphabet_whitespace_errors() {
+        let err = Config::parse_mem(
+            r##"
+            bookmarks {
+                hint-alphabet "a b"
+            }
+            "##,
+        )
+        .expect_err("a whitespace character in the hint alphabet must be rejected");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("control or whitespace"),
+            "expected control/whitespace error, got: {rendered}"
         );
     }
 

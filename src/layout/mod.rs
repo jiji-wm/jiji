@@ -1134,7 +1134,7 @@ impl Options {
             gestures: config.gestures,
             overview: config.overview,
             blur: config.blur,
-            bookmarks: config.bookmarks,
+            bookmarks: config.bookmarks.clone(),
             disable_resize_throttling: config.debug.disable_resize_throttling,
             disable_transactions: config.debug.disable_transactions,
             deactivate_unfocused_windows: config.debug.deactivate_unfocused_windows,

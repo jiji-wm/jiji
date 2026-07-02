@@ -6,10 +6,14 @@
 //! tile's top-left corner; pressing a hint jumps straight to that bookmark.
 //! [`BookmarkSwitcher::open_mode`] opens the same hints plus a one-line
 //! command sheet anchored at the bottom of each output, and reads a handful
-//! of add / remove-focused / walk-backward-forward command letters (see
-//! [`MODE_COMMANDS`], the single source of truth for the table) ahead of
-//! hint matching — a leader chord that lets bookmark management happen
-//! without leaving the keyboard. Mode entry does not require any bookmarks
+//! of add / remove-focused / walk-backward-forward command letters (resolved
+//! from config into a [`ModeKeymap`] at open, the single source of truth for
+//! that instance's table) ahead of hint matching — a leader chord that lets
+//! bookmark management happen without leaving the keyboard. The command keys
+//! and the hint alphabet are configurable (`bookmarks.mode-keys` /
+//! `bookmarks.hint-alphabet`); the defaults are the letters `a` add, `d`/`x`
+//! remove, `,`/`.` walk, and `/` search over the home-row-first alphabet.
+//! Mode entry does not require any bookmarks
 //! to be visible: the command sheet is useful on its own (e.g. to add the
 //! first bookmark).
 //!
@@ -37,7 +41,8 @@
 //! press dismisses it (handled by the caller) and it never gates pointer
 //! hit-testing.
 //!
-//! Leader mode layers one more state on top: pressing `/` switches from
+//! Leader mode layers one more state on top: pressing the configured search
+//! key (default `/`) switches from
 //! [`State::Mode`] into [`State::Search`], an incremental, case-insensitive
 //! substring filter over each visible bookmark's display name and clean
 //! window title (the two fields matched independently, never as one
@@ -50,8 +55,8 @@
 //!
 //! Two deliberate limitations of this first search cut, recorded here rather
 //! than in the code that embodies them:
-//! - Search is reachable only via `/` from leader mode; there is no separate selector to open
-//!   straight into it.
+//! - Search is reachable only via the configured search key (default `/`) from leader mode; there
+//!   is no separate selector to open straight into it.
 //! - Query characters come from the *base* (unshifted) keysym via [`Keysym::key_char`], so there
 //!   are no capitals, shifted punctuation, or IME input in the query. This is harmless under
 //!   case-insensitive matching (the lowercased query still matches), just visually lower-case.
@@ -82,13 +87,6 @@ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::utils::{output_size, to_physical_precise_round, with_toplevel_role};
 use crate::window::Mapped;
 
-/// Letters used for hints, home-row-first. Assigned to visible bookmarked
-/// windows in bookmark-list order; visible bookmarks past the end of this
-/// string get no hint (a boundary — curated bookmark lists are small). The
-/// standalone switcher uses the full alphabet; [`mode_hint_alphabet`] strips
-/// the [`MODE_COMMANDS`] letters out for leader mode.
-const HINT_KEYS: &str = "asdfghjklqwertyuiopzxcvbnm";
-
 const PADDING: i32 = 8;
 const BORDER: i32 = 4;
 const FONT: &str = "mono 16px";
@@ -102,18 +100,89 @@ pub enum ModeCommand {
     WalkForward,
 }
 
-/// Single source of truth for leader-mode routing: which letter triggers
-/// which [`ModeCommand`], and the label shown for it on the command sheet.
-/// Drives three things from one place so they cannot drift apart: keysym
-/// matching in [`command_for_keysym`], the in-mode hint alphabet
-/// ([`mode_hint_alphabet`]), and the sheet text ([`mode_sheet_markup`]).
-const MODE_COMMANDS: &[(char, ModeCommand, &str)] = &[
-    ('a', ModeCommand::Add, "add"),
-    ('d', ModeCommand::RemoveFocused, "remove"),
-    ('x', ModeCommand::RemoveFocused, "remove"),
-    (',', ModeCommand::WalkBackward, "walk"),
-    ('.', ModeCommand::WalkForward, "walk"),
-];
+impl ModeCommand {
+    /// The label shown for this command on the command sheet. Code-owned (the
+    /// config remaps keys, never labels); both walk directions deliberately
+    /// share `"walk"` so a walk-backward/forward pair groups into one sheet
+    /// entry.
+    fn label(self) -> &'static str {
+        match self {
+            ModeCommand::Add => "add",
+            ModeCommand::RemoveFocused => "remove",
+            ModeCommand::WalkBackward | ModeCommand::WalkForward => "walk",
+        }
+    }
+}
+
+/// The resolved leader-mode key table for one open instance, built from config
+/// at [`BookmarkSwitcher::open_mode`] and carried by value in [`State::Mode`]
+/// so the instance keeps its table for its whole lifetime (a config reload
+/// takes effect on the next open, never mid-open).
+///
+/// Single source of truth for that instance's routing: keysym → command
+/// ([`Self::command_for_keysym`]), the search-entry keysym, and the sheet text
+/// ([`mode_sheet_markup`]) all read it, so they cannot drift apart. The
+/// `mode_alphabet` is derived by stripping every command and search character
+/// from the configured `full_alphabet`, so a hint letter and a command key can
+/// never collide by construction; the standalone switcher keeps
+/// `full_alphabet` unstripped.
+struct ModeKeymap {
+    /// `(char, keysym, command)`, in sheet order: add keys, remove keys,
+    /// walk-backward keys, walk-forward keys. `keysym` is precomputed so
+    /// routing an incoming press is a pure comparison.
+    commands: Vec<(char, Keysym, ModeCommand)>,
+    /// The `(char, keysym)` that switches into [`State::Search`].
+    search: (char, Keysym),
+    /// The configured hint alphabet, used unstripped by the standalone switcher.
+    full_alphabet: String,
+    /// `full_alphabet` with every command and search character removed — the
+    /// leader-mode hint alphabet, disjoint from the command keys by
+    /// construction.
+    mode_alphabet: String,
+}
+
+impl ModeKeymap {
+    fn from_config(cfg: &jiji_config::BookmarksConfig) -> Self {
+        let mk = &cfg.mode_keys;
+        let mut commands = Vec::new();
+        let mut push = |chars: &[char], cmd: ModeCommand| {
+            for &ch in chars {
+                commands.push((ch, Keysym::from_char(ch), cmd));
+            }
+        };
+        push(mk.add(), ModeCommand::Add);
+        push(mk.remove(), ModeCommand::RemoveFocused);
+        push(mk.walk_backward(), ModeCommand::WalkBackward);
+        push(mk.walk_forward(), ModeCommand::WalkForward);
+
+        let search = (mk.search(), Keysym::from_char(mk.search()));
+
+        let full_alphabet = cfg.hint_alphabet.as_str().to_string();
+        let reserved: HashSet<char> = commands
+            .iter()
+            .map(|&(ch, _, _)| ch)
+            .chain(std::iter::once(mk.search()))
+            .collect();
+        let mode_alphabet = full_alphabet
+            .chars()
+            .filter(|c| !reserved.contains(c))
+            .collect();
+
+        Self {
+            commands,
+            search,
+            full_alphabet,
+            mode_alphabet,
+        }
+    }
+
+    /// Resolves a raw keysym to its [`ModeCommand`], if any command key matches.
+    fn command_for_keysym(&self, raw: Keysym) -> Option<ModeCommand> {
+        self.commands
+            .iter()
+            .find_map(|&(_, keysym, cmd)| (keysym == raw).then_some(cmd))
+    }
+}
 
 /// Cache key: which hint letter, at which output scale.
 type BufferKey = (char, NotNan<f64>);
@@ -254,9 +323,14 @@ enum State<Id> {
     Mode {
         hints: Vec<Hint<Id>>,
         /// All visible bookmarked windows, snapshotted at open, carried ready
-        /// so `/` can enter [`State::Search`] without re-walking the layout.
+        /// so the search key can enter [`State::Search`] without re-walking the
+        /// layout.
         entries: Vec<SearchEntry<Id>>,
         sheet: MemoryBuffer,
+        /// The resolved key table for this open instance. Carried by value so
+        /// routing and the sheet text read one consistent table for the whole
+        /// lifetime of the open, independent of any config reload.
+        keymap: ModeKeymap,
     },
     /// Incremental search over the mode snapshot. Like `Mode`/`Hints`, this
     /// variant carries its scale-1 rasterised artifact — the query `line` —
@@ -432,7 +506,8 @@ impl BookmarkSwitcher {
     /// Re-invoking while already open (in either variant) recomputes the
     /// assignment against the current layout into `Hints` (an idempotent
     /// refresh that also exits mode, if it was active — last action wins).
-    pub fn open(&mut self, layout: &Layout<Mapped>) -> bool {
+    pub fn open(&mut self, layout: &Layout<Mapped>, config: &jiji_config::BookmarksConfig) -> bool {
+        let keymap = ModeKeymap::from_config(config);
         let visible = Self::collect_visible_windows(layout);
 
         let mut hints = build_hints(
@@ -442,7 +517,7 @@ impl BookmarkSwitcher {
                 .iter()
                 .map(|bookmark| (bookmark.id().get(), bookmark.anchor().window().clone())),
             &visible,
-            HINT_KEYS,
+            &keymap.full_alphabet,
         );
 
         if hints.is_empty() {
@@ -466,18 +541,43 @@ impl BookmarkSwitcher {
         true
     }
 
-    /// Builds the hint list (over [`mode_hint_alphabet`], not the full
-    /// alphabet) and the command sheet, then opens the overlay in leader
-    /// mode, returning `true` if it opened.
+    /// Builds the hint list (over the resolved [`ModeKeymap::mode_alphabet`],
+    /// not the full alphabet) and the command sheet, then opens the overlay in
+    /// leader mode, returning `true` if it opened.
     ///
     /// Unlike [`Self::open`], an empty hint list does *not* refuse entry —
     /// the command sheet alone (e.g. to add the first bookmark) is a useful
     /// mode to enter. The only refusal is the command sheet itself failing
     /// to rasterise at scale 1.
     ///
+    /// The key table is resolved from `config` here and carried by value in
+    /// [`State::Mode`]: a config reload takes effect on the *next* open, and a
+    /// live-open instance finishes with the table it opened with (no
+    /// dismiss-on-reload). Because the sheet text depends on that table (not
+    /// just on the output scale), the per-scale sheet caches are cleared here
+    /// so a reopen under a changed table cannot serve stale sheet pixels.
+    ///
     /// Re-invoking while already open (in either variant) recomputes into
     /// `Mode` — last action wins, mirroring [`Self::open`].
-    pub fn open_mode(&mut self, layout: &Layout<Mapped>) -> bool {
+    pub fn open_mode(
+        &mut self,
+        layout: &Layout<Mapped>,
+        config: &jiji_config::BookmarksConfig,
+    ) -> bool {
+        let keymap = ModeKeymap::from_config(config);
+        if keymap.mode_alphabet.is_empty() && !keymap.full_alphabet.is_empty() {
+            warn!(
+                "bookmark leader mode: hint-alphabet is fully consumed by command/search keys; \
+                 no jump hints will be shown"
+            );
+        }
+
+        // The sheet text is a function of the resolved key table, not just the
+        // output scale the cache keys on. Clear both sheet caches so a reopen
+        // under a changed table re-rasterises rather than serving a stale sheet.
+        self.sheet_buffers.borrow_mut().clear();
+        self.warned_sheet_uploads.borrow_mut().clear();
+
         let titles = Self::collect_visible_titles(layout);
         let visible: HashSet<Window> = titles.keys().cloned().collect();
 
@@ -488,7 +588,7 @@ impl BookmarkSwitcher {
                 .iter()
                 .map(|bookmark| (bookmark.id().get(), bookmark.anchor().window().clone())),
             &visible,
-            &mode_hint_alphabet(),
+            &keymap.mode_alphabet,
         );
         self.retain_rasterisable(&mut hints);
 
@@ -512,7 +612,7 @@ impl BookmarkSwitcher {
             })
             .collect();
 
-        let sheet_markup = mode_sheet_markup();
+        let sheet_markup = mode_sheet_markup(&keymap);
         let sheet = {
             let mut sheet_buffers = self.sheet_buffers.borrow_mut();
             sheet_buffers
@@ -536,6 +636,7 @@ impl BookmarkSwitcher {
             hints,
             entries,
             sheet,
+            keymap,
         };
         self.warned_empty_frame.set(false);
         true
@@ -563,9 +664,10 @@ impl BookmarkSwitcher {
                 raw,
                 chorded,
             ),
-            State::Mode { hints, .. } => press_outcome_core(
+            State::Mode { hints, keymap, .. } => press_outcome_core(
                 RoutingContext::Mode {
                     hints: hints.as_slice(),
+                    keymap,
                 },
                 raw,
                 chorded,
@@ -828,8 +930,9 @@ impl BookmarkSwitcher {
         // `Search`. Both count toward `drew_any` — a zero-match search still
         // draws its line, so the overlay is never an invisible key-eater.
         match &self.state {
-            State::Mode { sheet, .. } => {
-                if self.render_sheet(sheet, output, renderer, scale, push) {
+            State::Mode { sheet, keymap, .. } => {
+                let markup = mode_sheet_markup(keymap);
+                if self.render_sheet(sheet, &markup, output, renderer, scale, push) {
                     drew_any = true;
                 }
             }
@@ -890,11 +993,14 @@ impl BookmarkSwitcher {
     /// (the `RescaleRenderElement` wrap below uses a fixed `1.0` factor,
     /// purely to satisfy the shared render-element type). `fallback` is the
     /// scale-1 buffer carried by [`State::Mode`], used whenever the
-    /// exact-scale render below fails or hasn't been cached yet. Returns
-    /// whether anything was actually pushed.
+    /// exact-scale render below fails or hasn't been cached yet. `markup` is
+    /// the sheet text derived from the state-carried [`ModeKeymap`] by the
+    /// caller — this helper never re-derives it, so it renders exactly the
+    /// open instance's table. Returns whether anything was actually pushed.
     fn render_sheet<R: NiriRenderer>(
         &self,
         fallback: &MemoryBuffer,
+        markup: &str,
         output: &Output,
         renderer: &mut R,
         scale: f64,
@@ -905,7 +1011,7 @@ impl BookmarkSwitcher {
             let at_scale = sheet_buffers
                 .entry(NotNan::new(scale).expect("scale is not NaN"))
                 .or_insert_with(|| {
-                    render_markup(&mode_sheet_markup(), scale)
+                    render_markup(markup, scale)
                         .inspect_err(|err| {
                             warn!(
                                 "bookmark mode sheet failed to rasterise at scale {scale}: {err:?}"
@@ -1053,8 +1159,12 @@ enum CoreOutcome {
 enum RoutingContext<'a, Id> {
     /// Standalone hint overlay: hint letters only.
     Hints { hints: &'a [Hint<Id>] },
-    /// Leader mode: command letters, then hint letters, plus `/` → search.
-    Mode { hints: &'a [Hint<Id>] },
+    /// Leader mode: command letters, then hint letters, plus the search key →
+    /// search. The resolved key table is read from `keymap`.
+    Mode {
+        hints: &'a [Hint<Id>],
+        keymap: &'a ModeKeymap,
+    },
     /// Incremental search: the query drives matching; hints are not consulted
     /// (they are indicator-only while searching).
     Search {
@@ -1070,10 +1180,11 @@ enum RoutingContext<'a, Id> {
 /// A pure modifier keysym holds the overlay open in every state. Past that,
 /// routing splits by [`RoutingContext`]:
 /// - `Hints`: chorded or `raw == None` dismisses; otherwise a hint letter jumps and anything else
-///   dismisses. `/` is just an unmatched key here.
-/// - `Mode`: `/` enters search — checked *before* the chorded early-return so a shift-chorded slash
-///   on a non-US layout still enters search. Then a chorded press dismisses, a command letter runs
-///   its command, a hint letter jumps, and anything else dismisses.
+///   dismisses. The search key is just an unmatched key here.
+/// - `Mode`: the configured search key (default `/`) enters search — checked *before* the chorded
+///   early-return so a shift-chorded search key on a non-US layout still enters search. Then a
+///   chorded press dismisses, a command letter runs its command, a hint letter jumps, and anything
+///   else dismisses.
 /// - `Search`: a chorded press or `raw == None` holds open (a habitual Shift must not destroy the
 ///   typed query); `Esc` dismisses; `Enter` jumps to the top match if one exists, else holds;
 ///   `Backspace` pops; an otherwise printable character is pushed; any other keysym (arrows,
@@ -1100,11 +1211,11 @@ fn press_outcome_core<Id>(
                 None => CoreOutcome::Dismiss,
             }
         }
-        RoutingContext::Mode { hints } => {
-            // `/` enters search, checked ahead of the chorded early-return so a
-            // shift-chorded slash (non-US layouts) still enters rather than
-            // dismissing.
-            if raw == Some(Keysym::from_char('/')) {
+        RoutingContext::Mode { hints, keymap } => {
+            // The search key enters search, checked ahead of the chorded
+            // early-return so a shift-chorded search key (non-US layouts) still
+            // enters rather than dismissing.
+            if raw == Some(keymap.search.1) {
                 return CoreOutcome::EnterSearch;
             }
             if chorded {
@@ -1113,11 +1224,11 @@ fn press_outcome_core<Id>(
             let Some(raw) = raw else {
                 return CoreOutcome::Dismiss;
             };
-            // Commands can't collide with hints by construction
-            // (`mode_hint_alphabet` excludes every `MODE_COMMANDS` character),
-            // but checking commands first costs nothing and keeps that
-            // guarantee from being load-bearing here.
-            if let Some(cmd) = command_for_keysym(raw) {
+            // Commands can't collide with hints by construction (the mode
+            // alphabet excludes every command and search character), but
+            // checking commands first costs nothing and keeps that guarantee
+            // from being load-bearing here.
+            if let Some(cmd) = keymap.command_for_keysym(raw) {
                 return CoreOutcome::Command(cmd);
             }
             match match_keysym(hints, raw) {
@@ -1161,37 +1272,18 @@ fn press_outcome_core<Id>(
     }
 }
 
-/// Resolves a raw keysym to its [`ModeCommand`], derived from
-/// [`MODE_COMMANDS`] rather than a separately maintained keysym table so the
-/// two can never drift.
-fn command_for_keysym(raw: Keysym) -> Option<ModeCommand> {
-    MODE_COMMANDS
-        .iter()
-        .find_map(|&(ch, cmd, _)| (Keysym::from_char(ch) == raw).then_some(cmd))
-}
-
-/// The in-mode hint alphabet: [`HINT_KEYS`] with every [`MODE_COMMANDS`]
-/// character removed, so a hint letter and a command letter can never
-/// collide. The standalone switcher ([`BookmarkSwitcher::open`]) keeps the
-/// full alphabet.
-fn mode_hint_alphabet() -> String {
-    HINT_KEYS
-        .chars()
-        .filter(|c| !MODE_COMMANDS.iter().any(|&(ch, _, _)| ch == *c))
-        .collect()
-}
-
 /// One-line command-sheet markup, e.g. `a add · d/x remove · ,/. walk ·
-/// letter jump · / search · esc close`. Generated from [`MODE_COMMANDS`], grouping
-/// consecutive entries that share a label (`d`/`x` both "remove") so the
-/// command portion can never drift from the routing table. The trailing
-/// `letter jump · / search · esc close` clause is hand-written, outside
-/// [`MODE_COMMANDS`] — it is pinned by the
-/// `mode_sheet_markup_mentions_slash_search` test rather than by
-/// construction.
-fn mode_sheet_markup() -> String {
+/// letter jump · / search · esc close`. Generated from the resolved
+/// [`ModeKeymap`], grouping consecutive command entries that share a label
+/// (the two walk directions both "walk", the two default remove keys `d`/`x`)
+/// so the command portion can never drift from the routing table. The trailing
+/// `letter jump · <search> search · esc close` clause is hand-written and
+/// interpolates the configured search character; its shape is pinned by the
+/// `mode_sheet_markup_mentions_search_key` test rather than by construction.
+fn mode_sheet_markup(keymap: &ModeKeymap) -> String {
     let mut groups: Vec<(String, &str)> = Vec::new();
-    for &(ch, _, label) in MODE_COMMANDS {
+    for &(ch, _, cmd) in &keymap.commands {
+        let label = cmd.label();
         match groups.last_mut() {
             Some((chars, last_label)) if *last_label == label => {
                 chars.push('/');
@@ -1211,7 +1303,10 @@ fn mode_sheet_markup() -> String {
     // re-derived from the live hint count, so it can't reflect that. Accepted
     // tradeoff: keeping it static is what makes the upload cache safe to
     // reuse across frames.
-    text.push_str(" · letter jump · / search · esc close");
+    text.push_str(&format!(
+        " · letter jump · {} search · esc close",
+        keymap.search.0
+    ));
 
     format!("<span face='mono'>{text}</span>")
 }
@@ -1222,8 +1317,9 @@ fn mode_sheet_markup() -> String {
 /// order; only those whose window is in `visible` are kept, and they are
 /// zipped with `alphabet` (chars, in order) so the letters are compact (no
 /// gaps for hidden bookmarks). Bookmarks past the end of `alphabet` get no
-/// hint. Callers pass [`HINT_KEYS`] (standalone switcher) or
-/// [`mode_hint_alphabet`] (leader mode, command letters excluded).
+/// hint. Callers pass the configured hint alphabet
+/// ([`ModeKeymap::full_alphabet`], standalone switcher) or its command-and-
+/// search-stripped form ([`ModeKeymap::mode_alphabet`], leader mode).
 fn build_hints<Id: Eq + Hash + Clone>(
     bookmarks: impl Iterator<Item = (u64, Id)>,
     visible: &HashSet<Id>,
@@ -1429,6 +1525,18 @@ fn render_hint(letter: char, scale: f64) -> anyhow::Result<MemoryBuffer> {
 mod tests {
     use super::*;
 
+    /// The default hint alphabet, as a test fixture for the pure `build_hints`
+    /// assignment tests. Mirrors `jiji_config::HintAlphabet::default`; the
+    /// production alphabet lives in jiji-config, this is just a convenient
+    /// literal for exercising letter assignment without a config round-trip.
+    const HINT_KEYS: &str = "asdfghjklqwertyuiopzxcvbnm";
+
+    /// The resolved keymap for the default config — the table the overlay used
+    /// before the knob existed. Used by the leader-mode routing/sheet tests.
+    fn default_keymap() -> ModeKeymap {
+        ModeKeymap::from_config(&jiji_config::BookmarksConfig::default())
+    }
+
     /// A fixture bookmark list: bookmark id `n` anchored to window id `n`
     /// (using a plain `u64` as the window-id stand-in, so the pure assignment
     /// logic is exercised without constructing a real `Window`). Bookmark id
@@ -1590,30 +1698,100 @@ mod tests {
     }
 
     #[test]
-    fn mode_hint_alphabet_excludes_every_command_char() {
-        let alphabet = mode_hint_alphabet();
-        for &(ch, _, _) in MODE_COMMANDS {
-            assert!(
-                !alphabet.contains(ch),
-                "mode hint alphabet must not contain command char '{ch}'"
-            );
-        }
-        // Every other HINT_KEYS letter survives: 'a', 'd', 'x' are removed
-        // ('.' and ',' were never in HINT_KEYS to begin with).
-        assert_eq!(alphabet.len(), HINT_KEYS.len() - 3);
+    fn default_keymap_pins_the_legacy_table() {
+        // The default resolved table, hardcoded (not re-derived from config) so
+        // a change to the jiji-config defaults trips this test.
+        let keymap = default_keymap();
+        let commands: Vec<(char, ModeCommand)> = keymap
+            .commands
+            .iter()
+            .map(|&(ch, _, cmd)| (ch, cmd))
+            .collect();
+        assert_eq!(
+            commands,
+            vec![
+                ('a', ModeCommand::Add),
+                ('d', ModeCommand::RemoveFocused),
+                ('x', ModeCommand::RemoveFocused),
+                (',', ModeCommand::WalkBackward),
+                ('.', ModeCommand::WalkForward),
+            ]
+        );
+        assert_eq!(keymap.search.0, '/');
+        assert_eq!(keymap.full_alphabet, "asdfghjklqwertyuiopzxcvbnm");
+        assert_eq!(keymap.full_alphabet.len(), 26);
     }
 
     #[test]
-    fn standalone_alphabet_is_unaffected_by_mode_commands() {
-        // The non-mode switcher keeps the full alphabet: HINT_KEYS itself,
-        // passed directly to `build_hints`, is untouched by MODE_COMMANDS.
-        assert_eq!(HINT_KEYS.len(), 26);
+    fn default_mode_alphabet_excludes_every_command_and_search_char() {
+        let keymap = default_keymap();
+        for &(ch, _, _) in &keymap.commands {
+            assert!(
+                !keymap.mode_alphabet.contains(ch),
+                "mode alphabet must not contain command char '{ch}'"
+            );
+        }
+        assert!(
+            !keymap.mode_alphabet.contains(keymap.search.0),
+            "mode alphabet must not contain the search char"
+        );
+        // 'a', 'd', 'x' are stripped from the 26-letter alphabet ('.' , ',',
+        // and '/' were never in it to begin with).
+        assert_eq!(keymap.mode_alphabet.len(), keymap.full_alphabet.len() - 3);
     }
 
-    /// A `State::Mode` routing context over the given hints, for the pure
-    /// `press_outcome_core` tests.
-    fn mode_ctx(hints: &[Hint<u64>]) -> RoutingContext<'_, u64> {
-        RoutingContext::Mode { hints }
+    #[test]
+    fn mode_alphabet_strips_configured_command_and_search_chars() {
+        // Command and search keys drawn from inside the alphabet are all
+        // stripped from the derived mode alphabet.
+        let cfg = jiji_config::BookmarksConfig {
+            mode_keys: jiji_config::ModeKeysConfig::new(
+                vec!['q'],
+                vec!['w', 'e'],
+                vec!['r'],
+                vec!['t'],
+                'y',
+            )
+            .expect("valid mode-keys table"),
+            ..Default::default()
+        };
+        let keymap = ModeKeymap::from_config(&cfg);
+        for ch in ['q', 'w', 'e', 'r', 't', 'y'] {
+            assert!(
+                !keymap.mode_alphabet.contains(ch),
+                "mode alphabet must strip configured key '{ch}'"
+            );
+        }
+        // A non-command letter survives.
+        assert!(keymap.mode_alphabet.contains('a'));
+        assert_eq!(keymap.mode_alphabet.len(), keymap.full_alphabet.len() - 6);
+    }
+
+    #[test]
+    fn mode_alphabet_can_derive_empty_and_stays_constructible() {
+        // A hint alphabet made entirely of command/search keys strips to empty
+        // — legal (the mode opens with zero hints), and `from_config` must not
+        // panic building it.
+        let cfg = jiji_config::BookmarksConfig {
+            hint_alphabet: jiji_config::HintAlphabet::new("ad").expect("valid alphabet"),
+            mode_keys: jiji_config::ModeKeysConfig::new(
+                vec!['a'],
+                vec!['d'],
+                vec![','],
+                vec!['.'],
+                '/',
+            )
+            .expect("valid mode-keys table"),
+            ..Default::default()
+        };
+        let keymap = ModeKeymap::from_config(&cfg);
+        assert!(keymap.mode_alphabet.is_empty());
+    }
+
+    /// A `State::Mode` routing context over the given hints and keymap, for the
+    /// pure `press_outcome_core` tests.
+    fn mode_ctx<'a>(hints: &'a [Hint<u64>], keymap: &'a ModeKeymap) -> RoutingContext<'a, u64> {
+        RoutingContext::Mode { hints, keymap }
     }
 
     /// A `State::Hints` (standalone) routing context.
@@ -1624,26 +1802,48 @@ mod tests {
     #[test]
     fn press_outcome_core_routes_modifier_to_hold_open() {
         let hints: Vec<Hint<u64>> = Vec::new();
-        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::Shift_L), false);
+        let keymap = default_keymap();
+        let outcome = press_outcome_core(mode_ctx(&hints, &keymap), Some(Keysym::Shift_L), false);
         assert_eq!(outcome, CoreOutcome::HoldOpen);
     }
 
     #[test]
     fn press_outcome_core_routes_command_char_in_mode() {
         let hints: Vec<Hint<u64>> = Vec::new();
-        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('a')), false);
+        let keymap = default_keymap();
+        let outcome = press_outcome_core(
+            mode_ctx(&hints, &keymap),
+            Some(Keysym::from_char('a')),
+            false,
+        );
         assert_eq!(outcome, CoreOutcome::Command(ModeCommand::Add));
 
-        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('d')), false);
+        let outcome = press_outcome_core(
+            mode_ctx(&hints, &keymap),
+            Some(Keysym::from_char('d')),
+            false,
+        );
         assert_eq!(outcome, CoreOutcome::Command(ModeCommand::RemoveFocused));
 
-        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('x')), false);
+        let outcome = press_outcome_core(
+            mode_ctx(&hints, &keymap),
+            Some(Keysym::from_char('x')),
+            false,
+        );
         assert_eq!(outcome, CoreOutcome::Command(ModeCommand::RemoveFocused));
 
-        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char(',')), false);
+        let outcome = press_outcome_core(
+            mode_ctx(&hints, &keymap),
+            Some(Keysym::from_char(',')),
+            false,
+        );
         assert_eq!(outcome, CoreOutcome::Command(ModeCommand::WalkBackward));
 
-        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('.')), false);
+        let outcome = press_outcome_core(
+            mode_ctx(&hints, &keymap),
+            Some(Keysym::from_char('.')),
+            false,
+        );
         assert_eq!(outcome, CoreOutcome::Command(ModeCommand::WalkForward));
     }
 
@@ -1658,16 +1858,26 @@ mod tests {
 
     #[test]
     fn press_outcome_core_slash_in_mode_enters_search_unchorded_and_chorded() {
-        // `/` enters search from leader mode. It is checked ahead of the
-        // chorded early-return, so a shift-chorded slash (as on layouts where
-        // `/` sits on a shifted key) still enters rather than dismissing.
+        // The default search key `/` enters search from leader mode. It is
+        // checked ahead of the chorded early-return, so a shift-chorded search
+        // key (as on layouts where `/` sits on a shifted key) still enters
+        // rather than dismissing.
         let hints: Vec<Hint<u64>> = Vec::new();
+        let keymap = default_keymap();
         assert_eq!(
-            press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('/')), false),
+            press_outcome_core(
+                mode_ctx(&hints, &keymap),
+                Some(Keysym::from_char('/')),
+                false
+            ),
             CoreOutcome::EnterSearch
         );
         assert_eq!(
-            press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('/')), true),
+            press_outcome_core(
+                mode_ctx(&hints, &keymap),
+                Some(Keysym::from_char('/')),
+                true
+            ),
             CoreOutcome::EnterSearch
         );
     }
@@ -1685,10 +1895,15 @@ mod tests {
 
     #[test]
     fn press_outcome_core_chorded_command_char_in_mode_dismisses() {
-        // A chorded press short-circuits before command matching (a non-slash
+        // A chorded press short-circuits before command matching (a non-search
         // key), even when the raw keysym is a command letter.
         let hints: Vec<Hint<u64>> = Vec::new();
-        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('a')), true);
+        let keymap = default_keymap();
+        let outcome = press_outcome_core(
+            mode_ctx(&hints, &keymap),
+            Some(Keysym::from_char('a')),
+            true,
+        );
         assert_eq!(outcome, CoreOutcome::Dismiss);
     }
 
@@ -1713,12 +1928,17 @@ mod tests {
 
         // In mode, a hint letter drawn from the mode alphabet (which never
         // collides with a command char) still jumps.
+        let keymap = default_keymap();
         let mode_hints = build_hints(
             fixture(&[10]).into_iter(),
             &visible(&[10]),
-            &mode_hint_alphabet(),
+            &keymap.mode_alphabet,
         );
-        let outcome = press_outcome_core(mode_ctx(&mode_hints), Some(mode_hints[0].keysym), false);
+        let outcome = press_outcome_core(
+            mode_ctx(&mode_hints, &keymap),
+            Some(mode_hints[0].keysym),
+            false,
+        );
         assert_eq!(outcome, CoreOutcome::Jump(10));
     }
 
@@ -1732,16 +1952,21 @@ mod tests {
     #[test]
     fn press_outcome_core_escape_unmatched_and_none_dismiss() {
         let hints: Vec<Hint<u64>> = Vec::new();
+        let keymap = default_keymap();
         assert_eq!(
-            press_outcome_core(mode_ctx(&hints), Some(Keysym::Escape), false),
+            press_outcome_core(mode_ctx(&hints, &keymap), Some(Keysym::Escape), false),
             CoreOutcome::Dismiss
         );
         assert_eq!(
-            press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('z')), false),
+            press_outcome_core(
+                mode_ctx(&hints, &keymap),
+                Some(Keysym::from_char('z')),
+                false
+            ),
             CoreOutcome::Dismiss
         );
         assert_eq!(
-            press_outcome_core(mode_ctx(&hints), None, false),
+            press_outcome_core(mode_ctx(&hints, &keymap), None, false),
             CoreOutcome::Dismiss
         );
     }
@@ -1749,8 +1974,49 @@ mod tests {
     #[test]
     fn press_outcome_core_mode_constructible_with_zero_hints_still_routes_commands() {
         let hints: Vec<Hint<u64>> = Vec::new();
-        let outcome = press_outcome_core(mode_ctx(&hints), Some(Keysym::from_char('a')), false);
+        let keymap = default_keymap();
+        let outcome = press_outcome_core(
+            mode_ctx(&hints, &keymap),
+            Some(Keysym::from_char('a')),
+            false,
+        );
         assert_eq!(outcome, CoreOutcome::Command(ModeCommand::Add));
+    }
+
+    #[test]
+    fn press_outcome_core_routes_remapped_command_and_old_char_is_ordinary() {
+        // Remapping `add` to `b` routes `b` to Add, while the old `a` is no
+        // longer a command — with no hint bound to it, it dismisses like any
+        // other unmatched key.
+        let cfg = jiji_config::BookmarksConfig {
+            mode_keys: jiji_config::ModeKeysConfig::new(
+                vec!['b'],
+                vec!['d', 'x'],
+                vec![','],
+                vec!['.'],
+                '/',
+            )
+            .expect("valid mode-keys table"),
+            ..Default::default()
+        };
+        let keymap = ModeKeymap::from_config(&cfg);
+        let hints: Vec<Hint<u64>> = Vec::new();
+        assert_eq!(
+            press_outcome_core(
+                mode_ctx(&hints, &keymap),
+                Some(Keysym::from_char('b')),
+                false
+            ),
+            CoreOutcome::Command(ModeCommand::Add)
+        );
+        assert_eq!(
+            press_outcome_core(
+                mode_ctx(&hints, &keymap),
+                Some(Keysym::from_char('a')),
+                false
+            ),
+            CoreOutcome::Dismiss
+        );
     }
 
     // --- Search routing and matching ---
@@ -1938,15 +2204,17 @@ mod tests {
 
     #[test]
     fn mode_sheet_markup_contains_every_command_key_and_label() {
-        let markup = mode_sheet_markup();
-        for &(ch, _, label) in MODE_COMMANDS {
+        let keymap = default_keymap();
+        let markup = mode_sheet_markup(&keymap);
+        for &(ch, _, cmd) in &keymap.commands {
             assert!(
                 markup.contains(ch),
                 "sheet markup must mention command char '{ch}'"
             );
             assert!(
-                markup.contains(label),
-                "sheet markup must mention label '{label}'"
+                markup.contains(cmd.label()),
+                "sheet markup must mention label '{}'",
+                cmd.label()
             );
         }
     }
@@ -1955,7 +2223,8 @@ mod tests {
     fn mode_sheet_markup_aliases_d_and_x_together() {
         // `d` and `x` share the "remove" label and must be grouped rather
         // than appearing as two separate "remove" entries.
-        let markup = mode_sheet_markup();
+        let keymap = default_keymap();
+        let markup = mode_sheet_markup(&keymap);
         assert!(
             markup.contains("d/x remove"),
             "expected 'd/x remove' grouping in: {markup}"
@@ -1963,13 +2232,37 @@ mod tests {
     }
 
     #[test]
-    fn mode_sheet_markup_mentions_slash_search() {
-        // `/` is a state transition into search, not a `ModeCommand`, so it is
-        // not derived from `MODE_COMMANDS`; pin its mention on the sheet.
-        let markup = mode_sheet_markup();
+    fn mode_sheet_markup_mentions_search_key() {
+        // The search key is a state transition into search, not a `ModeCommand`,
+        // so its sheet mention is hand-written; pin that it interpolates the
+        // configured character (default `/`).
+        let keymap = default_keymap();
+        let markup = mode_sheet_markup(&keymap);
         assert!(
             markup.contains("/ search"),
             "expected '/ search' mention in: {markup}"
         );
+    }
+
+    #[test]
+    fn mode_sheet_markup_interpolates_custom_command_and_search_chars() {
+        let cfg = jiji_config::BookmarksConfig {
+            mode_keys: jiji_config::ModeKeysConfig::new(
+                vec!['n'],
+                vec!['m'],
+                vec!['j'],
+                vec!['k'],
+                ';',
+            )
+            .expect("valid mode-keys table"),
+            ..Default::default()
+        };
+        let keymap = ModeKeymap::from_config(&cfg);
+        let markup = mode_sheet_markup(&keymap);
+        assert!(markup.contains("n add"), "in: {markup}");
+        assert!(markup.contains("m remove"), "in: {markup}");
+        // The two walk directions share the "walk" label and group together.
+        assert!(markup.contains("j/k walk"), "in: {markup}");
+        assert!(markup.contains("; search"), "in: {markup}");
     }
 }
