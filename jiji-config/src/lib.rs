@@ -2481,6 +2481,7 @@ mod tests {
                 repress: MoveToFront,
                 order: Mru,
                 walk_wrap: false,
+                return_to_previous: true,
             },
         }
         "#);
@@ -2494,6 +2495,7 @@ mod tests {
                 repress "move-to-front"
                 order "mru"
                 walk-wrap false
+                return false
             }
             "##,
         );
@@ -2503,6 +2505,7 @@ mod tests {
                 repress: RepressPolicy::MoveToFront,
                 order: OrderMode::Mru,
                 walk_wrap: false,
+                return_to_previous: false,
             }
         );
     }
@@ -2514,6 +2517,7 @@ mod tests {
         assert_eq!(parsed.bookmarks.repress, RepressPolicy::MoveToFront);
         assert_eq!(parsed.bookmarks.order, OrderMode::Manual);
         assert!(parsed.bookmarks.walk_wrap);
+        assert!(parsed.bookmarks.return_to_previous);
     }
 
     #[test]
@@ -2526,6 +2530,18 @@ mod tests {
             "##,
         );
         assert_eq!(parsed.bookmarks.repress, RepressPolicy::Remove);
+    }
+
+    #[test]
+    fn bookmarks_return_false_parses() {
+        let parsed = do_parse(
+            r##"
+            bookmarks {
+                return false
+            }
+            "##,
+        );
+        assert!(!parsed.bookmarks.return_to_previous);
     }
 
     fn diff_lines(expected: &str, actual: &str) -> String {

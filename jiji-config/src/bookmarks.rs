@@ -10,6 +10,9 @@ pub struct BookmarksConfig {
     pub repress: RepressPolicy,
     pub order: OrderMode,
     pub walk_wrap: bool,
+    /// Whether a keybind-driven jump to an already-focused bookmark bounces
+    /// back to the window that was focused before the jump that landed on it.
+    pub return_to_previous: bool,
 }
 
 impl Default for BookmarksConfig {
@@ -18,6 +21,7 @@ impl Default for BookmarksConfig {
             repress: RepressPolicy::default(),
             order: OrderMode::default(),
             walk_wrap: true,
+            return_to_previous: true,
         }
     }
 }
@@ -30,11 +34,19 @@ pub struct BookmarksPart {
     pub order: Option<OrderMode>,
     #[knuffel(child, unwrap(argument))]
     pub walk_wrap: Option<bool>,
+    // `return` is a Rust keyword; the raw identifier kebab-cases to the KDL
+    // child name `return` the same way a plain identifier would (`child`
+    // does not support a `name = ...` override, unlike `property`/`children`).
+    #[knuffel(child, unwrap(argument))]
+    pub r#return: Option<bool>,
 }
 
 impl MergeWith<BookmarksPart> for BookmarksConfig {
     fn merge_with(&mut self, part: &BookmarksPart) {
         merge_clone!((self, part), repress, order, walk_wrap);
+        if let Some(x) = &part.r#return {
+            self.return_to_previous.clone_from(x);
+        }
     }
 }
 
