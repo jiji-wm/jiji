@@ -266,7 +266,9 @@ pub struct Bookmark {
     /// Name of the saved activity; `None` when it has been removed (restore then
     /// falls back to the activity picker).
     pub activity_name: Option<String>,
-    /// Reserved user-facing name. Always `None` in this version.
+    /// User-facing display name, set via [`Action::RenameBookmark`]. `None`
+    /// when unnamed. A display label only — [`Bookmark::id`] stays the sole
+    /// resolution handle; duplicate names across bookmarks are legal.
     pub name: Option<String>,
     /// The bookmark's dynamic keybind, formatted in the same syntax accepted by
     /// [`Action::AssignBookmarkKey`] (e.g. `"Mod+M"`). `None` when no key is
@@ -1467,6 +1469,27 @@ pub enum Action {
         /// Id of the bookmark to clear the key from.
         #[cfg_attr(feature = "clap", arg(long))]
         id: u64,
+    },
+    /// Set or clear a bookmark's display name.
+    ///
+    /// Omitting `--name` clears the name. Leading/trailing whitespace is
+    /// trimmed; a name that is empty after trimming, or that contains a
+    /// control character, is rejected — never silently coerced to a clear.
+    /// Returns `Err("invalid bookmark name: <name>: <reason>")` (terminal,
+    /// no state mutation) in that case. Returns `Err("bookmark not found:
+    /// id=<id>")` (terminal) when the id is unknown.
+    ///
+    /// The name is a display label only, shown by picker-style surfaces
+    /// (e.g. `jiji-do`); it is never a resolution handle — [`Bookmark::id`]
+    /// stays the sole address, and duplicate names across bookmarks are
+    /// legal.
+    RenameBookmark {
+        /// Id of the bookmark to rename.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+        /// The new display name. Omit to clear.
+        #[cfg_attr(feature = "clap", arg(long))]
+        name: Option<String>,
     },
     /// Open the bookmark switcher overlay, tagging every visible bookmarked
     /// window with a letter hint; pressing a hint jumps straight to that

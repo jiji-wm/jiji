@@ -1017,13 +1017,20 @@ fn print_bookmarks(bookmarks: &[Bookmark]) {
             Some(name) => format!("\"{name}\""),
             None => format!("{}", bm.activity_id),
         };
+        // Human-only display tag, deliberately unescaped: names may contain
+        // quotes/brackets. Machine consumers read the structured IPC field.
+        let name = bm
+            .name
+            .as_deref()
+            .map(|n| format!(" [name \"{n}\"]"))
+            .unwrap_or_default();
         let key = bm
             .key
             .as_deref()
             .map(|k| format!(" [key {k}]"))
             .unwrap_or_default();
         println!(
-            "  [{id}] window {window} \"{title}\" on {ws}{out} [activity {act}]{key}",
+            "  [{id}] window {window} \"{title}\" on {ws}{out} [activity {act}]{name}{key}",
             id = bm.id,
             window = bm.window_id,
         );

@@ -47,7 +47,7 @@ use self::resize_grab::ResizeGrab;
 use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
-use crate::layout::bookmarks::{BookmarkJumpOutcome, BookmarkKey, WalkDirection};
+use crate::layout::bookmarks::{BookmarkJumpOutcome, BookmarkKey, BookmarkName, WalkDirection};
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{
     ActivateWindow, DoActionError, DoActionOutcome, LayoutElement, MoveWindowToPoolOutcome,
@@ -1829,6 +1829,24 @@ impl State {
             Action::UnassignBookmarkKey(id) => {
                 if let Err(err) = self.niri.layout.unassign_bookmark_key(id) {
                     debug!("unassign_bookmark_key: {err:?}, propagating");
+                    return Err(err);
+                }
+            }
+            Action::RenameBookmark { id, name: raw_name } => {
+                let name = match raw_name {
+                    None => None,
+                    Some(raw) => match BookmarkName::new(&raw) {
+                        Ok(name) => Some(name),
+                        Err(err) => {
+                            return Err(DoActionError::BookmarkNameInvalid {
+                                name: raw,
+                                reason: err.to_string(),
+                            });
+                        }
+                    },
+                };
+                if let Err(err) = self.niri.layout.rename_bookmark(id, name) {
+                    debug!("rename_bookmark: {err:?}, propagating");
                     return Err(err);
                 }
             }

@@ -465,6 +465,15 @@ pub enum Action {
     },
     #[knuffel(skip)]
     UnassignBookmarkKey(u64),
+    // IPC-only, same rationale as `AssignBookmarkKey`: runtime bookmark ids
+    // are not stable across restarts. Carries the raw `Option<String>`
+    // rather than a parsed `BookmarkName` so `From<jiji_ipc::Action>` stays
+    // infallible; validation happens at dispatch (`BookmarkName::new`).
+    #[knuffel(skip)]
+    RenameBookmark {
+        id: u64,
+        name: Option<String>,
+    },
     // No IPC counterpart: only ever constructed inside the synthetic binds
     // materialized from assigned bookmark keys (`Niri::bookmark_binds`). This
     // is the origin split that lets the dispatch arm distinguish a
@@ -867,6 +876,7 @@ impl From<jiji_ipc::Action> for Action {
             jiji_ipc::Action::MoveBookmark { id, pos } => Self::MoveBookmark { id, pos },
             jiji_ipc::Action::AssignBookmarkKey { id, key } => Self::AssignBookmarkKey { id, key },
             jiji_ipc::Action::UnassignBookmarkKey { id } => Self::UnassignBookmarkKey(id),
+            jiji_ipc::Action::RenameBookmark { id, name } => Self::RenameBookmark { id, name },
             jiji_ipc::Action::OpenBookmarkSwitcher {} => Self::OpenBookmarkSwitcher,
             jiji_ipc::Action::EnterBookmarkMode {} => Self::EnterBookmarkMode,
             // jiji_ipc::Action is #[non_exhaustive]: any new variant added to

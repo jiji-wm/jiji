@@ -8985,6 +8985,17 @@ fn do_action_error_display_matches_wire_contract() {
         ),
         "bookmark key already bound: Mod+M",
     );
+    // Bookmark name token.
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::BookmarkNameInvalid {
+                name: String::new(),
+                reason: "must not be empty".to_owned(),
+            }
+        ),
+        "invalid bookmark name: : must not be empty",
+    );
 }
 
 #[test]
@@ -9212,6 +9223,13 @@ fn do_action_error_envelope_matches_wire_contract() {
                 key: "Mod+M".to_owned(),
             },
             "bookmark key already bound: Mod+M",
+        ),
+        (
+            DoActionError::BookmarkNameInvalid {
+                name: String::new(),
+                reason: "must not be empty".to_owned(),
+            },
+            "invalid bookmark name: : must not be empty",
         ),
     ] {
         assert_eq!(format_do_action_error(err), expected);
@@ -23728,12 +23746,83 @@ fn move_bookmark_reorders_and_unknown_id_is_loud() {
         .map(|b| *b.anchor().window())
         .collect();
     assert_eq!(windows, [2, 3, 1], "move clamps to last index");
+    assert!(
+        layout.bookmarks.list().iter().all(|b| b.name().is_none()),
+        "reordering must not touch names; none was ever assigned"
+    );
 
     // Unknown id is a loud error.
     let err = layout
         .move_bookmark(9999, 0)
         .expect_err("unknown id must be loud");
     assert!(matches!(err, DoActionError::BookmarkNotFound { id: 9999 }));
+    layout.verify_invariants();
+}
+
+#[test]
+fn rename_bookmark_unknown_id_is_loud() {
+    use crate::layout::bookmarks::BookmarkName;
+
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+
+    let err = layout
+        .rename_bookmark(9999, Some(BookmarkName::new("mail").unwrap()))
+        .expect_err("unknown id must be loud");
+    assert!(matches!(err, DoActionError::BookmarkNotFound { id: 9999 }));
+    layout.verify_invariants();
+}
+
+#[test]
+fn rename_bookmark_duplicate_names_are_legal() {
+    use crate::layout::bookmarks::BookmarkName;
+
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    for w in [1, 2, 3] {
+        Op::AddWindow {
+            params: TestWindowParams::new(w),
+        }
+        .apply(&mut layout);
+        layout.activate_window(&w);
+        layout.add_bookmark();
+    }
+    let id1 = layout.bookmarks.list()[0].id().get();
+    let id2 = layout.bookmarks.list()[1].id().get();
+    let id3 = layout.bookmarks.list()[2].id().get();
+
+    // Bookmark names are a display convenience, not a uniqueness key: two
+    // distinct bookmarks renamed to the same name is legal and must not trip
+    // any invariant.
+    layout
+        .rename_bookmark(id1, Some(BookmarkName::new("mail").unwrap()))
+        .expect("rename must succeed");
+    layout
+        .rename_bookmark(id2, Some(BookmarkName::new("mail").unwrap()))
+        .expect("duplicate name is legal");
+    layout.verify_invariants();
+
+    let names: Vec<Option<&str>> = layout
+        .bookmarks
+        .list()
+        .iter()
+        .map(|b| b.name().map(BookmarkName::as_str))
+        .collect();
+    assert_eq!(
+        names,
+        [Some("mail"), Some("mail"), None],
+        "both renamed names round-trip; the untouched sibling stays unnamed"
+    );
+
+    // Clearing an already-unnamed bookmark is a silent no-op (None -> None).
+    layout
+        .rename_bookmark(id3, None)
+        .expect("clearing an already-unnamed bookmark is a no-op");
+    assert_eq!(layout.bookmarks.list()[2].name(), None, "still unnamed");
     layout.verify_invariants();
 }
 
@@ -23823,6 +23912,12 @@ fn build_bookmarks_ipc_maps_fields_including_dead_activity() {
     layout
         .assign_bookmark_key(bid, key)
         .expect("assign must succeed");
+    layout
+        .rename_bookmark(
+            bid,
+            Some(crate::layout::bookmarks::BookmarkName::new("mail").unwrap()),
+        )
+        .expect("rename must succeed");
 
     // Non-capturing extractor: synthetic per-window title/app_id so field
     // pass-through is observable. Copy, so it can be reused across calls.
@@ -23848,7 +23943,11 @@ fn build_bookmarks_ipc_maps_fields_including_dead_activity() {
     );
     let placement = e.workspace.as_ref().expect("window is on a live workspace");
     assert_eq!(placement.idx, Some(1), "1-based view position");
-    assert_eq!(e.name, None, "reserved");
+    assert_eq!(
+        e.name.as_deref(),
+        Some("mail"),
+        "the assigned name round-trips through the wire builder"
+    );
     assert_eq!(
         e.key.as_deref(),
         Some("Super+m"),

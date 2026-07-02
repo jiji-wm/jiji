@@ -64,7 +64,7 @@ pub use self::activity::{
 };
 use self::bookmarks::{
     AddOutcome, AssignKeyError, BookmarkAnchor, BookmarkId, BookmarkJumpOutcome, BookmarkKey,
-    Bookmarks, WalkDirection,
+    BookmarkName, Bookmarks, WalkDirection,
 };
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{ActivitySwitch, Monitor, SlideDirection, WorkspaceSwitch};
@@ -682,6 +682,11 @@ pub(crate) enum DoActionError {
     /// bookmark's key. Terminal error — no state mutation. `key` is the
     /// canonical formatted key string.
     BookmarkKeyCollision { key: String },
+    /// `Action::RenameBookmark` was dispatched with a name that fails
+    /// [`bookmarks::BookmarkName::new`] validation (empty after trim, or
+    /// containing a control character). Terminal error — no state mutation.
+    /// `name` is the offending raw string as given by the caller.
+    BookmarkNameInvalid { name: String, reason: String },
 }
 
 impl From<ActivitySwitchBlock> for DoActionError {
@@ -777,6 +782,9 @@ impl fmt::Display for DoActionError {
                 write!(f, "invalid bookmark key: {key}: {reason}")
             }
             Self::BookmarkKeyCollision { key } => write!(f, "bookmark key already bound: {key}"),
+            Self::BookmarkNameInvalid { name, reason } => {
+                write!(f, "invalid bookmark name: {name}: {reason}")
+            }
         }
     }
 }
@@ -6572,6 +6580,25 @@ impl<W: LayoutElement> Layout<W> {
         // occur here; `Moved` vs. `SamePosition` makes no difference to the
         // caller, an IPC-dispatched reposition.
         let _ = self.bookmarks.move_to_pos(bid, pos);
+        Ok(())
+    }
+
+    /// Set or clear the display name of the bookmark with `id`.
+    ///
+    /// An unknown id is a loud [`DoActionError::BookmarkNotFound`]; `name`
+    /// validation happens at dispatch (`src/input/mod.rs`), before this is
+    /// ever called, so this cannot fail on a valid id.
+    pub(crate) fn rename_bookmark(
+        &mut self,
+        id: u64,
+        name: Option<BookmarkName>,
+    ) -> Result<(), DoActionError> {
+        let Some(bid) = self.bookmarks.id_for_raw(id) else {
+            return Err(DoActionError::BookmarkNotFound { id });
+        };
+        if !self.bookmarks.rename(bid, name) {
+            unreachable!("id_for_raw just resolved bid, so rename cannot report NotFound");
+        }
         Ok(())
     }
 

@@ -492,7 +492,8 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
             | Err(err @ DoActionError::MoveWindowTargetUnknownName { .. })
             | Err(err @ DoActionError::BookmarkNotFound { .. })
             | Err(err @ DoActionError::BookmarkKeyInvalid { .. })
-            | Err(err @ DoActionError::BookmarkKeyCollision { .. }) => {
+            | Err(err @ DoActionError::BookmarkKeyCollision { .. })
+            | Err(err @ DoActionError::BookmarkNameInvalid { .. }) => {
                 // Terminal errors. Same shape as `WindowNotFound`:
                 // forward and advance the walk — do not re-block.
                 let _ = waiter.tx.send_blocking(Err(err));
@@ -866,7 +867,8 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                     | Err(err @ DoActionError::MoveWindowTargetUnknownName { .. })
                     | Err(err @ DoActionError::BookmarkNotFound { .. })
                     | Err(err @ DoActionError::BookmarkKeyInvalid { .. })
-                    | Err(err @ DoActionError::BookmarkKeyCollision { .. }) => {
+                    | Err(err @ DoActionError::BookmarkKeyCollision { .. })
+                    | Err(err @ DoActionError::BookmarkNameInvalid { .. }) => {
                         let _ = tx.send_blocking(Err(err));
                     }
                 }
@@ -1102,7 +1104,7 @@ pub(crate) fn build_bookmarks_ipc<W: LayoutElement>(
                 workspace,
                 activity_id: activity_id.get(),
                 activity_name,
-                name: None,
+                name: bookmark.name().map(|n| n.as_str().to_owned()),
                 key: bookmark.key().map(|k| key_to_wire_string(k.key())),
             }
         })

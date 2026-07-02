@@ -72,6 +72,65 @@ impl BookmarkKey {
     }
 }
 
+/// A validated user-facing bookmark display name.
+///
+/// Constructed only via [`BookmarkName::new`], which trims leading/trailing
+/// whitespace and rejects an empty-after-trim string or any control
+/// character (defense against fuzzel/pango injection at the picker layer,
+/// though `jiji-do` also sanitizes independently). Names are display labels
+/// only — [`BookmarkId`] remains the sole resolution handle, so duplicate
+/// names across bookmarks are legal and carry no invariant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookmarkName(String);
+
+/// Why a raw string was rejected by [`BookmarkName::new`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookmarkNameError {
+    /// The string was empty after trimming leading/trailing whitespace.
+    Empty,
+    /// The string contains a control character.
+    ControlChars,
+}
+
+impl fmt::Display for BookmarkNameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "must not be empty"),
+            Self::ControlChars => write!(f, "must not contain control characters"),
+        }
+    }
+}
+
+impl BookmarkName {
+    /// Validate `raw` as a bookmark display name.
+    ///
+    /// Trims leading/trailing whitespace first, so a whitespace-only input is
+    /// rejected as [`BookmarkNameError::Empty`], never coerced to a clear
+    /// (clearing a name is done by passing `None` to
+    /// [`Bookmarks::rename`], not an empty string).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BookmarkNameError::Empty`] for an empty-after-trim string,
+    /// or [`BookmarkNameError::ControlChars`] if any character is
+    /// [`char::is_control`].
+    pub fn new(raw: &str) -> Result<Self, BookmarkNameError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(BookmarkNameError::Empty);
+        }
+        if trimmed.chars().any(char::is_control) {
+            return Err(BookmarkNameError::ControlChars);
+        }
+        Ok(Self(trimmed.to_owned()))
+    }
+
+    /// The validated name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Stable identity of a bookmark, minted monotonically and never reused.
 ///
 /// A pruned bookmark's id is retired for good: [`Bookmarks::next_id`] only ever
@@ -124,12 +183,12 @@ impl<Id> BookmarkAnchor<Id> {
     }
 }
 
-/// One bookmark: a stable id, an anchor, a reserved name slot, and an
+/// One bookmark: a stable id, an anchor, an optional display name, and an
 /// optional dynamic keybind.
 ///
-/// `name` is always `None` today. A user-facing rename surface is a later
-/// addition; reserving the field now keeps the struct shape stable so adding
-/// the surface does not migrate stored bookmarks.
+/// `name` starts `None` at add; it is set or cleared only via
+/// [`Bookmarks::rename`]. It is a display label, never a resolution handle —
+/// [`BookmarkId`] stays the sole address.
 ///
 /// `key` always starts `None` at add; it is armed only via
 /// [`Bookmarks::assign_key`].
@@ -137,7 +196,7 @@ impl<Id> BookmarkAnchor<Id> {
 pub struct Bookmark<Id> {
     id: BookmarkId,
     anchor: BookmarkAnchor<Id>,
-    name: Option<String>,
+    name: Option<BookmarkName>,
     key: Option<BookmarkKey>,
 }
 
@@ -150,6 +209,11 @@ impl<Id> Bookmark<Id> {
     /// The bookmark's anchor.
     pub(crate) fn anchor(&self) -> &BookmarkAnchor<Id> {
         &self.anchor
+    }
+
+    /// The bookmark's display name, if set.
+    pub(crate) fn name(&self) -> Option<&BookmarkName> {
+        self.name.as_ref()
     }
 
     /// The bookmark's dynamic keybind, if assigned.
@@ -403,6 +467,20 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
             self.touch_binds_epoch();
         }
         Ok(())
+    }
+
+    /// Set or clear the display name of the bookmark with `id`. Returns
+    /// `false` if no bookmark has that id.
+    ///
+    /// Does not bump `binds_epoch` (that counter tracks id→key mappings
+    /// only) and does not touch `walk_cursor`, list order, or
+    /// `return_target`.
+    pub fn rename(&mut self, id: BookmarkId, name: Option<BookmarkName>) -> bool {
+        let Some(bm) = self.list.iter_mut().find(|b| b.id == id) else {
+            return false;
+        };
+        bm.name = name;
+        true
     }
 
     /// Move the bookmark with `id` to `pos`, clamping `pos` to the last index.
@@ -1321,6 +1399,87 @@ mod tests {
             windows(&bm),
             [1, 2, 3],
             "commit_return promotes the bounce target under MRU"
+        );
+    }
+
+    #[test]
+    fn bookmark_name_trims_and_accepts() {
+        let name = BookmarkName::new("  mail  ").expect("valid after trim");
+        assert_eq!(name.as_str(), "mail");
+    }
+
+    #[test]
+    fn bookmark_name_rejects_empty_after_trim() {
+        assert_eq!(BookmarkName::new(""), Err(BookmarkNameError::Empty));
+        assert_eq!(BookmarkName::new("   "), Err(BookmarkNameError::Empty));
+    }
+
+    #[test]
+    fn bookmark_name_rejects_control_chars() {
+        assert_eq!(
+            BookmarkName::new("mail\nbox"),
+            Err(BookmarkNameError::ControlChars)
+        );
+        assert_eq!(
+            BookmarkName::new("mail\tbox"),
+            Err(BookmarkNameError::ControlChars)
+        );
+    }
+
+    #[test]
+    fn rename_sets_reads_back_and_clears() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let AddOutcome::Added(id1) = bm.add_or_repress(1, a, RepressPolicy::MoveToFront) else {
+            unreachable!()
+        };
+        assert_eq!(bm.list()[0].name(), None, "unnamed at add");
+
+        let name = BookmarkName::new("mail").unwrap();
+        assert!(bm.rename(id1, Some(name.clone())));
+        assert_eq!(bm.list()[0].name().map(BookmarkName::as_str), Some("mail"));
+
+        assert!(bm.rename(id1, None), "clearing is a rename to None");
+        assert_eq!(bm.list()[0].name(), None, "cleared");
+    }
+
+    #[test]
+    fn rename_unknown_id_returns_false() {
+        let mut bm = Bookmarks::<usize>::default();
+        let name = BookmarkName::new("mail").unwrap();
+        assert!(!bm.rename(BookmarkId(999), Some(name)));
+    }
+
+    #[test]
+    fn rename_survives_reorder_and_does_not_touch_epoch_cursor_or_order() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2, 3] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        let id1 = bm.id_for_window(&1).unwrap();
+        let name = BookmarkName::new("mail").unwrap();
+        let epoch_before = bm.binds_epoch();
+        let cursor_before = bm.walk_cursor();
+        assert!(bm.rename(id1, Some(name)));
+        assert_eq!(bm.binds_epoch(), epoch_before, "rename must not bump epoch");
+        assert_eq!(
+            bm.walk_cursor(),
+            cursor_before,
+            "rename must not touch cursor"
+        );
+        assert_eq!(windows(&bm), [1, 2, 3], "rename must not touch order");
+
+        // Reorder, then confirm the name is still keyed by id, not position.
+        let _ = bm.move_to_pos(id1, 99);
+        assert_eq!(windows(&bm), [2, 3, 1]);
+        assert_eq!(
+            bm.id_for_window(&1)
+                .and_then(|id| bm.list().iter().find(|b| b.id() == id))
+                .and_then(|b| b.name())
+                .map(BookmarkName::as_str),
+            Some("mail"),
+            "name survives reorder, keyed by id"
         );
     }
 }
