@@ -14,9 +14,63 @@
 //! forward tail, and holds at most one bookmark per window (the window is the
 //! identity; the activity is carried context for restore, not part of the key).
 
-use jiji_config::{OrderMode, RepressPolicy};
+use std::fmt;
+
+use jiji_config::{Key, OrderMode, RepressPolicy, Trigger};
 
 use super::activity::ActivityId;
+
+/// A validated dynamic bookmark keybind.
+///
+/// Constructed only via [`BookmarkKey::new`], which rejects any trigger other
+/// than a keysym (a bookmark bind is keyboard-only) and any key with no
+/// modifiers (a bare keysym would eat plain typing). The private field keeps
+/// every live `BookmarkKey` valid by construction — no caller can smuggle in
+/// an unvalidated [`Key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BookmarkKey(Key);
+
+/// Why a [`Key`] was rejected by [`BookmarkKey::new`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookmarkKeyError {
+    /// The trigger is not a keysym (a mouse button, wheel, or touchpad
+    /// gesture).
+    NotAKeysym,
+    /// The key carries no modifiers.
+    NoModifiers,
+}
+
+impl fmt::Display for BookmarkKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotAKeysym => write!(f, "must be a keyboard key, not a mouse or wheel trigger"),
+            Self::NoModifiers => write!(f, "must include at least one modifier"),
+        }
+    }
+}
+
+impl BookmarkKey {
+    /// Validate `key` as a dynamic bookmark keybind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BookmarkKeyError::NotAKeysym`] for a mouse/wheel/touchpad
+    /// trigger, or [`BookmarkKeyError::NoModifiers`] for a bare keysym.
+    pub fn new(key: Key) -> Result<Self, BookmarkKeyError> {
+        if !matches!(key.trigger, Trigger::Keysym(_)) {
+            return Err(BookmarkKeyError::NotAKeysym);
+        }
+        if key.modifiers.is_empty() {
+            return Err(BookmarkKeyError::NoModifiers);
+        }
+        Ok(Self(key))
+    }
+
+    /// The validated inner key.
+    pub fn key(self) -> Key {
+        self.0
+    }
+}
 
 /// Stable identity of a bookmark, minted monotonically and never reused.
 ///
@@ -70,16 +124,21 @@ impl<Id> BookmarkAnchor<Id> {
     }
 }
 
-/// One bookmark: a stable id, an anchor, and a reserved name slot.
+/// One bookmark: a stable id, an anchor, a reserved name slot, and an
+/// optional dynamic keybind.
 ///
 /// `name` is always `None` today. A user-facing rename surface is a later
 /// addition; reserving the field now keeps the struct shape stable so adding
 /// the surface does not migrate stored bookmarks.
+///
+/// `key` always starts `None` at add; it is armed only via
+/// [`Bookmarks::assign_key`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bookmark<Id> {
     id: BookmarkId,
     anchor: BookmarkAnchor<Id>,
     name: Option<String>,
+    key: Option<BookmarkKey>,
 }
 
 impl<Id> Bookmark<Id> {
@@ -91,6 +150,11 @@ impl<Id> Bookmark<Id> {
     /// The bookmark's anchor.
     pub(crate) fn anchor(&self) -> &BookmarkAnchor<Id> {
         &self.anchor
+    }
+
+    /// The bookmark's dynamic keybind, if assigned.
+    pub(crate) fn key(&self) -> Option<BookmarkKey> {
+        self.key
     }
 }
 
@@ -168,7 +232,8 @@ pub enum BookmarkJumpOutcome {
 /// Invariants (upheld by every mutator here; mirrored at the `Layout` level by
 /// `verify_invariants`): every [`BookmarkId`] in `list` is unique; at most one
 /// bookmark anchors any given window; `next_id` is strictly greater than every
-/// listed id; when `walk_cursor` is `Some(i)`, `i < list.len()`.
+/// listed id; when `walk_cursor` is `Some(i)`, `i < list.len()`; no two
+/// bookmarks hold an equal [`BookmarkKey`].
 #[derive(Debug)]
 pub struct Bookmarks<Id: PartialEq + Clone> {
     /// The bookmarks, in presentation order.
@@ -176,9 +241,11 @@ pub struct Bookmarks<Id: PartialEq + Clone> {
     /// Index into `list` of the current walk position, or `None` when not
     /// walking. Healed on any focus change (see [`Self::observe_focus`]).
     walk_cursor: Option<usize>,
-    /// Window to return to after a keybind-driven jump. Reserved: this field is
-    /// cleared by the focus hook but never armed today (arming arrives with the
-    /// keybind-jump registry). One-sided wiring is intentional.
+    /// Window to return to after a keybind-driven jump landed on an
+    /// already-focused bookmark. Armed by [`Self::commit_key_jump`]; cleared by
+    /// [`Self::commit_walk`], [`Self::commit_jump`], [`Self::commit_return`],
+    /// [`Self::observe_focus`], and [`Self::prune_window`] — any focus change
+    /// or ordinary jump invalidates the bounce target.
     return_target: Option<Id>,
     /// Next id to mint. Only ever grows; a retired id is never reused.
     next_id: u64,
@@ -186,6 +253,11 @@ pub struct Bookmarks<Id: PartialEq + Clone> {
     /// and jump-commit set this synchronously to the landed window so the focus
     /// hook sees no delta and a walk never resets its own cursor or triggers MRU.
     last_seen_focus: Option<Id>,
+    /// Monotonic counter, bumped whenever the id→key mapping changes
+    /// (assign, unassign, or a keyed entry's removal/prune). The `Niri`-side
+    /// synthetic-bind mirror rebuilds whenever this differs from its cached
+    /// value — see `State::refresh`.
+    binds_epoch: u64,
 }
 
 // Manual impl: deriving `Default` would demand `Id: Default`, which the layout
@@ -198,8 +270,19 @@ impl<Id: PartialEq + Clone> Default for Bookmarks<Id> {
             return_target: None,
             next_id: 0,
             last_seen_focus: None,
+            binds_epoch: 0,
         }
     }
+}
+
+/// Why [`Bookmarks::assign_key`] rejected a key assignment.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignKeyError {
+    /// No bookmark with the given id.
+    NotFound,
+    /// The key already belongs to a different bookmark.
+    Collision,
 }
 
 impl<Id: PartialEq + Clone> Bookmarks<Id> {
@@ -208,6 +291,12 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
         let id = BookmarkId(self.next_id);
         self.next_id += 1;
         id
+    }
+
+    /// Bump `binds_epoch`. The sole mutation site for the counter, so every
+    /// id→key mapping change is greppable from one place.
+    fn touch_binds_epoch(&mut self) {
+        self.binds_epoch = self.binds_epoch.wrapping_add(1);
     }
 
     /// Position of the bookmark anchoring `window`, if any.
@@ -246,6 +335,7 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
                 id,
                 anchor: BookmarkAnchor::Window { window, activity },
                 name: None,
+                key: None,
             });
             AddOutcome::Added(id)
         }
@@ -270,7 +360,49 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
                 self.walk_cursor = None;
             }
         }
+        if removed.key.is_some() {
+            self.touch_binds_epoch();
+        }
         Some(removed)
+    }
+
+    /// Assign `key` as the dynamic keybind for the bookmark with `id`.
+    ///
+    /// Re-assigning a bookmark's own current key is idempotent (`Ok`, no
+    /// epoch bump). Assigning a key already held by a *different* bookmark is
+    /// [`AssignKeyError::Collision`]. An unknown id is
+    /// [`AssignKeyError::NotFound`].
+    pub fn assign_key(&mut self, id: BookmarkId, key: BookmarkKey) -> Result<(), AssignKeyError> {
+        let pos = self
+            .list
+            .iter()
+            .position(|b| b.id == id)
+            .ok_or(AssignKeyError::NotFound)?;
+        if self.list[pos].key == Some(key) {
+            return Ok(());
+        }
+        if self.list.iter().any(|b| b.id != id && b.key == Some(key)) {
+            return Err(AssignKeyError::Collision);
+        }
+        self.list[pos].key = Some(key);
+        self.touch_binds_epoch();
+        Ok(())
+    }
+
+    /// Clear the dynamic keybind for the bookmark with `id`, if any.
+    ///
+    /// A bookmark with no assigned key is a boundary no-op (`Ok`, no epoch
+    /// bump). An unknown id is [`AssignKeyError::NotFound`].
+    pub fn unassign_key(&mut self, id: BookmarkId) -> Result<(), AssignKeyError> {
+        let pos = self
+            .list
+            .iter()
+            .position(|b| b.id == id)
+            .ok_or(AssignKeyError::NotFound)?;
+        if self.list[pos].key.take().is_some() {
+            self.touch_binds_epoch();
+        }
+        Ok(())
     }
 
     /// Move the bookmark with `id` to `pos`, clamping `pos` to the last index.
@@ -330,12 +462,16 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
         focused.and_then(|w| self.position_of_window(w))
     }
 
-    /// Commit a walk onto `target`: park the cursor there and record the landed
-    /// window as the last-seen focus.
+    /// Commit a walk onto `target`: park the cursor there, record the landed
+    /// window as the last-seen focus, and clear the return-to-previous target
+    /// (a walk is a focus change like any other, so any pending bounce is
+    /// invalidated).
     ///
     /// Recording the focus synchronously is the walk-filter: the focus hook then
     /// sees no delta when this window becomes focused, so a walk never resets its
-    /// own cursor and never triggers MRU promotion.
+    /// own cursor and never triggers MRU promotion. That same synchronous update
+    /// is why the return-target clear must live here rather than relying on
+    /// `observe_focus`: the walk-filter suppresses the hook for this window.
     pub fn commit_walk(&mut self, target: WalkTarget) {
         let target = target.0;
         debug_assert!(
@@ -344,14 +480,46 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
         );
         self.walk_cursor = Some(target);
         self.last_seen_focus = Some(self.list[target].anchor.window().clone());
+        self.return_target = None;
     }
 
     /// Commit a jump onto `window`: clear the walk cursor, record the landed
-    /// window as the last-seen focus, and — under [`OrderMode::Mru`] — promote
-    /// the bookmark to the front. A jump *is* an activation; recording the focus
-    /// synchronously keeps the focus hook from double-promoting it.
+    /// window as the last-seen focus, clear the return-to-previous target, and
+    /// — under [`OrderMode::Mru`] — promote the bookmark to the front. A jump
+    /// *is* an activation; recording the focus synchronously keeps the focus
+    /// hook from double-promoting it (and, per `commit_walk`, from re-clearing
+    /// the return target it already cleared here).
     pub fn commit_jump(&mut self, window: &Id, order: OrderMode) {
         self.walk_cursor = None;
+        self.last_seen_focus = Some(window.clone());
+        self.return_target = None;
+        if order == OrderMode::Mru {
+            self.promote_to_front(window);
+        }
+    }
+
+    /// Commit a keybind-driven jump onto `window`, arming `return_target =
+    /// left` so a subsequent keybind jump onto the now-focused `window` can
+    /// bounce back to `left`.
+    ///
+    /// Otherwise identical to [`Self::commit_jump`]: clears the walk cursor,
+    /// records the landed window as the last-seen focus, and promotes under
+    /// [`OrderMode::Mru`].
+    pub fn commit_key_jump(&mut self, window: &Id, left: Option<Id>, order: OrderMode) {
+        self.walk_cursor = None;
+        self.last_seen_focus = Some(window.clone());
+        self.return_target = left;
+        if order == OrderMode::Mru {
+            self.promote_to_front(window);
+        }
+    }
+
+    /// Commit a return-to-previous bounce onto `window`: clear the
+    /// return-target slot, record the landed window as the last-seen focus,
+    /// and — under [`OrderMode::Mru`] — promote the bookmark to the front (a
+    /// no-op if `window` is not itself bookmarked).
+    pub fn commit_return(&mut self, window: &Id, order: OrderMode) {
+        self.return_target = None;
         self.last_seen_focus = Some(window.clone());
         if order == OrderMode::Mru {
             self.promote_to_front(window);
@@ -404,8 +572,12 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
         let mut kept = Vec::with_capacity(self.list.len());
         let mut removed_cursor_entry = false;
         let mut removed_before_cursor = 0usize;
+        let mut removed_key = false;
         for (idx, bm) in self.list.drain(..).enumerate() {
             if bm.anchor.window() == window {
+                if bm.key.is_some() {
+                    removed_key = true;
+                }
                 if let Some(c) = original_cursor {
                     if idx == c {
                         removed_cursor_entry = true;
@@ -418,6 +590,9 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
             }
         }
         self.list = kept;
+        if removed_key {
+            self.touch_binds_epoch();
+        }
         self.walk_cursor = match original_cursor {
             Some(_) if removed_cursor_entry => None,
             // The cursor's entry survived, so `c - removed_before_cursor` still
@@ -461,9 +636,15 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
         self.walk_cursor
     }
 
-    /// Read accessor for the return target. Reserved (never armed today).
+    /// Read accessor for the return-to-previous target.
     pub(crate) fn return_target(&self) -> Option<&Id> {
         self.return_target.as_ref()
+    }
+
+    /// Read accessor for the id→key mapping epoch. The `Niri`-side synthetic
+    /// bind mirror rebuilds whenever this differs from its cached value.
+    pub(crate) fn binds_epoch(&self) -> u64 {
+        self.binds_epoch
     }
 
     /// Read accessor for the focus hook's last-seen window, for tests pinning
@@ -506,6 +687,8 @@ fn step(base: usize, direction: WalkDirection, len: usize, wrap: bool) -> Option
 
 #[cfg(test)]
 mod tests {
+    use jiji_config::Modifiers;
+
     use super::*;
     use crate::layout::activity::{Activities, Activity};
 
@@ -885,5 +1068,259 @@ mod tests {
         let mutated = bm.observe_focus(Some(&3), OrderMode::Mru);
         assert!(!mutated, "walk-driven focus is filtered, not observed");
         assert_eq!(windows(&bm), [1, 2, 3], "walk did not promote under MRU");
+    }
+
+    fn key(modifiers: Modifiers, sym: smithay::input::keyboard::Keysym) -> BookmarkKey {
+        BookmarkKey::new(Key {
+            trigger: Trigger::Keysym(sym),
+            modifiers,
+        })
+        .expect("test-constructed key must be valid")
+    }
+
+    #[test]
+    fn bookmark_key_rejects_non_keysym_trigger() {
+        let err = BookmarkKey::new(Key {
+            trigger: Trigger::MouseLeft,
+            modifiers: Modifiers::SUPER,
+        })
+        .unwrap_err();
+        assert_eq!(err, BookmarkKeyError::NotAKeysym);
+    }
+
+    #[test]
+    fn bookmark_key_rejects_no_modifiers() {
+        let err = BookmarkKey::new(Key {
+            trigger: Trigger::Keysym(smithay::input::keyboard::Keysym::m),
+            modifiers: Modifiers::empty(),
+        })
+        .unwrap_err();
+        assert_eq!(err, BookmarkKeyError::NoModifiers);
+    }
+
+    #[test]
+    fn bookmark_key_accepts_keysym_with_modifier() {
+        assert!(BookmarkKey::new(Key {
+            trigger: Trigger::Keysym(smithay::input::keyboard::Keysym::m),
+            modifiers: Modifiers::SUPER,
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn assign_key_rejects_unknown_id() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let _ = bm.add_or_repress(1, a, RepressPolicy::MoveToFront);
+        let err = bm
+            .assign_key(
+                BookmarkId(999),
+                key(Modifiers::SUPER, smithay::input::keyboard::Keysym::m),
+            )
+            .unwrap_err();
+        assert_eq!(err, AssignKeyError::NotFound);
+    }
+
+    #[test]
+    fn assign_key_rejects_collision_with_another_bookmark() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let AddOutcome::Added(id1) = bm.add_or_repress(1, a, RepressPolicy::MoveToFront) else {
+            unreachable!()
+        };
+        let AddOutcome::Added(id2) = bm.add_or_repress(2, a, RepressPolicy::MoveToFront) else {
+            unreachable!()
+        };
+        let k = key(Modifiers::SUPER, smithay::input::keyboard::Keysym::m);
+        bm.assign_key(id1, k).unwrap();
+        let err = bm.assign_key(id2, k).unwrap_err();
+        assert_eq!(err, AssignKeyError::Collision);
+    }
+
+    #[test]
+    fn assign_key_reassigning_own_current_key_is_idempotent() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let AddOutcome::Added(id1) = bm.add_or_repress(1, a, RepressPolicy::MoveToFront) else {
+            unreachable!()
+        };
+        let k = key(Modifiers::SUPER, smithay::input::keyboard::Keysym::m);
+        bm.assign_key(id1, k).unwrap();
+        let epoch_after_first = bm.binds_epoch();
+        assert!(bm.assign_key(id1, k).is_ok());
+        assert_eq!(
+            bm.binds_epoch(),
+            epoch_after_first,
+            "re-assigning the same key must not bump the epoch"
+        );
+    }
+
+    #[test]
+    fn assign_key_bumps_epoch_unassign_bumps_again() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let AddOutcome::Added(id1) = bm.add_or_repress(1, a, RepressPolicy::MoveToFront) else {
+            unreachable!()
+        };
+        let epoch0 = bm.binds_epoch();
+        bm.assign_key(
+            id1,
+            key(Modifiers::SUPER, smithay::input::keyboard::Keysym::m),
+        )
+        .unwrap();
+        let epoch1 = bm.binds_epoch();
+        assert_ne!(epoch0, epoch1, "assign_key must bump the epoch");
+        bm.unassign_key(id1).unwrap();
+        let epoch2 = bm.binds_epoch();
+        assert_ne!(epoch1, epoch2, "unassign_key must bump the epoch");
+    }
+
+    #[test]
+    fn unassign_key_rejects_unknown_id_and_noops_when_unset() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let AddOutcome::Added(id1) = bm.add_or_repress(1, a, RepressPolicy::MoveToFront) else {
+            unreachable!()
+        };
+        assert_eq!(
+            bm.unassign_key(BookmarkId(999)),
+            Err(AssignKeyError::NotFound)
+        );
+        let epoch_before = bm.binds_epoch();
+        assert!(
+            bm.unassign_key(id1).is_ok(),
+            "no key assigned: boundary no-op"
+        );
+        assert_eq!(
+            bm.binds_epoch(),
+            epoch_before,
+            "unassigning an already-unset key must not bump the epoch"
+        );
+    }
+
+    #[test]
+    fn remove_by_id_bumps_epoch_only_when_keyed() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let AddOutcome::Added(id1) = bm.add_or_repress(1, a, RepressPolicy::MoveToFront) else {
+            unreachable!()
+        };
+        let AddOutcome::Added(id2) = bm.add_or_repress(2, a, RepressPolicy::MoveToFront) else {
+            unreachable!()
+        };
+        bm.assign_key(
+            id1,
+            key(Modifiers::SUPER, smithay::input::keyboard::Keysym::m),
+        )
+        .unwrap();
+
+        let epoch0 = bm.binds_epoch();
+        bm.remove_by_id(id2);
+        assert_eq!(
+            bm.binds_epoch(),
+            epoch0,
+            "removing an unkeyed entry must not bump the epoch"
+        );
+
+        bm.remove_by_id(id1);
+        assert_ne!(
+            bm.binds_epoch(),
+            epoch0,
+            "removing a keyed entry must bump the epoch"
+        );
+    }
+
+    #[test]
+    fn prune_window_bumps_epoch_only_when_keyed() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let AddOutcome::Added(id1) = bm.add_or_repress(1, a, RepressPolicy::MoveToFront) else {
+            unreachable!()
+        };
+        let _ = bm.add_or_repress(2, a, RepressPolicy::MoveToFront);
+        bm.assign_key(
+            id1,
+            key(Modifiers::SUPER, smithay::input::keyboard::Keysym::m),
+        )
+        .unwrap();
+
+        let epoch0 = bm.binds_epoch();
+        bm.prune_window(&2);
+        assert_eq!(
+            bm.binds_epoch(),
+            epoch0,
+            "pruning an unkeyed window must not bump the epoch"
+        );
+
+        bm.prune_window(&1);
+        assert_ne!(
+            bm.binds_epoch(),
+            epoch0,
+            "pruning a keyed window must bump the epoch"
+        );
+    }
+
+    #[test]
+    fn commit_key_jump_arms_return_target() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        bm.commit_key_jump(&2, Some(1), OrderMode::Manual);
+        assert_eq!(bm.return_target(), Some(&1));
+    }
+
+    #[test]
+    fn commit_walk_and_commit_jump_clear_return_target() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2, 3] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+
+        bm.commit_key_jump(&2, Some(1), OrderMode::Manual);
+        assert_eq!(bm.return_target(), Some(&1));
+        commit_walk_at(&mut bm, 0);
+        assert_eq!(
+            bm.return_target(),
+            None,
+            "commit_walk must clear an armed return target"
+        );
+
+        bm.commit_key_jump(&2, Some(1), OrderMode::Manual);
+        assert_eq!(bm.return_target(), Some(&1));
+        bm.commit_jump(&3, OrderMode::Manual);
+        assert_eq!(
+            bm.return_target(),
+            None,
+            "commit_jump must clear an armed return target"
+        );
+    }
+
+    #[test]
+    fn commit_return_clears_and_lands_and_promotes_under_mru() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2, 3] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        // Jumping to 2 under MRU promotes it to front and arms a bounce to 1.
+        bm.commit_key_jump(&2, Some(1), OrderMode::Mru);
+        assert_eq!(bm.return_target(), Some(&1));
+        assert_eq!(
+            windows(&bm),
+            [2, 1, 3],
+            "commit_key_jump promotes the landed bookmark"
+        );
+
+        // Bouncing back to 1 clears the slot and re-promotes 1 to front.
+        bm.commit_return(&1, OrderMode::Mru);
+        assert_eq!(bm.return_target(), None, "bounce clears the armed slot");
+        assert_eq!(
+            windows(&bm),
+            [1, 2, 3],
+            "commit_return promotes the bounce target under MRU"
+        );
     }
 }

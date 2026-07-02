@@ -39,7 +39,8 @@ use std::{fmt, mem};
 
 use jiji_config::utils::MergeWith as _;
 use jiji_config::{
-    Config, CornerRadius, LayoutPart, PresetSize, Workspace as WorkspaceConfig, WorkspaceReference,
+    key_to_wire_string, Bind, Config, CornerRadius, LayoutPart, ModKey, PresetSize,
+    Workspace as WorkspaceConfig, WorkspaceReference,
 };
 use jiji_ipc::{ActivityReferenceArg, ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 use monitor::{InsertHint, InsertPosition, InsertWorkspace, MonitorAddWindowTarget};
@@ -62,7 +63,8 @@ pub use self::activity::{
     ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
 };
 use self::bookmarks::{
-    AddOutcome, BookmarkAnchor, BookmarkId, BookmarkJumpOutcome, Bookmarks, WalkDirection,
+    AddOutcome, AssignKeyError, BookmarkAnchor, BookmarkId, BookmarkJumpOutcome, BookmarkKey,
+    Bookmarks, WalkDirection,
 };
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{ActivitySwitch, Monitor, SlideDirection, WorkspaceSwitch};
@@ -663,12 +665,23 @@ pub(crate) enum DoActionError {
     /// always returns `Some` for `Index` and upstream clamps out-of-range
     /// indices, so the `Index` form keeps its clamp behaviour unchanged.
     FocusWorkspaceTargetUnknown { reference: String },
-    /// A remove/jump/move-bookmark action was dispatched with a bookmark id
-    /// absent from the list. Terminal error — the waiter is signalled
-    /// immediately, never parked. One variant serves all three actions: the
+    /// A bookmark action was dispatched with a bookmark id absent from the
+    /// list (remove, jump, move, assign/unassign key, or a keybind-driven
+    /// jump). Terminal error — the waiter is signalled immediately, never
+    /// parked. One variant serves every id-taking bookmark action: the
     /// failure semantics and wire message are identical, and the caller knows
     /// which verb it invoked.
     BookmarkNotFound { id: u64 },
+    /// `Action::AssignBookmarkKey` was dispatched with a string that fails to
+    /// parse as a [`jiji_config::Key`], names a non-keysym trigger, or names a
+    /// keysym with no modifiers. Terminal error — no state mutation. `key` is
+    /// the offending raw string as given by the caller.
+    BookmarkKeyInvalid { key: String, reason: String },
+    /// `Action::AssignBookmarkKey` was dispatched with a key that already
+    /// matches a static config bind, a recent-windows bind, or another
+    /// bookmark's key. Terminal error — no state mutation. `key` is the
+    /// canonical formatted key string.
+    BookmarkKeyCollision { key: String },
 }
 
 impl From<ActivitySwitchBlock> for DoActionError {
@@ -760,6 +773,10 @@ impl fmt::Display for DoActionError {
                 write!(f, "workspace not found: {reference}")
             }
             Self::BookmarkNotFound { id } => write!(f, "bookmark not found: id={id}"),
+            Self::BookmarkKeyInvalid { key, reason } => {
+                write!(f, "invalid bookmark key: {key}: {reason}")
+            }
+            Self::BookmarkKeyCollision { key } => write!(f, "bookmark key already bound: {key}"),
         }
     }
 }
@@ -6413,8 +6430,28 @@ impl<W: LayoutElement> Layout<W> {
             };
         }
 
-        // Fallback, mirroring the `FocusWindow` arm. Visibility fast-path: the
-        // workspace is in some view of the *active* activity → activate-only.
+        self.plan_window_restore(window)
+    }
+
+    /// Compute a restore plan for `window` with no saved-activity context to try
+    /// first: visible in the active activity → activate-only; otherwise the
+    /// hidden-window activity picker decides. Mid-interactive-move (not in the
+    /// workspace pool) is also handled here, so a caller with no saved activity
+    /// of its own does not need to special-case it.
+    ///
+    /// Pure (read-only). Shared by [`Self::plan_bookmark_restore`] (as its
+    /// saved-activity-unreachable fallback) and the return-to-previous bounce,
+    /// which restores a plain focus target rather than a bookmark and so has no
+    /// saved activity to try first.
+    fn plan_window_restore(&self, window: &W::Id) -> BookmarkRestorePlan {
+        let active = self.active_activity_id();
+
+        let Some(ws_id) = self.window_ws_and_activity_hint(window) else {
+            return BookmarkRestorePlan::ActivateOnly;
+        };
+
+        // Visibility fast-path: the workspace is in some view of the *active*
+        // activity → activate-only.
         let visible_in_active = self
             .activities
             .active()
@@ -6425,10 +6462,8 @@ impl<W: LayoutElement> Layout<W> {
             return BookmarkRestorePlan::ActivateOnly;
         }
 
-        // Hidden workspace, saved activity dead/unreachable: the picker decides.
-        // The hint is `None` by design — the `Mapped`-specific MRU plumb is
-        // unavailable in generic code, and the saved activity (the bookmark's own
-        // stronger context) is exactly what is dead or unreachable here.
+        // Hidden workspace: the picker decides. The hint is `None` by design —
+        // the `Mapped`-specific MRU plumb is unavailable in generic code.
         let target = self.pick_activity_for_hidden_window(ws_id, None);
         if target == active {
             // Degenerate picker result (workspace tagged only with the active
@@ -6538,6 +6573,203 @@ impl<W: LayoutElement> Layout<W> {
         // caller, an IPC-dispatched reposition.
         let _ = self.bookmarks.move_to_pos(bid, pos);
         Ok(())
+    }
+
+    /// Assign `key` as the dynamic keybind for the bookmark with `id`.
+    ///
+    /// Errors:
+    /// - `Err(DoActionError::BookmarkNotFound { id })` — unknown id.
+    /// - `Err(DoActionError::BookmarkKeyCollision { key })` — `key` already belongs to a
+    ///   *different* bookmark. Collision against the static config binds or the recent-windows
+    ///   binds is rejected earlier, at dispatch, before this is ever called.
+    pub(crate) fn assign_bookmark_key(
+        &mut self,
+        id: u64,
+        key: BookmarkKey,
+    ) -> Result<(), DoActionError> {
+        let Some(bid) = self.bookmarks.id_for_raw(id) else {
+            return Err(DoActionError::BookmarkNotFound { id });
+        };
+        self.bookmarks
+            .assign_key(bid, key)
+            .map_err(|err| match err {
+                // `id` was just resolved via `id_for_raw` above.
+                AssignKeyError::NotFound => {
+                    unreachable!("bookmark id validated via id_for_raw immediately above")
+                }
+                AssignKeyError::Collision => DoActionError::BookmarkKeyCollision {
+                    key: key_to_wire_string(key.key()),
+                },
+            })
+    }
+
+    /// Clear the dynamic keybind for the bookmark with `id`, if any.
+    ///
+    /// An unknown id is a loud [`DoActionError::BookmarkNotFound`]; a bookmark
+    /// with no assigned key is a silent no-op.
+    pub(crate) fn unassign_bookmark_key(&mut self, id: u64) -> Result<(), DoActionError> {
+        let Some(bid) = self.bookmarks.id_for_raw(id) else {
+            return Err(DoActionError::BookmarkNotFound { id });
+        };
+        self.bookmarks.unassign_key(bid).unwrap_or_else(|_| {
+            unreachable!("bookmark id validated via id_for_raw above; unassign_key cannot fail")
+        });
+        Ok(())
+    }
+
+    /// Jump to the bookmark with `id` via its dynamic keybind, with
+    /// return-to-previous bounce semantics.
+    ///
+    /// If the focused window is already the target: when `bookmarks.return`
+    /// is on and a bounce is armed, this restores the armed window instead
+    /// (the bounce) and clears the arming; otherwise it is a plain idempotent
+    /// jump that does not arm a bounce (no self-arming). If the focused window
+    /// is a different window, this is a normal jump that — when the knob is on
+    /// — arms the return target to the window being left, so the next
+    /// keybind-driven jump back onto the same bookmark bounces here.
+    ///
+    /// Errors match [`Self::jump_to_bookmark`]: `BookmarkNotFound` is terminal
+    /// (no state mutation); `ActivitySwitchBlocked` is parkable and fires
+    /// before any mutation (peek → plan → gate → commit), so a hard-blocked
+    /// call leaves bookmark state — including the return-target arming — bit
+    /// identical for re-dispatch.
+    pub(crate) fn jump_to_bookmark_via_key(
+        &mut self,
+        id: u64,
+    ) -> Result<BookmarkJumpOutcome, DoActionError> {
+        let (window, activity) = {
+            let Some(bm) = self.bookmarks.get_by_raw(id) else {
+                return Err(DoActionError::BookmarkNotFound { id });
+            };
+            (bm.anchor().window().clone(), bm.anchor().activity())
+        };
+        let order = self.options.bookmarks.order;
+        let return_enabled = self.options.bookmarks.return_to_previous;
+        let focused = self.focus().map(|w| w.id().clone());
+
+        if focused.as_ref() == Some(&window) {
+            if return_enabled {
+                if let Some(target) = self.bookmarks.return_target().cloned() {
+                    let plan = self.plan_window_restore(&target);
+                    if let BookmarkRestorePlan::Switch(_) = plan {
+                        if let Some(block) = self.is_activity_switch_hard_blocked() {
+                            return Err(block.into());
+                        }
+                    }
+                    let switched_activity = self.execute_bookmark_restore(&target, plan);
+                    self.bookmarks.commit_return(&target, order);
+                    return Ok(BookmarkJumpOutcome::Jumped { switched_activity });
+                }
+            }
+            // No armed bounce (or the knob is off): idempotent re-activation,
+            // never arming a self-bounce.
+            let plan = self.plan_bookmark_restore(&window, activity);
+            if let BookmarkRestorePlan::Switch(_) = plan {
+                if let Some(block) = self.is_activity_switch_hard_blocked() {
+                    return Err(block.into());
+                }
+            }
+            let switched_activity = self.execute_bookmark_restore(&window, plan);
+            self.bookmarks.commit_jump(&window, order);
+            return Ok(BookmarkJumpOutcome::Jumped { switched_activity });
+        }
+
+        let plan = self.plan_bookmark_restore(&window, activity);
+        if let BookmarkRestorePlan::Switch(_) = plan {
+            if let Some(block) = self.is_activity_switch_hard_blocked() {
+                return Err(block.into());
+            }
+        }
+        let switched_activity = self.execute_bookmark_restore(&window, plan);
+        if return_enabled {
+            self.bookmarks.commit_key_jump(&window, focused, order);
+        } else {
+            self.bookmarks.commit_jump(&window, order);
+        }
+        Ok(BookmarkJumpOutcome::Jumped { switched_activity })
+    }
+
+    /// Drop every assigned bookmark key that collides — under `mod_key`
+    /// normalization — with `static_binds`, `recent_windows_binds`, or
+    /// *another* bookmark's key, logging each drop with the bookmark id and
+    /// the formatted key.
+    ///
+    /// Called unconditionally on every successful config reload (a mod-key
+    /// change alone can create or dissolve a collision without touching
+    /// `binds {}`, and can likewise collapse two previously-distinct bookmark
+    /// keys onto the same effective bind). Each drop bumps the id→key epoch
+    /// via [`Bookmarks::unassign_key`], so the next `State::refresh` rebuilds
+    /// the synthetic bind mirror without the dropped key.
+    ///
+    /// For a bookmark-vs-bookmark collision the deterministic loser is the
+    /// higher [`BookmarkId`] — list order is not a stable tie-break across
+    /// saves, but id is.
+    pub(crate) fn revalidate_bookmark_keys(
+        &mut self,
+        static_binds: &[Bind],
+        recent_windows_binds: &[Bind],
+        mod_key: ModKey,
+    ) {
+        let normalize = |mut m: jiji_config::Modifiers| -> jiji_config::Modifiers {
+            if m.contains(jiji_config::Modifiers::COMPOSITOR) {
+                m |= mod_key.to_modifiers();
+            } else if m.contains(mod_key.to_modifiers()) {
+                m |= jiji_config::Modifiers::COMPOSITOR;
+            }
+            m
+        };
+        let conflicts = |a: jiji_config::Key, b: jiji_config::Key| -> bool {
+            a.trigger == b.trigger && normalize(a.modifiers) == normalize(b.modifiers)
+        };
+
+        let mut to_drop: Vec<(BookmarkId, BookmarkKey, &'static str)> = Vec::new();
+        for bookmark in self.bookmarks.list() {
+            let Some(key) = bookmark.key() else {
+                continue;
+            };
+            let collides = static_binds
+                .iter()
+                .chain(recent_windows_binds)
+                .any(|bind| conflicts(bind.key, key.key()));
+            if collides {
+                to_drop.push((bookmark.id(), key, "now colliding with a config bind"));
+            }
+        }
+
+        // Bookmark-vs-bookmark pass: pairwise, ascending by id so the lower
+        // id always plays the surviving `id_a` role and is never dropped.
+        let mut still_keyed: Vec<(BookmarkId, BookmarkKey)> = self
+            .bookmarks
+            .list()
+            .iter()
+            .filter_map(|b| b.key().map(|k| (b.id(), k)))
+            .collect();
+        still_keyed.sort_by_key(|(id, _)| id.get());
+        for i in 0..still_keyed.len() {
+            let (id_a, key_a) = still_keyed[i];
+            if to_drop.iter().any(|(dropped, _, _)| *dropped == id_a) {
+                continue;
+            }
+            for &(id_b, key_b) in &still_keyed[i + 1..] {
+                if to_drop.iter().any(|(dropped, _, _)| *dropped == id_b) {
+                    continue;
+                }
+                if conflicts(key_a.key(), key_b.key()) {
+                    to_drop.push((id_b, key_b, "now colliding with another bookmark's key"));
+                }
+            }
+        }
+
+        for (bid, key, reason) in to_drop {
+            warn!(
+                "dropping bookmark {}'s key {} ({reason})",
+                bid.get(),
+                key_to_wire_string(key.key())
+            );
+            self.bookmarks
+                .unassign_key(bid)
+                .unwrap_or_else(|_| unreachable!("bookmark id collected from the live list above"));
+        }
     }
 
     // Make every activity's `views` map cover every connected monitor. Required by the
@@ -8340,11 +8572,16 @@ impl<W: LayoutElement> Layout<W> {
 
         // Bookmark cross-field invariants. Every anchor window is present in
         // `windows_all()` (prune-on-close guarantee), ids are unique, at most one
-        // bookmark anchors any window, `next_id` stays ahead of every listed id,
-        // and the walk cursor is in bounds when `Some`. Saved-activity liveness
-        // and list order are deliberately NOT asserted: dead activities are legal
-        // (the restore fallback covers them), and no order property is a standing
-        // invariant.
+        // bookmark anchors any window, no two bookmarks hold an equal key,
+        // `next_id` stays ahead of every listed id, and the walk cursor is in
+        // bounds when `Some`. Saved-activity liveness and list order are
+        // deliberately NOT asserted: dead activities are legal (the restore
+        // fallback covers them), and no order property is a standing invariant.
+        // Key uniqueness here is raw `Key` equality; normalized (`ModKey`-aware)
+        // collisions are excluded both at assign time (input dispatch, against
+        // config binds and sibling bookmarks) and on every config reload
+        // (`revalidate_bookmark_keys`, same two checks) — this generic-`Layout`
+        // code cannot itself re-check `ModKey` normalization.
         {
             let list = self.bookmarks.list();
             if let Some(cursor) = self.bookmarks.walk_cursor() {
@@ -8358,6 +8595,7 @@ impl<W: LayoutElement> Layout<W> {
             // `W::Id` is only `PartialEq`, so window uniqueness uses a linear
             // scan rather than a hash set — fine for a hand-curated list.
             let mut seen_windows: Vec<&W::Id> = Vec::with_capacity(list.len());
+            let mut seen_keys: Vec<jiji_config::Key> = Vec::with_capacity(list.len());
             for bookmark in list {
                 let BookmarkAnchor::Window { window, .. } = bookmark.anchor();
                 assert!(
@@ -8381,6 +8619,14 @@ impl<W: LayoutElement> Layout<W> {
                     "bookmark references window {window:?} absent from windows_all \
                      (prune-on-close guarantee broken)",
                 );
+                if let Some(key) = bookmark.key() {
+                    let key = key.key();
+                    assert!(
+                        !seen_keys.contains(&key),
+                        "more than one bookmark holds key {key:?}",
+                    );
+                    seen_keys.push(key);
+                }
             }
             if let Some(target) = self.bookmarks.return_target() {
                 assert!(

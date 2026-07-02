@@ -8965,6 +8965,26 @@ fn do_action_error_display_matches_wire_contract() {
         ),
         "workspace not found for move: id:9999999999",
     );
+    // Dynamic bookmark key tokens.
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::BookmarkKeyInvalid {
+                key: "Nonsense".to_owned(),
+                reason: "invalid key: Nonsense".to_owned(),
+            }
+        ),
+        "invalid bookmark key: Nonsense: invalid key: Nonsense",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::BookmarkKeyCollision {
+                key: "Mod+M".to_owned()
+            }
+        ),
+        "bookmark key already bound: Mod+M",
+    );
 }
 
 #[test]
@@ -9178,6 +9198,20 @@ fn do_action_error_envelope_matches_wire_contract() {
                 name: "id:9999999999".to_owned(),
             },
             "workspace not found for move: id:9999999999",
+        ),
+        // Dynamic bookmark key rows.
+        (
+            DoActionError::BookmarkKeyInvalid {
+                key: "Nonsense".to_owned(),
+                reason: "invalid key: Nonsense".to_owned(),
+            },
+            "invalid bookmark key: Nonsense: invalid key: Nonsense",
+        ),
+        (
+            DoActionError::BookmarkKeyCollision {
+                key: "Mod+M".to_owned(),
+            },
+            "bookmark key already bound: Mod+M",
         ),
     ] {
         assert_eq!(format_do_action_error(err), expected);

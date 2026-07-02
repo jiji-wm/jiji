@@ -490,7 +490,9 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
             | Err(err @ DoActionError::FocusWorkspaceInActivity(_))
             | Err(err @ DoActionError::FocusWorkspaceTargetUnknown { .. })
             | Err(err @ DoActionError::MoveWindowTargetUnknownName { .. })
-            | Err(err @ DoActionError::BookmarkNotFound { .. }) => {
+            | Err(err @ DoActionError::BookmarkNotFound { .. })
+            | Err(err @ DoActionError::BookmarkKeyInvalid { .. })
+            | Err(err @ DoActionError::BookmarkKeyCollision { .. }) => {
                 // Terminal errors. Same shape as `WindowNotFound`:
                 // forward and advance the walk — do not re-block.
                 let _ = waiter.tx.send_blocking(Err(err));
@@ -862,7 +864,9 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                     | Err(err @ DoActionError::FocusWorkspaceInActivity(_))
                     | Err(err @ DoActionError::FocusWorkspaceTargetUnknown { .. })
                     | Err(err @ DoActionError::MoveWindowTargetUnknownName { .. })
-                    | Err(err @ DoActionError::BookmarkNotFound { .. }) => {
+                    | Err(err @ DoActionError::BookmarkNotFound { .. })
+                    | Err(err @ DoActionError::BookmarkKeyInvalid { .. })
+                    | Err(err @ DoActionError::BookmarkKeyCollision { .. }) => {
                         let _ = tx.send_blocking(Err(err));
                     }
                 }

@@ -11,7 +11,9 @@ use jiji_ipc::{
 use knuffel::errors::DecodeError;
 use miette::miette;
 use smithay::input::keyboard::keysyms::KEY_NoSymbol;
-use smithay::input::keyboard::xkb::{keysym_from_name, KEYSYM_CASE_INSENSITIVE, KEYSYM_NO_FLAGS};
+use smithay::input::keyboard::xkb::{
+    keysym_from_name, keysym_get_name, KEYSYM_CASE_INSENSITIVE, KEYSYM_NO_FLAGS,
+};
 use smithay::input::keyboard::Keysym;
 
 use crate::recent_windows::{MruDirection, MruFilter, MruScope};
@@ -1245,6 +1247,61 @@ impl FromStr for Key {
     }
 }
 
+/// Format a [`Key`] back into the `Mod+Ctrl+...+Keysym` syntax accepted by
+/// [`Key::from_str`].
+///
+/// Round-trips: `Key::from_str(&key_to_wire_string(k)) == Ok(k)` for every
+/// `k` (pinned by `key_to_wire_string_roundtrips` below). The modifier order
+/// is canonical (`Mod`, `Ctrl`, `Shift`, `Alt`, `Super`, `ISO_Level3_Shift`,
+/// `ISO_Level5_Shift`) so the same `Key` always formats identically; this is
+/// the shared formatter for the bookmark dynamic-key wire surface and the
+/// error messages that name a rejected or colliding key.
+pub fn key_to_wire_string(key: Key) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if key.modifiers.contains(Modifiers::COMPOSITOR) {
+        parts.push("Mod".to_owned());
+    }
+    if key.modifiers.contains(Modifiers::CTRL) {
+        parts.push("Ctrl".to_owned());
+    }
+    if key.modifiers.contains(Modifiers::SHIFT) {
+        parts.push("Shift".to_owned());
+    }
+    if key.modifiers.contains(Modifiers::ALT) {
+        parts.push("Alt".to_owned());
+    }
+    if key.modifiers.contains(Modifiers::SUPER) {
+        parts.push("Super".to_owned());
+    }
+    if key.modifiers.contains(Modifiers::ISO_LEVEL3_SHIFT) {
+        parts.push("ISO_Level3_Shift".to_owned());
+    }
+    if key.modifiers.contains(Modifiers::ISO_LEVEL5_SHIFT) {
+        parts.push("ISO_Level5_Shift".to_owned());
+    }
+    parts.push(trigger_to_wire_string(key.trigger));
+    parts.join("+")
+}
+
+fn trigger_to_wire_string(trigger: Trigger) -> String {
+    match trigger {
+        Trigger::Keysym(keysym) => keysym_get_name(keysym),
+        Trigger::MouseLeft => "MouseLeft".to_owned(),
+        Trigger::MouseRight => "MouseRight".to_owned(),
+        Trigger::MouseMiddle => "MouseMiddle".to_owned(),
+        Trigger::MouseBack => "MouseBack".to_owned(),
+        Trigger::MouseForward => "MouseForward".to_owned(),
+        Trigger::WheelScrollDown => "WheelScrollDown".to_owned(),
+        Trigger::WheelScrollUp => "WheelScrollUp".to_owned(),
+        Trigger::WheelScrollLeft => "WheelScrollLeft".to_owned(),
+        Trigger::WheelScrollRight => "WheelScrollRight".to_owned(),
+        Trigger::TouchpadScrollDown => "TouchpadScrollDown".to_owned(),
+        Trigger::TouchpadScrollUp => "TouchpadScrollUp".to_owned(),
+        Trigger::TouchpadScrollLeft => "TouchpadScrollLeft".to_owned(),
+        Trigger::TouchpadScrollRight => "TouchpadScrollRight".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1418,5 +1475,26 @@ mod tests {
     fn walk_bookmarks_backward_parses() {
         let action = parse_action("walk-bookmarks-backward");
         assert_eq!(action, Action::WalkBookmarksBackward);
+    }
+
+    #[test]
+    fn key_to_wire_string_roundtrips() {
+        for s in [
+            "Mod+M",
+            "Mod+Ctrl+Shift+Alt+Super+M",
+            "ISO_Level3_Shift+A",
+            "ISO_Level5_Shift+A",
+            "Ctrl+Alt+Delete",
+        ] {
+            let key: Key = s.parse().unwrap();
+            let formatted = key_to_wire_string(key);
+            let reparsed: Key = formatted.parse().unwrap_or_else(|e| {
+                panic!("re-parsing formatted key {formatted:?} (from {s:?}) failed: {e}")
+            });
+            assert_eq!(
+                reparsed, key,
+                "round-trip mismatch for {s:?} -> {formatted:?}"
+            );
+        }
     }
 }
