@@ -435,12 +435,15 @@ pub enum Action {
     AddBookmark,
     WalkBookmarksForward,
     WalkBookmarksBackward,
+    // The KDL bind removes the focused window's bookmark behind the confirm
+    // prompt; `skip-confirmation` bypasses it (the `Quit` precedent above).
+    RemoveBookmark(#[knuffel(property(name = "skip-confirmation"), default)] bool),
     // Runtime bookmark ids are meaningless in static config (they are not stable
-    // across restarts). `#[knuffel(skip)]` keeps these variants out of KDL parse
-    // while making them reachable from IPC dispatch and the `From<jiji_ipc::Action>`
+    // across restarts). `#[knuffel(skip)]` keeps this variant out of KDL parse
+    // while making it reachable from IPC dispatch and the `From<jiji_ipc::Action>`
     // arm. Follows the `FocusWindow(u64)` precedent.
     #[knuffel(skip)]
-    RemoveBookmark(Option<u64>),
+    RemoveBookmarkById(u64),
     #[knuffel(skip)]
     JumpToBookmark(u64),
     #[knuffel(skip)]
@@ -832,7 +835,8 @@ impl From<jiji_ipc::Action> for Action {
                 workspace: Some(reference),
             } => Self::UnsetWorkspaceStickyByRef(WorkspaceReference::from(reference)),
             jiji_ipc::Action::AddBookmark {} => Self::AddBookmark,
-            jiji_ipc::Action::RemoveBookmark { id } => Self::RemoveBookmark(id),
+            jiji_ipc::Action::RemoveBookmark { id: Some(id) } => Self::RemoveBookmarkById(id),
+            jiji_ipc::Action::RemoveBookmark { id: None } => Self::RemoveBookmark(true),
             jiji_ipc::Action::WalkBookmarksForward {} => Self::WalkBookmarksForward,
             jiji_ipc::Action::WalkBookmarksBackward {} => Self::WalkBookmarksBackward,
             jiji_ipc::Action::JumpToBookmark { id } => Self::JumpToBookmark(id),
@@ -1390,6 +1394,18 @@ mod tests {
     fn add_bookmark_parses() {
         let action = parse_action("add-bookmark");
         assert_eq!(action, Action::AddBookmark);
+    }
+
+    #[test]
+    fn remove_bookmark_parses_confirm_gated_by_default() {
+        let action = parse_action("remove-bookmark");
+        assert_eq!(action, Action::RemoveBookmark(false));
+    }
+
+    #[test]
+    fn remove_bookmark_skip_confirmation_parses() {
+        let action = parse_action("remove-bookmark skip-confirmation=true");
+        assert_eq!(action, Action::RemoveBookmark(true));
     }
 
     #[test]

@@ -61,7 +61,9 @@ pub use self::activity::{
     SetWorkspaceActivitiesError, SetWorkspaceStickyError, SwitchActivityError,
     ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
 };
-use self::bookmarks::{BookmarkAnchor, BookmarkJumpOutcome, Bookmarks, WalkDirection};
+use self::bookmarks::{
+    AddOutcome, BookmarkAnchor, BookmarkId, BookmarkJumpOutcome, Bookmarks, WalkDirection,
+};
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{ActivitySwitch, Monitor, SlideDirection, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
@@ -6321,25 +6323,43 @@ impl<W: LayoutElement> Layout<W> {
     /// point at, so this is a silent no-op — a keybind-driven interactive action
     /// with no target, the same boundary class as walking off the end of the
     /// list.
-    pub(crate) fn add_bookmark(&mut self) {
-        let Some(window) = self.focus() else {
-            return;
-        };
+    ///
+    /// Returns `Some(id)` only when the re-press needs confirmation (the
+    /// [`RepressPolicy::Remove`] policy on an already-bookmarked window): the
+    /// caller must show the confirmation prompt. Every other outcome (append,
+    /// move-to-front, already-front) is fire-and-forget — the caller has
+    /// nothing further to do.
+    pub(crate) fn add_bookmark(&mut self) -> Option<u64> {
+        let window = self.focus()?;
         let window = window.id().clone();
         let activity = self.activities.active_id();
         let policy = self.options.bookmarks.repress;
-        // Fire-and-forget: whether this appended, moved, or was already at the
-        // front makes no difference to the caller, an unconditional keybind.
-        let _ = self.bookmarks.add_or_repress(window, activity, policy);
+        match self.bookmarks.add_or_repress(window, activity, policy) {
+            AddOutcome::RemovalNeedsConfirm(id) => Some(id.get()),
+            AddOutcome::Added(_) | AddOutcome::MovedToFront | AddOutcome::AlreadyFront => None,
+        }
     }
 
-    /// Remove a bookmark.
+    /// The bookmark id anchoring the focused window, if any.
+    ///
+    /// Used to resolve the id at confirm-dialog *show* time (not confirm
+    /// time): the open dialog intercepts all keys and any pointer press
+    /// dismisses it, so focus can't drift under the prompt.
+    pub(crate) fn bookmark_id_for_focused(&self) -> Option<u64> {
+        let window = self.focus()?;
+        self.bookmarks
+            .id_for_window(window.id())
+            .map(BookmarkId::get)
+    }
+
+    /// Remove a bookmark. Always performs the removal immediately — this is
+    /// the single removal code path, reached either directly (IPC, and the
+    /// keybind's `skip-confirmation` escape hatch) or from the confirm
+    /// dialog's Enter handler once the user has confirmed.
     ///
     /// `Some(id)`: an unknown id is a loud [`DoActionError::BookmarkNotFound`];
     /// a known id is removed. `None`: the focused window's bookmark is removed,
-    /// or — with no focused window or no bookmark for it — a silent no-op. This
-    /// no-arg form performs the removal immediately; the confirmation gate is a
-    /// keybind/picker-path concern handled elsewhere.
+    /// or — with no focused window or no bookmark for it — a silent no-op.
     pub(crate) fn remove_bookmark(&mut self, id: Option<u64>) -> Result<(), DoActionError> {
         match id {
             Some(raw) => {

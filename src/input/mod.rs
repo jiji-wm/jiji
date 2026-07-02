@@ -529,14 +529,20 @@ impl State {
                                 this.niri.stop_signal.stop();
                             }
                             Some(ConfirmRequest::RemoveBookmark { id }) => {
-                                // The bookmark may have been pruned (window
-                                // closed) while the dialog was open; that
-                                // degrades the confirm to a cancel rather
-                                // than an error.
-                                if let Err(err) = this.niri.layout.remove_bookmark(Some(id)) {
-                                    debug!(
-                                        "remove_bookmark on confirm: {err:?}, treating as cancel"
-                                    );
+                                match this.niri.layout.remove_bookmark(Some(id)) {
+                                    Ok(()) => (),
+                                    // The bookmark may have been pruned
+                                    // (window closed) while the dialog was
+                                    // open; that degrades the confirm to a
+                                    // cancel rather than an error.
+                                    Err(err @ DoActionError::BookmarkNotFound { .. }) => {
+                                        debug!(
+                                            "remove_bookmark on confirm: {err:?}, treating as cancel"
+                                        );
+                                    }
+                                    Err(err) => {
+                                        error!("remove_bookmark on confirm: {err:?}");
+                                    }
                                 }
                             }
                             None => unreachable!(
@@ -1565,10 +1571,52 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::AddBookmark => {
-                self.niri.layout.add_bookmark();
+                if let Some(id) = self.niri.layout.add_bookmark() {
+                    // The window was already bookmarked and the configured
+                    // `repress` policy is `remove`: prompt before removing,
+                    // regardless of whether this add-bookmark came from a
+                    // keybind or an IPC caller.
+                    if self
+                        .niri
+                        .confirm_dialog
+                        .show(ConfirmRequest::RemoveBookmark { id })
+                    {
+                        self.niri.queue_redraw_all();
+                    } else {
+                        warn!(
+                            "confirm dialog unavailable; not removing bookmark without confirmation"
+                        );
+                    }
+                }
             }
-            Action::RemoveBookmark(id) => {
-                if let Err(err) = self.niri.layout.remove_bookmark(id) {
+            Action::RemoveBookmark(skip_confirmation) => {
+                if skip_confirmation {
+                    // The id-less arm never errs (silent no-op when nothing
+                    // matches); keep the propagation shape for uniformity
+                    // with `RemoveBookmarkById`.
+                    if let Err(err) = self.niri.layout.remove_bookmark(None) {
+                        debug!("remove_bookmark: {err:?}, propagating");
+                        return Err(err);
+                    }
+                } else if let Some(id) = self.niri.layout.bookmark_id_for_focused() {
+                    if self
+                        .niri
+                        .confirm_dialog
+                        .show(ConfirmRequest::RemoveBookmark { id })
+                    {
+                        self.niri.queue_redraw_all();
+                    } else {
+                        warn!(
+                            "confirm dialog unavailable; not removing bookmark without confirmation"
+                        );
+                    }
+                }
+                // No focused window, or the focused window has no bookmark:
+                // a boundary no-op, same class as walking off the end of the
+                // list. No dialog to show.
+            }
+            Action::RemoveBookmarkById(id) => {
+                if let Err(err) = self.niri.layout.remove_bookmark(Some(id)) {
                     debug!("remove_bookmark: {err:?}, propagating");
                     return Err(err);
                 }

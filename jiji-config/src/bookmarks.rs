@@ -44,6 +44,10 @@ pub enum RepressPolicy {
     /// Move the existing bookmark to the front of the list.
     #[default]
     MoveToFront,
+    /// Remove the existing bookmark instead of moving it. Opt-in, and always
+    /// gated behind a confirmation prompt, since re-pressing an existing
+    /// bookmark is a destructive action under this policy.
+    Remove,
 }
 
 /// The order the bookmark list presents and walks in.

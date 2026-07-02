@@ -22,6 +22,12 @@ use super::activity::ActivityId;
 ///
 /// A pruned bookmark's id is retired for good: [`Bookmarks::next_id`] only ever
 /// grows, so a fresh add never collides with a stale id a client may still hold.
+///
+/// `BookmarkId` is confined to [`Bookmarks`]: callers above it hold the raw
+/// `u64` instead, because an id can go stale (the window closes, pruning the
+/// bookmark) across a gap such as an open confirm dialog. A raw id must be
+/// revalidated via [`Bookmarks::id_for_raw`] before use, never re-wrapped
+/// directly into a `BookmarkId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BookmarkId(u64);
 
@@ -125,6 +131,11 @@ pub enum AddOutcome {
     MovedToFront,
     /// The window was already bookmarked and already at the front — no change.
     AlreadyFront,
+    /// The window was already bookmarked and [`RepressPolicy::Remove`] is
+    /// configured: nothing was mutated. The caller must show a confirmation
+    /// prompt and, on confirm, remove the bookmark via [`Bookmarks::remove_by_id`]
+    /// — there is exactly one removal code path.
+    RemovalNeedsConfirm(BookmarkId),
 }
 
 /// Outcome of [`Bookmarks::move_to_pos`].
@@ -227,6 +238,7 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
                         AddOutcome::MovedToFront
                     }
                 }
+                RepressPolicy::Remove => AddOutcome::RemovalNeedsConfirm(self.list[pos].id),
             }
         } else {
             let id = self.mint_id();
@@ -569,6 +581,28 @@ mod tests {
         let out = bm.add_or_repress(1, a, RepressPolicy::MoveToFront);
         assert_eq!(out, AddOutcome::AlreadyFront);
         assert_eq!(windows(&bm), [1, 2], "order unchanged");
+    }
+
+    #[test]
+    fn repress_remove_policy_needs_confirm_and_mutates_nothing() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let _ = bm.add_or_repress(1, a, RepressPolicy::MoveToFront);
+        let _ = bm.add_or_repress(2, a, RepressPolicy::MoveToFront);
+        let id2 = bm.id_for_window(&2).unwrap();
+        let next_id_before = bm.next_id();
+
+        let out = bm.add_or_repress(2, a, RepressPolicy::Remove);
+
+        assert_eq!(out, AddOutcome::RemovalNeedsConfirm(id2));
+        assert_eq!(windows(&bm), [1, 2], "list order unchanged");
+        assert_eq!(bm.walk_cursor(), None, "cursor unchanged");
+        assert_eq!(bm.next_id(), next_id_before, "next_id unchanged");
+        assert_eq!(
+            bm.id_for_window(&2),
+            Some(id2),
+            "the bookmark itself is untouched until the caller confirms"
+        );
     }
 
     #[test]

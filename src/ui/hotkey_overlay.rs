@@ -497,6 +497,7 @@ fn action_name(action: &Action) -> String {
         ),
         Action::AddBookmark => String::from("Add Bookmark"),
         Action::RemoveBookmark(_) => String::from("Remove Bookmark"),
+        Action::RemoveBookmarkById(_) => String::from("Remove Bookmark"),
         Action::WalkBookmarksForward => String::from("Walk Bookmarks Forward"),
         Action::WalkBookmarksBackward => String::from("Walk Bookmarks Backward"),
         Action::JumpToBookmark(_) => String::from("Jump to Bookmark"),

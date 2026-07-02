@@ -23700,6 +23700,70 @@ fn move_bookmark_reorders_and_unknown_id_is_loud() {
 }
 
 #[test]
+fn add_bookmark_returns_id_only_under_remove_policy_repress() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let options = Options {
+        bookmarks: jiji_config::BookmarksConfig {
+            repress: jiji_config::RepressPolicy::MoveToFront,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    layout.update_options(options);
+
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+
+    // First press: appends, no confirmation needed.
+    assert_eq!(layout.add_bookmark(), None);
+    // Re-press under move-to-front: still no confirmation needed.
+    assert_eq!(layout.add_bookmark(), None);
+
+    let options = Options {
+        bookmarks: jiji_config::BookmarksConfig {
+            repress: jiji_config::RepressPolicy::Remove,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    layout.update_options(options);
+
+    // Re-press under the remove policy: returns the existing bookmark's id,
+    // and does not remove it (the caller drives removal via the confirm
+    // dialog).
+    let id = layout.add_bookmark().expect("remove policy needs confirm");
+    assert_eq!(id, layout.bookmarks.list()[0].id().get());
+    assert_eq!(layout.bookmarks.list().len(), 1, "not removed yet");
+    layout.verify_invariants();
+}
+
+#[test]
+fn bookmark_id_for_focused_across_states() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+
+    // No focused window at all.
+    assert_eq!(layout.bookmark_id_for_focused(), None);
+
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+
+    // Focused but not bookmarked.
+    assert_eq!(layout.bookmark_id_for_focused(), None);
+
+    layout.add_bookmark();
+    let id = layout.bookmarks.list()[0].id().get();
+
+    // Focused and bookmarked.
+    assert_eq!(layout.bookmark_id_for_focused(), Some(id));
+}
+
+#[test]
 fn build_bookmarks_ipc_maps_fields_including_dead_activity() {
     use crate::ipc::server::{build_bookmarks_ipc, BookmarkWindowMeta};
 

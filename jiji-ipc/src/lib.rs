@@ -1377,13 +1377,19 @@ pub enum Action {
     ///
     /// With no focused window this is a silent no-op — an interactive boundary,
     /// not an error. `jiji msg action` returns `Response::Handled` either way.
+    /// Under the `remove` repress policy, re-pressing an already-bookmarked
+    /// window prompts for confirmation instead of removing it immediately —
+    /// this applies the same way whether the re-press came from a keybind or
+    /// from this IPC call.
     AddBookmark {},
     /// Remove a bookmark.
     ///
-    /// With `--id`, removes that bookmark, or returns
+    /// With `--id`, removes that bookmark immediately, or returns
     /// `Err("bookmark not found: id=<id>")` (terminal) when the id is unknown.
-    /// Without `--id`, removes the focused window's bookmark, or is a silent
-    /// no-op when nothing matches.
+    /// Without `--id`, removes the focused window's bookmark immediately, or
+    /// is a silent no-op when nothing matches. This IPC form is always
+    /// immediate; the confirmation prompt only guards the keybind path (see
+    /// the KDL `remove-bookmark` bind).
     RemoveBookmark {
         /// Id of the bookmark to remove. Defaults to the focused window's
         /// bookmark.

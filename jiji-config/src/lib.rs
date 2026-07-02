@@ -2517,18 +2517,15 @@ mod tests {
     }
 
     #[test]
-    fn bookmarks_repress_remove_is_a_parse_error() {
-        // `"remove"` is not a valid `repress` value in this build: the only
-        // accepted policy is move-to-front. A confirmation-gated removal policy
-        // is a later addition; until then the string must be rejected.
-        let res = Config::parse_mem(
+    fn bookmarks_repress_remove_parses() {
+        let parsed = do_parse(
             r##"
             bookmarks {
                 repress "remove"
             }
             "##,
         );
-        assert!(res.is_err(), "repress \"remove\" must fail to parse");
+        assert_eq!(parsed.bookmarks.repress, RepressPolicy::Remove);
     }
 
     fn diff_lines(expected: &str, actual: &str) -> String {
