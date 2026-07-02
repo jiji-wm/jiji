@@ -13,7 +13,7 @@ use smithay::output::{Mode, PhysicalProperties, Subpixel};
 use smithay::utils::Rectangle;
 
 use super::activity::ActivityId;
-use super::bookmarks::{BookmarkJumpOutcome, WalkDirection};
+use super::bookmarks::{BookmarkJumpOutcome, BookmarkKey, WalkDirection};
 use super::monitor::ActivityStrip;
 use super::*;
 
@@ -23262,30 +23262,34 @@ fn narrow_with_animation_snaps_then_culls() {
 
 // --- Bookmark restore, gate, and prune integration ---
 
-/// Snapshot of the observable bookmark state: `(id, window)` per entry in order,
-/// the walk cursor, `next_id`, `return_target`, and the focus hook's
-/// `last_seen_focus`. Used to pin bit-identity across a hard-blocked action (the
-/// no-mutation-before-gate contract).
+/// Snapshot of the observable bookmark state: `(id, window, key)` per entry in
+/// order, the walk cursor, `next_id`, `return_target`, the focus hook's
+/// `last_seen_focus`, and `binds_epoch`. Used to pin bit-identity across a
+/// hard-blocked action (the no-mutation-before-gate contract) — `key` and
+/// `binds_epoch` are included so a pre-gate key assign/unassign cannot pass
+/// undetected.
 #[allow(clippy::type_complexity)]
 fn bookmark_snapshot(
     layout: &Layout<TestWindow>,
 ) -> (
-    Vec<(u64, usize)>,
+    Vec<(u64, usize, Option<jiji_config::Key>)>,
     Option<usize>,
     u64,
     Option<usize>,
     Option<usize>,
+    u64,
 ) {
     let bm = &layout.bookmarks;
     (
         bm.list()
             .iter()
-            .map(|b| (b.id().get(), *b.anchor().window()))
+            .map(|b| (b.id().get(), *b.anchor().window(), b.key().map(|k| k.key())))
             .collect(),
         bm.walk_cursor(),
         bm.next_id(),
         bm.return_target().copied(),
         bm.last_seen_focus().copied(),
+        bm.binds_epoch(),
     )
 }
 
@@ -23812,6 +23816,13 @@ fn build_bookmarks_ipc_maps_fields_including_dead_activity() {
     layout.activate_window(&1);
     layout.add_bookmark();
     let bid = layout.bookmarks.list()[0].id().get();
+    let key = test_bookmark_key(
+        jiji_config::Modifiers::SUPER,
+        smithay::input::keyboard::Keysym::m,
+    );
+    layout
+        .assign_bookmark_key(bid, key)
+        .expect("assign must succeed");
 
     // Non-capturing extractor: synthetic per-window title/app_id so field
     // pass-through is observable. Copy, so it can be reused across calls.
@@ -23838,7 +23849,11 @@ fn build_bookmarks_ipc_maps_fields_including_dead_activity() {
     let placement = e.workspace.as_ref().expect("window is on a live workspace");
     assert_eq!(placement.idx, Some(1), "1-based view position");
     assert_eq!(e.name, None, "reserved");
-    assert_eq!(e.key, None, "reserved");
+    assert_eq!(
+        e.key.as_deref(),
+        Some("Super+m"),
+        "the assigned key wire-formats through the Some(key) branch"
+    );
 
     // Kill the saved activity while keeping the window (shared workspace).
     let ws_id = layout
@@ -23871,5 +23886,348 @@ fn build_bookmarks_ipc_maps_fields_including_dead_activity() {
         Some(1),
         "workspace still resolves via declaration-order fallback",
     );
+    layout.verify_invariants();
+}
+
+// --- Dynamic bookmark keys ---
+
+fn test_bookmark_key(
+    modifiers: jiji_config::Modifiers,
+    sym: smithay::input::keyboard::Keysym,
+) -> BookmarkKey {
+    BookmarkKey::new(jiji_config::Key {
+        trigger: jiji_config::Trigger::Keysym(sym),
+        modifiers,
+    })
+    .expect("test-constructed key must be valid")
+}
+
+#[test]
+fn assign_bookmark_key_rejects_unknown_id_and_collision() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    for w in [1, 2] {
+        Op::AddWindow {
+            params: TestWindowParams::new(w),
+        }
+        .apply(&mut layout);
+        layout.activate_window(&w);
+        layout.add_bookmark();
+    }
+    let id1 = layout.bookmarks.list()[0].id().get();
+    let id2 = layout.bookmarks.list()[1].id().get();
+
+    let k = test_bookmark_key(
+        jiji_config::Modifiers::SUPER,
+        smithay::input::keyboard::Keysym::m,
+    );
+    assert!(layout.assign_bookmark_key(id1, k).is_ok());
+
+    let err = layout.assign_bookmark_key(id2, k).unwrap_err();
+    assert!(
+        matches!(err, DoActionError::BookmarkKeyCollision { .. }),
+        "assigning a key already held by a different bookmark must collide"
+    );
+
+    // Re-assigning a bookmark's own current key is idempotent.
+    assert!(layout.assign_bookmark_key(id1, k).is_ok());
+
+    let err = layout.assign_bookmark_key(999, k).unwrap_err();
+    assert!(matches!(err, DoActionError::BookmarkNotFound { id: 999 }));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn unassign_bookmark_key_rejects_unknown_id_and_noops_when_unset() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+    let id = layout.bookmarks.list()[0].id().get();
+
+    assert!(
+        layout.unassign_bookmark_key(id).is_ok(),
+        "no key assigned: boundary no-op"
+    );
+
+    let err = layout.unassign_bookmark_key(999).unwrap_err();
+    assert!(matches!(err, DoActionError::BookmarkNotFound { id: 999 }));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn jump_to_bookmark_via_key_arms_return_target_and_bounces() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    for w in [1, 2] {
+        Op::AddWindow {
+            params: TestWindowParams::new(w),
+        }
+        .apply(&mut layout);
+        layout.activate_window(&w);
+    }
+    layout.add_bookmark();
+    let id2 = layout.bookmarks.list()[0].id().get();
+
+    // Focus back onto the unbookmarked window before jumping via key.
+    layout.activate_window(&1);
+    assert_eq!(layout.focus().map(|w| *w.id()), Some(1));
+
+    let outcome = layout
+        .jump_to_bookmark_via_key(id2)
+        .expect("known bookmark");
+    assert_eq!(
+        outcome,
+        BookmarkJumpOutcome::Jumped {
+            switched_activity: false
+        },
+    );
+    assert_eq!(layout.focus().map(|w| *w.id()), Some(2));
+    assert_eq!(
+        layout.bookmarks.return_target(),
+        Some(&1),
+        "jumping away from window 1 arms the return target to it",
+    );
+
+    // Re-pressing the same bookmark's key while already focused on it bounces
+    // back to window 1 and clears the arming.
+    let outcome = layout
+        .jump_to_bookmark_via_key(id2)
+        .expect("known bookmark");
+    assert_eq!(
+        outcome,
+        BookmarkJumpOutcome::Jumped {
+            switched_activity: false
+        },
+    );
+    assert_eq!(layout.focus().map(|w| *w.id()), Some(1), "bounced back");
+    assert_eq!(
+        layout.bookmarks.return_target(),
+        None,
+        "bounce clears the armed slot",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn jump_to_bookmark_via_key_no_self_arm_when_already_focused_without_bounce() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+    let id = layout.bookmarks.list()[0].id().get();
+
+    // Already focused on the bookmark's own window, no bounce armed: a plain
+    // idempotent jump that must not arm a self-bounce.
+    let outcome = layout.jump_to_bookmark_via_key(id).expect("known bookmark");
+    assert_eq!(
+        outcome,
+        BookmarkJumpOutcome::Jumped {
+            switched_activity: false
+        },
+    );
+    assert_eq!(layout.bookmarks.return_target(), None, "must not self-arm");
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn jump_to_bookmark_via_key_return_knob_off_never_arms() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let options = Options {
+        bookmarks: jiji_config::BookmarksConfig {
+            return_to_previous: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    layout.update_options(options);
+
+    for w in [1, 2] {
+        Op::AddWindow {
+            params: TestWindowParams::new(w),
+        }
+        .apply(&mut layout);
+        layout.activate_window(&w);
+    }
+    layout.add_bookmark();
+    let id2 = layout.bookmarks.list()[0].id().get();
+
+    layout.activate_window(&1);
+    layout
+        .jump_to_bookmark_via_key(id2)
+        .expect("known bookmark");
+    assert_eq!(
+        layout.bookmarks.return_target(),
+        None,
+        "the return knob is off: a keybind jump must never arm a bounce",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn jump_to_bookmark_via_key_hard_blocked_leaves_state_bit_identical() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let beta = layout.create_activity("beta".to_owned()).expect("create");
+    layout.switch_activity(beta);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+    let id = layout.bookmarks.list()[0].id().get();
+
+    layout.switch_activity(alpha);
+    let output = layout
+        .outputs()
+        .find(|o| o.name() == "output1")
+        .cloned()
+        .expect("output1");
+    layout.dnd_update(output, Point::from((0., 0.)));
+    assert!(matches!(
+        layout.is_activity_switch_hard_blocked(),
+        Some(ActivitySwitchBlock::Dnd)
+    ));
+
+    let before = bookmark_snapshot(&layout);
+    let err = layout
+        .jump_to_bookmark_via_key(id)
+        .expect_err("must be hard-blocked");
+    assert!(matches!(err, DoActionError::ActivitySwitchBlocked(_)));
+    assert_eq!(
+        bookmark_snapshot(&layout),
+        before,
+        "hard-blocked jump-via-key did not mutate bookmark state",
+    );
+
+    layout.dnd_end();
+    layout.verify_invariants();
+}
+
+#[test]
+fn revalidate_bookmark_keys_drops_colliding_keys() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+    let id = layout.bookmarks.list()[0].id().get();
+    let bid = layout.bookmarks.list()[0].id();
+
+    let k = test_bookmark_key(
+        jiji_config::Modifiers::SUPER,
+        smithay::input::keyboard::Keysym::m,
+    );
+    layout.assign_bookmark_key(id, k).unwrap();
+    let epoch_after_assign = layout.bookmarks.binds_epoch();
+
+    // A static config bind now collides with the assigned key under
+    // ModKey::Super normalization (Mod ⇔ Super).
+    let static_bind = Bind {
+        key: jiji_config::Key {
+            trigger: jiji_config::Trigger::Keysym(smithay::input::keyboard::Keysym::m),
+            modifiers: jiji_config::Modifiers::COMPOSITOR,
+        },
+        action: jiji_config::Action::CloseWindow,
+        repeat: false,
+        cooldown: None,
+        allow_when_locked: false,
+        allow_inhibiting: true,
+        hotkey_overlay_title: None,
+    };
+    layout.revalidate_bookmark_keys(&[static_bind], &[], ModKey::Super);
+
+    assert_eq!(
+        layout
+            .bookmarks
+            .list()
+            .iter()
+            .find(|b| b.id() == bid)
+            .and_then(|b| b.key()),
+        None,
+        "the colliding key must be dropped",
+    );
+    assert_ne!(
+        layout.bookmarks.binds_epoch(),
+        epoch_after_assign,
+        "dropping a key must bump the epoch",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn revalidate_bookmark_keys_drops_bookmark_vs_bookmark_collision_keeping_lower_id() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    for w in [1, 2] {
+        Op::AddWindow {
+            params: TestWindowParams::new(w),
+        }
+        .apply(&mut layout);
+        layout.activate_window(&w);
+        layout.add_bookmark();
+    }
+    let id_low = layout.bookmarks.list()[0].id().get();
+    let id_high = layout.bookmarks.list()[1].id().get();
+    assert!(id_low < id_high, "list is in add order, ids are monotonic");
+    let bid_low = layout.bookmarks.list()[0].id();
+    let bid_high = layout.bookmarks.list()[1].id();
+
+    // Assign non-conflicting keys (Mod+M is raw-equality-distinct from
+    // Super+M, so `Bookmarks::assign_key`'s raw-equality guard lets both
+    // through) that a subsequent mod-key flip collapses into a collision.
+    let mod_plus_m = test_bookmark_key(
+        jiji_config::Modifiers::COMPOSITOR,
+        smithay::input::keyboard::Keysym::m,
+    );
+    let super_plus_m = test_bookmark_key(
+        jiji_config::Modifiers::SUPER,
+        smithay::input::keyboard::Keysym::m,
+    );
+    layout.assign_bookmark_key(id_low, mod_plus_m).unwrap();
+    layout.assign_bookmark_key(id_high, super_plus_m).unwrap();
+    let epoch_after_assign = layout.bookmarks.binds_epoch();
+
+    // The mod-key flip to Super makes Mod+M and Super+M normalize equal.
+    layout.revalidate_bookmark_keys(&[], &[], ModKey::Super);
+
+    assert_eq!(
+        layout
+            .bookmarks
+            .list()
+            .iter()
+            .find(|b| b.id() == bid_low)
+            .and_then(|b| b.key()),
+        Some(mod_plus_m),
+        "the lower-id bookmark keeps its key",
+    );
+    assert_eq!(
+        layout
+            .bookmarks
+            .list()
+            .iter()
+            .find(|b| b.id() == bid_high)
+            .and_then(|b| b.key()),
+        None,
+        "the higher-id bookmark's colliding key is dropped",
+    );
+    assert_ne!(
+        layout.bookmarks.binds_epoch(),
+        epoch_after_assign,
+        "dropping a key must bump the epoch",
+    );
+
     layout.verify_invariants();
 }

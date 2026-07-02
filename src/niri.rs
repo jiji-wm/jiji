@@ -15,8 +15,8 @@ use anyhow::{bail, ensure, Context};
 use calloop::futures::Scheduler;
 use jiji_config::debug::PreviewRender;
 use jiji_config::{
-    Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout, WarpMouseToFocusMode,
-    WorkspaceReference, Xkb,
+    Action, Bind, Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout,
+    WarpMouseToFocusMode, WorkspaceReference, Xkb,
 };
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::Keycode;
@@ -428,6 +428,14 @@ pub struct Niri {
 
     pub window_mru_ui: WindowMruUi,
     pub pending_mru_commit: Option<PendingMruCommit>,
+
+    // Synthetic binds materialized from assigned bookmark dynamic keys, plus
+    // the `Bookmarks::binds_epoch` value they were last rebuilt from. Rebuilt
+    // in `State::refresh` whenever the live epoch differs from this cache —
+    // never per-callsite, so every id→key mapping change (assign, unassign,
+    // keyed removal/prune) funnels through a single rebuild site.
+    pub bookmark_binds: Vec<Bind>,
+    bookmark_binds_epoch: u64,
 
     pub pick_window: Option<async_channel::Sender<Option<MappedId>>>,
     pub pick_color: Option<async_channel::Sender<Option<jiji_ipc::PickedColor>>>,
@@ -872,6 +880,8 @@ impl State {
         // Needs to be called after updating the keyboard focus.
         self.niri.refresh_layout();
 
+        self.refresh_bookmark_binds();
+
         self.niri.cursor_manager.check_cursor_image_surface_alive();
         self.niri.refresh_pointer_outputs();
         self.niri.global_space.refresh();
@@ -899,6 +909,42 @@ impl State {
 
         // Last step; ordering rationale on drain_blocked_action_waiters.
         crate::ipc::server::drain_blocked_action_waiters(self);
+    }
+
+    /// Rebuild `self.niri.bookmark_binds` (the synthetic bind mirror of every
+    /// assigned bookmark key) if the bookmark id→key mapping has changed since
+    /// the last rebuild.
+    ///
+    /// The sole rebuild site: assign, unassign, and keyed removal/prune all
+    /// funnel here via `Bookmarks::binds_epoch`, so no call site rebuilds the
+    /// mirror directly. `repeat: false` is deliberate — key-repeat on a jump
+    /// would oscillate with the return-to-previous bounce.
+    fn refresh_bookmark_binds(&mut self) {
+        let bookmarks = self.niri.layout.bookmarks();
+        let epoch = bookmarks.binds_epoch();
+        if epoch == self.niri.bookmark_binds_epoch {
+            return;
+        }
+
+        let binds = bookmarks
+            .list()
+            .iter()
+            .filter_map(|bookmark| {
+                let key = bookmark.key()?;
+                Some(Bind {
+                    key: key.key(),
+                    action: Action::JumpToBookmarkViaKey(bookmark.id().get()),
+                    repeat: false,
+                    cooldown: None,
+                    allow_when_locked: false,
+                    allow_inhibiting: true,
+                    hotkey_overlay_title: None,
+                })
+            })
+            .collect();
+
+        self.niri.bookmark_binds = binds;
+        self.niri.bookmark_binds_epoch = epoch;
     }
 
     fn notify_blocker_cleared(&mut self) {
@@ -1798,6 +1844,22 @@ impl State {
 
         if recent_windows_changed {
             self.niri.window_mru_ui.update_config();
+        }
+
+        // Unconditional on every successful reload, not gated behind
+        // `binds_changed`: a mod-key change alone shifts `COMPOSITOR`
+        // normalization and can create or dissolve a bookmark-key collision
+        // without `binds {}` itself changing, and recent-windows binds change
+        // under `recent_windows_changed`, a different flag. The bookmark list
+        // is tiny, so re-checking unconditionally is the robust choice over
+        // trying to enumerate every flag that could affect it.
+        {
+            let config = self.niri.config.borrow();
+            self.niri.layout.revalidate_bookmark_keys(
+                &config.binds.0,
+                &config.recent_windows.binds,
+                new_mod_key,
+            );
         }
 
         if xwls_changed {
@@ -2725,6 +2787,9 @@ impl Niri {
 
             window_mru_ui,
             pending_mru_commit: None,
+
+            bookmark_binds: Vec::new(),
+            bookmark_binds_epoch: 0,
 
             pick_window: None,
             pick_color: None,

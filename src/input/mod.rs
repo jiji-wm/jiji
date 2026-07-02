@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use calloop::timer::{TimeoutAction, Timer};
 use input::event::gesture::GestureEventCoordinates as _;
 use jiji_config::{
-    Action, Bind, Binds, Config, Key, ModKey, Modifiers, MruDirection, SwitchBinds, Trigger,
-    WorkspaceReference,
+    key_to_wire_string, Action, Bind, Binds, Config, Key, ModKey, Modifiers, MruDirection,
+    SwitchBinds, Trigger, WorkspaceReference,
 };
 use jiji_ipc::{ActivityReferenceArg, LayoutSwitchTarget, NoOpReason};
 use smithay::backend::input::{
@@ -47,7 +47,7 @@ use self::resize_grab::ResizeGrab;
 use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
-use crate::layout::bookmarks::{BookmarkJumpOutcome, WalkDirection};
+use crate::layout::bookmarks::{BookmarkJumpOutcome, BookmarkKey, WalkDirection};
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{
     ActivateWindow, DoActionError, DoActionOutcome, LayoutElement, MoveWindowToPoolOutcome,
@@ -588,7 +588,7 @@ impl State {
                 let res = {
                     let config = this.niri.config.borrow();
                     let bindings =
-                        make_binds_iter(&config, &mut this.niri.window_mru_ui, modifiers);
+                        make_binds_iter(&config, &mut this.niri.window_mru_ui, modifiers, &this.niri.bookmark_binds);
 
                     should_intercept_key(
                         &mut this.niri.suppressed_keys,
@@ -1674,6 +1674,104 @@ impl State {
                 if let Err(err) = self.niri.layout.move_bookmark(id, pos) {
                     debug!("move_bookmark: {err:?}, propagating");
                     return Err(err);
+                }
+            }
+            Action::AssignBookmarkKey { id, key: raw_key } => {
+                let parsed: Key = match raw_key.parse() {
+                    Ok(k) => k,
+                    Err(err) => {
+                        return Err(DoActionError::BookmarkKeyInvalid {
+                            key: raw_key,
+                            reason: format!("{err}"),
+                        });
+                    }
+                };
+                let bookmark_key = match BookmarkKey::new(parsed) {
+                    Ok(k) => k,
+                    Err(err) => {
+                        return Err(DoActionError::BookmarkKeyInvalid {
+                            key: raw_key,
+                            reason: err.to_string(),
+                        });
+                    }
+                };
+
+                // Reject collision against the static config binds, the
+                // recent-windows binds, and every other bookmark's key before
+                // touching layout state. MRU-open-only binds
+                // (`opened_bindings`) are deliberately not checked: bookmark
+                // binds are suppressed while the MRU is open (see
+                // `make_binds_iter`), so they can never be live at the same
+                // time. The sibling-bookmark check reads the layout list
+                // directly (not the `Niri::bookmark_binds` synthetic mirror,
+                // which is epoch-gated and only rebuilds once per calloop
+                // dispatch iteration) so two `AssignBookmarkKey` actions
+                // dispatched in the same iteration can't both see a stale,
+                // pre-assign view and double-accept a collision.
+                let mod_key = self.backend.mod_key(&self.niri.config.borrow());
+                let collides = {
+                    let config = self.niri.config.borrow();
+                    config
+                        .binds
+                        .0
+                        .iter()
+                        .chain(config.recent_windows.binds.iter())
+                        .any(|bind| keys_conflict(bind.key, parsed, mod_key))
+                } || bookmark_key_collides_with_siblings(
+                    self.niri
+                        .layout
+                        .bookmarks()
+                        .list()
+                        .iter()
+                        .filter_map(|b| b.key().map(|k| (b.id().get(), k.key()))),
+                    id,
+                    parsed,
+                    mod_key,
+                );
+                if collides {
+                    return Err(DoActionError::BookmarkKeyCollision {
+                        key: key_to_wire_string(parsed),
+                    });
+                }
+
+                if let Err(err) = self.niri.layout.assign_bookmark_key(id, bookmark_key) {
+                    debug!("assign_bookmark_key: {err:?}, propagating");
+                    return Err(err);
+                }
+            }
+            Action::UnassignBookmarkKey(id) => {
+                if let Err(err) = self.niri.layout.unassign_bookmark_key(id) {
+                    debug!("unassign_bookmark_key: {err:?}, propagating");
+                    return Err(err);
+                }
+            }
+            Action::JumpToBookmarkViaKey(id) => {
+                let prev_output = self.niri.layout.active_output().cloned();
+                match self.niri.layout.jump_to_bookmark_via_key(id) {
+                    Err(DoActionError::BookmarkNotFound { id }) => {
+                        // A stale synthetic bind can race a bookmark-key
+                        // unassign/prune within one refresh cycle; tolerated,
+                        // not propagated.
+                        debug!(
+                            "jump_to_bookmark_via_key: bookmark {id} not found \
+                             (stale synthetic bind), ignoring"
+                        );
+                    }
+                    Err(err) => {
+                        debug!("jump_to_bookmark_via_key: failed ({err:?}), propagating");
+                        return Err(err);
+                    }
+                    Ok(BookmarkJumpOutcome::Noop) => {
+                        // Structurally unreachable for a known bookmark, but not
+                        // panic-worthy — see the `JumpToBookmark` arm's identical
+                        // breadcrumb.
+                        debug!(
+                            "jump_to_bookmark_via_key: Noop outcome (unexpected for a known bookmark)"
+                        );
+                    }
+                    Ok(BookmarkJumpOutcome::Jumped { switched_activity }) => {
+                        self.post_jump_bookkeeping(prev_output, switched_activity);
+                    }
                 }
             }
             Action::MoveWindowToWorkspace(reference, focus) => {
@@ -4088,8 +4186,12 @@ impl State {
                 }
                 .and_then(|trigger| {
                     let config = self.niri.config.borrow();
-                    let bindings =
-                        make_binds_iter(&config, &mut self.niri.window_mru_ui, modifiers);
+                    let bindings = make_binds_iter(
+                        &config,
+                        &mut self.niri.window_mru_ui,
+                        modifiers,
+                        &self.niri.bookmark_binds,
+                    );
                     find_configured_bind(bindings, mod_key, trigger, mods)
                 })
                 .filter(|bind| {
@@ -4445,8 +4547,12 @@ impl State {
                             (bind_left, bind_right)
                         } else {
                             let config = self.niri.config.borrow();
-                            let bindings =
-                                make_binds_iter(&config, &mut self.niri.window_mru_ui, modifiers);
+                            let bindings = make_binds_iter(
+                                &config,
+                                &mut self.niri.window_mru_ui,
+                                modifiers,
+                                &self.niri.bookmark_binds,
+                            );
                             let bind_left = find_configured_bind(
                                 bindings.clone(),
                                 mod_key,
@@ -4540,8 +4646,12 @@ impl State {
                         (bind_up, bind_down)
                     } else {
                         let config = self.niri.config.borrow();
-                        let bindings =
-                            make_binds_iter(&config, &mut self.niri.window_mru_ui, modifiers);
+                        let bindings = make_binds_iter(
+                            &config,
+                            &mut self.niri.window_mru_ui,
+                            modifiers,
+                            &self.niri.bookmark_binds,
+                        );
                         let bind_up = find_configured_bind(
                             bindings.clone(),
                             mod_key,
@@ -4693,8 +4803,12 @@ impl State {
                     .accumulate(horizontal);
                 if ticks != 0 {
                     let config = self.niri.config.borrow();
-                    let bindings =
-                        make_binds_iter(&config, &mut self.niri.window_mru_ui, modifiers);
+                    let bindings = make_binds_iter(
+                        &config,
+                        &mut self.niri.window_mru_ui,
+                        modifiers,
+                        &self.niri.bookmark_binds,
+                    );
                     let bind_left = find_configured_bind(
                         bindings.clone(),
                         mod_key,
@@ -4731,8 +4845,12 @@ impl State {
                     .accumulate(vertical);
                 if ticks != 0 {
                     let config = self.niri.config.borrow();
-                    let bindings =
-                        make_binds_iter(&config, &mut self.niri.window_mru_ui, modifiers);
+                    let bindings = make_binds_iter(
+                        &config,
+                        &mut self.niri.window_mru_ui,
+                        modifiers,
+                        &self.niri.bookmark_binds,
+                    );
                     let bind_up = find_configured_bind(
                         bindings.clone(),
                         mod_key,
@@ -5815,6 +5933,53 @@ fn find_configured_bind<'a>(
     None
 }
 
+/// Whether `a` and `b` bind to the same effective key under `mod_key`
+/// normalization.
+///
+/// Mirrors [`find_configured_bind`]'s bidirectional `COMPOSITOR` ⇄ `mod_key`
+/// modifier expansion, applied symmetrically to both sides rather than to one
+/// side plus a live [`ModifiersState`]: the collision check compares two
+/// static [`Key`]s (a candidate bookmark key against a config bind, or a
+/// static bind against another) rather than a static key against a live
+/// keyboard state.
+fn keys_conflict(a: Key, b: Key, mod_key: ModKey) -> bool {
+    if a.trigger != b.trigger {
+        return false;
+    }
+    let normalize = |mut modifiers: Modifiers| -> Modifiers {
+        if modifiers.contains(Modifiers::COMPOSITOR) {
+            modifiers |= mod_key.to_modifiers();
+        } else if modifiers.contains(mod_key.to_modifiers()) {
+            modifiers |= Modifiers::COMPOSITOR;
+        }
+        modifiers
+    };
+    normalize(a.modifiers) == normalize(b.modifiers)
+}
+
+/// Whether `candidate` collides, under [`keys_conflict`] normalization, with
+/// any bookmark key in `keyed_bookmarks` other than the one being
+/// (re-)assigned (`excluding_id`).
+///
+/// `keyed_bookmarks` is `(bookmark id, assigned key)` pairs read live off
+/// `Layout::bookmarks()` — not `Niri::bookmark_binds`, the synthetic bind
+/// mirror, which only rebuilds once per calloop dispatch iteration (epoch-
+/// gated in `State::refresh`) and can lag behind two `AssignBookmarkKey`
+/// actions dispatched in the same iteration. The layout list is mutated
+/// synchronously by `assign_bookmark_key`, so it is never stale within a
+/// cycle. `excluding_id` lets re-pressing a bookmark's own current key stay
+/// idempotent, not collide with itself.
+fn bookmark_key_collides_with_siblings(
+    keyed_bookmarks: impl Iterator<Item = (u64, Key)>,
+    excluding_id: u64,
+    candidate: Key,
+    mod_key: ModKey,
+) -> bool {
+    keyed_bookmarks
+        .filter(|&(id, _)| id != excluding_id)
+        .any(|(_, key)| keys_conflict(key, candidate, mod_key))
+}
+
 fn find_configured_switch_action(
     bindings: &SwitchBinds,
     switch: Switch,
@@ -6424,25 +6589,43 @@ fn grab_allows_hot_corner(grab: &(dyn PointerGrab<State> + 'static)) -> bool {
 
 /// Returns an iterator over bindings.
 ///
-/// Includes dynamically populated bindings like the MRU UI.
+/// Includes dynamically populated bindings like the MRU UI and the
+/// synthetic per-bookmark keybinds.
 fn make_binds_iter<'a>(
     config: &'a Config,
     mru: &'a mut WindowMruUi,
     mods: Modifiers,
+    bookmark_binds: &'a [Bind],
 ) -> impl Iterator<Item = &'a Bind> + Clone {
     // Figure out the binds to use depending on whether the MRU is enabled and/or open.
-    let general_binds = (!mru.is_open()).then_some(config.binds.0.iter());
+    // Read once: `mru_open_binds` below captures `mru` by unique reference in
+    // a closure, which would otherwise conflict with the later `is_open()`
+    // reads needed for `bookmark_binds`.
+    let is_open = mru.is_open();
+
+    let general_binds = (!is_open).then_some(config.binds.0.iter());
     let general_binds = general_binds.into_iter().flatten();
 
     let mru_binds =
-        (config.recent_windows.on || mru.is_open()).then_some(config.recent_windows.binds.iter());
+        (config.recent_windows.on || is_open).then_some(config.recent_windows.binds.iter());
     let mru_binds = mru_binds.into_iter().flatten();
 
-    let mru_open_binds = mru.is_open().then(|| mru.opened_bindings(mods));
+    let mru_open_binds = is_open.then(|| mru.opened_bindings(mods));
     let mru_open_binds = mru_open_binds.into_iter().flatten();
 
-    // General binds take precedence over the MRU binds.
-    general_binds.chain(mru_binds).chain(mru_open_binds)
+    // Suppressed while the MRU is open, same as `general_binds`: a bookmark
+    // bind and the MRU's own overlay binds can never be live together.
+    let bookmark_binds = (!is_open).then_some(bookmark_binds.iter());
+    let bookmark_binds = bookmark_binds.into_iter().flatten();
+
+    // General binds take precedence over the MRU binds. Reject-on-collision at
+    // assign time (against config binds and sibling bookmarks) and hot-reload
+    // re-validation (same two checks) keep this chain order semantically
+    // irrelevant for the bookmark binds specifically.
+    general_binds
+        .chain(mru_binds)
+        .chain(mru_open_binds)
+        .chain(bookmark_binds)
 }
 
 #[cfg(test)]
@@ -6820,6 +7003,145 @@ mod tests {
                 },
             ),
             None,
+        );
+    }
+
+    #[test]
+    fn keys_conflict_normalizes_compositor_modifier_both_directions() {
+        let mod_plus_m = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::COMPOSITOR,
+        };
+        let super_plus_m = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::SUPER,
+        };
+        let alt_plus_m = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::ALT,
+        };
+
+        assert!(
+            keys_conflict(mod_plus_m, super_plus_m, ModKey::Super),
+            "Mod+M and Super+M must conflict when the mod key is Super"
+        );
+        assert!(
+            keys_conflict(super_plus_m, mod_plus_m, ModKey::Super),
+            "the check must be symmetric"
+        );
+        assert!(
+            !keys_conflict(mod_plus_m, alt_plus_m, ModKey::Super),
+            "Mod+M and Alt+M must not conflict when the mod key is Super"
+        );
+    }
+
+    #[test]
+    fn keys_conflict_identical_keys_conflict() {
+        let key = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::CTRL | Modifiers::ALT,
+        };
+        assert!(keys_conflict(key, key, ModKey::Super));
+    }
+
+    #[test]
+    fn keys_conflict_different_triggers_never_conflict() {
+        let a = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::COMPOSITOR,
+        };
+        let b = Key {
+            trigger: Trigger::Keysym(Keysym::n),
+            modifiers: Modifiers::COMPOSITOR,
+        };
+        assert!(!keys_conflict(a, b, ModKey::Super));
+    }
+
+    #[test]
+    fn bookmark_key_collides_with_siblings_rejects_normalized_collision() {
+        // Bookmark 1 holds Mod+M; assigning Super+M to bookmark 2 must be
+        // rejected under ModKey::Super normalization even though the raw
+        // `Key`s differ.
+        let mod_plus_m = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::COMPOSITOR,
+        };
+        let super_plus_m = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::SUPER,
+        };
+        let keyed = vec![(1, mod_plus_m)];
+
+        assert!(
+            bookmark_key_collides_with_siblings(keyed.into_iter(), 2, super_plus_m, ModKey::Super),
+            "a different bookmark's normalized-equal key must collide",
+        );
+    }
+
+    #[test]
+    fn bookmark_key_collides_with_siblings_excludes_own_id() {
+        // Re-assigning bookmark 1's own current key must stay idempotent: it
+        // is excluded from the sibling sweep by matching `excluding_id`.
+        let key = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::COMPOSITOR,
+        };
+        let keyed = vec![(1, key)];
+
+        assert!(
+            !bookmark_key_collides_with_siblings(keyed.into_iter(), 1, key, ModKey::Super),
+            "a bookmark's own bind must not collide with itself",
+        );
+    }
+
+    #[test]
+    fn bookmark_key_collides_with_siblings_no_conflict_for_distinct_keys() {
+        let m_key = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::COMPOSITOR,
+        };
+        let n_key = Key {
+            trigger: Trigger::Keysym(Keysym::n),
+            modifiers: Modifiers::COMPOSITOR,
+        };
+        let keyed = vec![(1, m_key)];
+
+        assert!(!bookmark_key_collides_with_siblings(
+            keyed.into_iter(),
+            2,
+            n_key,
+            ModKey::Super
+        ));
+    }
+
+    #[test]
+    fn bookmark_key_collides_with_siblings_catches_same_cycle_assign() {
+        // Pins the fix for the staleness window: this asserts against the
+        // live `(id, Key)` pairs the dispatch site now reads straight off
+        // `Layout::bookmarks()`, not the once-per-dispatch-iteration
+        // `Niri::bookmark_binds` mirror — so a second `AssignBookmarkKey`
+        // action landing in the same calloop iteration as a first sees the
+        // first's key immediately, with no rebuild lag.
+        let mod_plus_m = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::COMPOSITOR,
+        };
+        let super_plus_m = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::SUPER,
+        };
+        // Simulates the layout list immediately after assigning Mod+M to
+        // bookmark 1, before any `Niri::bookmark_binds` rebuild.
+        let live_list = vec![(1, mod_plus_m)];
+
+        assert!(
+            bookmark_key_collides_with_siblings(
+                live_list.into_iter(),
+                2,
+                super_plus_m,
+                ModKey::Super
+            ),
+            "a same-cycle sibling assign must see the just-assigned key immediately",
         );
     }
 }

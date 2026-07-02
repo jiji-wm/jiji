@@ -1017,8 +1017,13 @@ fn print_bookmarks(bookmarks: &[Bookmark]) {
             Some(name) => format!("\"{name}\""),
             None => format!("{}", bm.activity_id),
         };
+        let key = bm
+            .key
+            .as_deref()
+            .map(|k| format!(" [key {k}]"))
+            .unwrap_or_default();
         println!(
-            "  [{id}] window {window} \"{title}\" on {ws}{out} [activity {act}]",
+            "  [{id}] window {window} \"{title}\" on {ws}{out} [activity {act}]{key}",
             id = bm.id,
             window = bm.window_id,
         );

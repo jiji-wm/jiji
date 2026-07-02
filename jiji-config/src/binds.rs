@@ -453,6 +453,26 @@ pub enum Action {
         id: u64,
         pos: usize,
     },
+    // IPC-only, same rationale as `RemoveBookmarkById`: runtime bookmark ids
+    // are not stable across restarts, so this cannot be a static KDL bind.
+    // Carries the raw key string rather than a parsed `Key` so `From<jiji_ipc::Action>`
+    // stays infallible; parsing happens at dispatch (`Key::from_str`, then
+    // `BookmarkKey::new`).
+    #[knuffel(skip)]
+    AssignBookmarkKey {
+        id: u64,
+        key: String,
+    },
+    #[knuffel(skip)]
+    UnassignBookmarkKey(u64),
+    // No IPC counterpart: only ever constructed inside the synthetic binds
+    // materialized from assigned bookmark keys (`Niri::bookmark_binds`). This
+    // is the origin split that lets the dispatch arm distinguish a
+    // keybind-driven jump (arms the return-to-previous bounce) from an
+    // IPC-driven `JumpToBookmark` (never arms), mirroring the
+    // `RemoveBookmark`/`RemoveBookmarkById` origin split above.
+    #[knuffel(skip)]
+    JumpToBookmarkViaKey(u64),
 }
 
 impl From<jiji_ipc::Action> for Action {
@@ -843,6 +863,8 @@ impl From<jiji_ipc::Action> for Action {
             jiji_ipc::Action::WalkBookmarksBackward {} => Self::WalkBookmarksBackward,
             jiji_ipc::Action::JumpToBookmark { id } => Self::JumpToBookmark(id),
             jiji_ipc::Action::MoveBookmark { id, pos } => Self::MoveBookmark { id, pos },
+            jiji_ipc::Action::AssignBookmarkKey { id, key } => Self::AssignBookmarkKey { id, key },
+            jiji_ipc::Action::UnassignBookmarkKey { id } => Self::UnassignBookmarkKey(id),
             // jiji_ipc::Action is #[non_exhaustive]: any new variant added to
             // jiji_ipc without a matching arm here is a coding error that
             // surfaces as a panic when the unmapped action is dispatched.

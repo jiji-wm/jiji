@@ -268,8 +268,9 @@ pub struct Bookmark {
     pub activity_name: Option<String>,
     /// Reserved user-facing name. Always `None` in this version.
     pub name: Option<String>,
-    /// Reserved dynamic-key label. Always `None` in this version; the wire field
-    /// is reserved now so downstream picker schemas never migrate.
+    /// The bookmark's dynamic keybind, formatted in the same syntax accepted by
+    /// [`Action::AssignBookmarkKey`] (e.g. `"Mod+M"`). `None` when no key is
+    /// assigned.
     pub key: Option<String>,
 }
 
@@ -1432,6 +1433,40 @@ pub enum Action {
         /// Target 0-based position, clamped to the last index.
         #[cfg_attr(feature = "clap", arg(long))]
         pos: usize,
+    },
+    /// Assign a dynamic keybind to a bookmark, so a single keypress jumps
+    /// straight to it without going through the walk list.
+    ///
+    /// `key` uses the same syntax as a KDL bind (e.g. `"Mod+M"`, `"Ctrl+Alt+1"`):
+    /// modifier names joined with `+`, the trigger last. The trigger must be a
+    /// keyboard key (not a mouse button, wheel, or touchpad gesture) and at
+    /// least one modifier is required — a bare keysym would eat plain typing.
+    ///
+    /// Returns `Err("invalid bookmark key: <key>: <reason>")` (terminal) when
+    /// `key` fails to parse or violates either restriction. Returns
+    /// `Err("bookmark key already bound: <key>")` (terminal) when `key`
+    /// already matches a static config bind, a recent-windows bind, or
+    /// another bookmark's key — the config-bind check happens at input
+    /// dispatch, the sibling-bookmark check at both input dispatch and
+    /// (independently, for a mod-key flip) every config reload. Returns
+    /// `Err("bookmark not found: id=<id>")` (terminal) when the id is
+    /// unknown. Re-assigning a bookmark's own current key is a no-op success.
+    AssignBookmarkKey {
+        /// Id of the bookmark to assign the key to.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+        /// The key to assign, in KDL bind syntax (e.g. `"Mod+M"`).
+        #[cfg_attr(feature = "clap", arg(long))]
+        key: String,
+    },
+    /// Clear a bookmark's dynamic keybind.
+    ///
+    /// Returns `Err("bookmark not found: id=<id>")` (terminal) when the id is
+    /// unknown. A bookmark with no assigned key is a silent no-op.
+    UnassignBookmarkKey {
+        /// Id of the bookmark to clear the key from.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
     },
 }
 

@@ -15,7 +15,7 @@ use directories::BaseDirs;
 use futures_util::io::{AsyncReadExt, BufReader};
 use futures_util::{select_biased, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, FutureExt as _};
 use indexmap::IndexMap;
-use jiji_config::OutputName;
+use jiji_config::{key_to_wire_string, OutputName};
 use jiji_ipc::state::{EventStreamState, EventStreamStatePart as _};
 use jiji_ipc::{
     Action, Event, KeyboardLayouts, OutputConfigChanged, Overview, Reply, Request, Response,
@@ -1103,7 +1103,7 @@ pub(crate) fn build_bookmarks_ipc<W: LayoutElement>(
                 activity_id: activity_id.get(),
                 activity_name,
                 name: None,
-                key: None,
+                key: bookmark.key().map(|k| key_to_wire_string(k.key())),
             }
         })
         .collect()
