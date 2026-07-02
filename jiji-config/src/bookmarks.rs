@@ -25,6 +25,12 @@ pub struct BookmarksConfig {
     /// single source of truth for the default command keys; the overlay reads
     /// it rather than carrying its own copy.
     pub mode_keys: ModeKeysConfig,
+    /// Whether a successful in-leader-mode command (add, remove, walk) closes
+    /// and immediately reopens the overlay (a fresh instance, not a kept-open
+    /// one) instead of dismissing outright. Named `mode-sticky` rather than
+    /// `sticky` to avoid colliding with this crate's unrelated
+    /// sticky-workspaces terminology.
+    pub mode_sticky: bool,
 }
 
 impl Default for BookmarksConfig {
@@ -36,6 +42,7 @@ impl Default for BookmarksConfig {
             return_to_previous: true,
             hint_alphabet: HintAlphabet::default(),
             mode_keys: ModeKeysConfig::default(),
+            mode_sticky: false,
         }
     }
 }
@@ -57,6 +64,8 @@ pub struct BookmarksPart {
     pub hint_alphabet: Option<HintAlphabet>,
     #[knuffel(child)]
     pub mode_keys: Option<ModeKeysConfig>,
+    #[knuffel(child, unwrap(argument))]
+    pub mode_sticky: Option<bool>,
 }
 
 impl MergeWith<BookmarksPart> for BookmarksConfig {
@@ -67,7 +76,8 @@ impl MergeWith<BookmarksPart> for BookmarksConfig {
             order,
             walk_wrap,
             hint_alphabet,
-            mode_keys
+            mode_keys,
+            mode_sticky
         );
         if let Some(x) = &part.r#return {
             self.return_to_previous.clone_from(x);

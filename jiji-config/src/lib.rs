@@ -2503,6 +2503,7 @@ mod tests {
                     ],
                     search: '/',
                 },
+                mode_sticky: false,
             },
         }
         "#);
@@ -2530,6 +2531,21 @@ mod tests {
                 ..BookmarksConfig::default()
             }
         );
+    }
+
+    #[test]
+    fn bookmarks_mode_sticky_parses_and_defaults_false() {
+        let parsed = do_parse(
+            r##"
+            bookmarks {
+                mode-sticky true
+            }
+            "##,
+        );
+        assert!(parsed.bookmarks.mode_sticky);
+
+        let parsed = do_parse("");
+        assert!(!parsed.bookmarks.mode_sticky);
     }
 
     #[test]

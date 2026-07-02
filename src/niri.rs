@@ -6146,6 +6146,19 @@ impl Niri {
         }
     }
 
+    /// Whether another modal overlay currently owns keyboard focus, so
+    /// opening (or reopening) the bookmark switcher must be refused: the
+    /// confirm dialog, the lock screen, the screenshot UI, or the MRU
+    /// switcher. Shared by `OpenBookmarkSwitcher`, `EnterBookmarkMode`, and
+    /// the sticky-mode reopen continuation in `src/input/mod.rs` so the four
+    /// checks cannot drift apart.
+    pub fn modal_overlay_blocks_bookmark_overlay(&self) -> bool {
+        self.confirm_dialog.is_open()
+            || self.is_locked()
+            || self.screenshot_ui.is_open()
+            || self.window_mru_ui.is_open()
+    }
+
     pub fn lock(&mut self, confirmation: SessionLocker) {
         // Check if another client is in the process of locking.
         if matches!(

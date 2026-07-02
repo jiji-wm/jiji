@@ -1517,7 +1517,10 @@ pub enum Action {
     /// zero hints. It is still a no-op when another modal overlay already
     /// holds keyboard focus. Like `OpenBookmarkSwitcher`, this is a
     /// single-shot open: one dispatch fully opens the mode, which then
-    /// dismisses itself on any non-hint, non-command key.
+    /// dismisses itself on any non-hint, non-command key. With
+    /// `bookmarks.mode-sticky` enabled, a successful command letter reopens
+    /// the mode instead of dismissing it, so repeated adds/removes/walks stay
+    /// in mode; hint jumps, search, and Esc still exit as usual.
     EnterBookmarkMode {},
 }
 

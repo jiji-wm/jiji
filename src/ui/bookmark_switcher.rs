@@ -41,6 +41,19 @@
 //! press dismisses it (handled by the caller) and it never gates pointer
 //! hit-testing.
 //!
+//! By default, a leader-mode command letter (add, remove, walk) dismisses the
+//! overlay after dispatching, the same as any other terminal outcome. Setting
+//! `bookmarks.mode-sticky` changes only that one continuation: after a
+//! successful command dispatches, the overlay is dismissed and immediately
+//! reopened (a fresh instance — new hints, new search snapshot — not a
+//! kept-open one), so repeated adds/removes/walks stay in mode without a
+//! re-press of the leader key. Nothing else is affected by the toggle: a hint
+//! letter jump always exits mode even when sticky, the confirm-gated removal
+//! path opens the dialog without reopening mode (before or after
+//! confirm/cancel), search is unaffected (`Enter`-jump and `Esc` behave as
+//! below regardless of sticky), and Esc / an unmatched key / a chorded press /
+//! a pointer press still dismiss outright.
+//!
 //! Leader mode layers one more state on top: pressing the configured search
 //! key (default `/`) switches from
 //! [`State::Mode`] into [`State::Search`], an incremental, case-insensitive
@@ -139,6 +152,12 @@ struct ModeKeymap {
     /// leader-mode hint alphabet, disjoint from the command keys by
     /// construction.
     mode_alphabet: String,
+    /// Not a key — `bookmarks.mode-sticky`, carried here because
+    /// [`ModeKeymap`] is the per-open config-resolution artifact
+    /// [`State::Mode`] already carries by value, so a successful command's
+    /// dismiss-then-reopen continuation reads a table consistent with the
+    /// rest of this instance's routing.
+    sticky: bool,
 }
 
 impl ModeKeymap {
@@ -173,6 +192,7 @@ impl ModeKeymap {
             search,
             full_alphabet,
             mode_alphabet,
+            sticky: cfg.mode_sticky,
         }
     }
 
@@ -688,7 +708,15 @@ impl BookmarkSwitcher {
         match core {
             CoreOutcome::HoldOpen => PressOutcome::HoldOpen,
             CoreOutcome::Jump(id) => PressOutcome::Jump(id),
-            CoreOutcome::Command(cmd) => PressOutcome::Command(cmd),
+            CoreOutcome::Command(cmd) => {
+                let State::Mode { keymap, .. } = &self.state else {
+                    unreachable!("CoreOutcome::Command is only routed from State::Mode")
+                };
+                PressOutcome::Command {
+                    cmd,
+                    sticky: keymap.sticky,
+                }
+            }
             CoreOutcome::Dismiss => PressOutcome::Dismiss,
             CoreOutcome::EnterSearch => self.enter_search(),
             CoreOutcome::Push(ch) => self.push_query_char(ch),
@@ -1122,8 +1150,12 @@ pub enum PressOutcome {
     /// An un-chorded hint letter matched (or, while searching, `Enter` with a
     /// live top match): jump to this bookmark id.
     Jump(u64),
-    /// (`Mode` only) an un-chorded command letter matched.
-    Command(ModeCommand),
+    /// (`Mode` only) an un-chorded command letter matched. `sticky` is
+    /// resolved from the open instance's [`ModeKeymap`]
+    /// (`bookmarks.mode-sticky`): the caller dispatches the command as usual,
+    /// then, if `sticky`, dismisses and immediately reopens the overlay
+    /// (a fresh instance, not a kept-open one) instead of dismissing outright.
+    Command { cmd: ModeCommand, sticky: bool },
     /// Anything else that ends the overlay: Esc always dismisses. In the
     /// hint/leader (`Mode`) states, an unmatched key, `raw == None`, or a
     /// chorded press also dismisses. `Search` narrows this: an unmatched
@@ -1660,6 +1692,51 @@ mod tests {
     }
 
     #[test]
+    fn press_outcome_carries_sticky_from_keymap() {
+        // The outer `press_outcome` wrapper (not just the pure
+        // `press_outcome_core`) must read `sticky` off the live
+        // `State::Mode` keymap when it builds `PressOutcome::Command`;
+        // exercised through the real entry point rather than
+        // `press_outcome_core` directly.
+        let sticky_cfg = jiji_config::BookmarksConfig {
+            mode_sticky: true,
+            ..Default::default()
+        };
+        let sticky_keymap = ModeKeymap::from_config(&sticky_cfg);
+        let sheet = render_markup(&mode_sheet_markup(&sticky_keymap), 1.)
+            .expect("sheet markup must rasterise");
+        let mut switcher = BookmarkSwitcher::new();
+        switcher.state = State::Mode {
+            hints: Vec::new(),
+            entries: Vec::new(),
+            sheet,
+            keymap: sticky_keymap,
+        };
+
+        let outcome = switcher.press_outcome(Some(Keysym::from_char('a')), false);
+        assert!(matches!(
+            outcome,
+            PressOutcome::Command { sticky: true, .. }
+        ));
+
+        let default_keymap = default_keymap();
+        let sheet = render_markup(&mode_sheet_markup(&default_keymap), 1.)
+            .expect("sheet markup must rasterise");
+        switcher.state = State::Mode {
+            hints: Vec::new(),
+            entries: Vec::new(),
+            sheet,
+            keymap: default_keymap,
+        };
+
+        let outcome = switcher.press_outcome(Some(Keysym::from_char('a')), false);
+        assert!(matches!(
+            outcome,
+            PressOutcome::Command { sticky: false, .. }
+        ));
+    }
+
+    #[test]
     fn modifier_keysyms_are_classified() {
         for raw in [
             Keysym::Shift_L,
@@ -1720,6 +1797,20 @@ mod tests {
         assert_eq!(keymap.search.0, '/');
         assert_eq!(keymap.full_alphabet, "asdfghjklqwertyuiopzxcvbnm");
         assert_eq!(keymap.full_alphabet.len(), 26);
+        assert!(!keymap.sticky);
+    }
+
+    #[test]
+    fn keymap_resolves_sticky_from_config() {
+        let keymap = ModeKeymap::from_config(&jiji_config::BookmarksConfig::default());
+        assert!(!keymap.sticky);
+
+        let cfg = jiji_config::BookmarksConfig {
+            mode_sticky: true,
+            ..Default::default()
+        };
+        let keymap = ModeKeymap::from_config(&cfg);
+        assert!(keymap.sticky);
     }
 
     #[test]

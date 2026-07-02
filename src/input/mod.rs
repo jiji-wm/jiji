@@ -610,7 +610,7 @@ impl State {
                             this.niri.bookmark_switcher.close();
                             this.niri.queue_redraw_all();
                         }
-                        PressOutcome::Command(cmd) => {
+                        PressOutcome::Command { cmd, sticky } => {
                             // Close (and redraw) before dispatching: `Add`
                             // (on a repress under the `remove` policy) and
                             // `RemoveFocused` both show the confirm dialog,
@@ -623,7 +623,13 @@ impl State {
                             // ordering isn't regression-pinned by a test —
                             // reordering it would silently reintroduce a
                             // switcher-eats-dialog-keys bug that manual
-                            // testing might not catch immediately.
+                            // testing might not catch immediately. When
+                            // `sticky` (`bookmarks.mode-sticky`), the same
+                            // discipline extends to the reopen below: it must
+                            // happen strictly after `do_action` and only if
+                            // no modal overlay (e.g. the confirm dialog this
+                            // very command may have just opened) claimed
+                            // keyboard focus in the meantime.
                             this.niri.bookmark_switcher.close();
                             this.niri.queue_redraw_all();
                             let action = match cmd {
@@ -636,6 +642,38 @@ impl State {
                                 "bookmark mode: command {cmd:?} matched, dispatching {action:?}"
                             );
                             this.do_action(action, false);
+                            if sticky {
+                                if this.niri.modal_overlay_blocks_bookmark_overlay() {
+                                    debug!(
+                                        "bookmark mode: sticky reopen skipped, a modal overlay \
+                                         is open"
+                                    );
+                                } else {
+                                    // Scope the config borrow to the open
+                                    // call: the `RefCell` guard must be
+                                    // dropped before `queue_redraw_all()`
+                                    // below borrows `self.niri` again. This
+                                    // resolves the *current* config, i.e. a
+                                    // mid-open reload that flips
+                                    // `mode-sticky` applies starting with
+                                    // this reopened instance, not the one
+                                    // that just dispatched.
+                                    let opened = {
+                                        let config = this.niri.config.borrow();
+                                        this.niri
+                                            .bookmark_switcher
+                                            .open_mode(&this.niri.layout, &config.bookmarks)
+                                    };
+                                    if opened {
+                                        this.niri.queue_redraw_all();
+                                    }
+                                    // A `false` return needs no extra
+                                    // logging: `open_mode` only refuses when
+                                    // the command sheet itself fails to
+                                    // rasterise, and it already warns
+                                    // internally on that path.
+                                }
+                            }
                         }
                         PressOutcome::Dismiss => {
                             this.niri.bookmark_switcher.close();
@@ -1895,11 +1933,7 @@ impl State {
                 // Only one modal overlay owns keyboard focus at a time: refuse
                 // to open behind a confirm dialog, the lock screen, the
                 // screenshot UI, or the MRU switcher.
-                if self.niri.confirm_dialog.is_open()
-                    || self.niri.is_locked()
-                    || self.niri.screenshot_ui.is_open()
-                    || self.niri.window_mru_ui.is_open()
-                {
+                if self.niri.modal_overlay_blocks_bookmark_overlay() {
                     debug!("open-bookmark-switcher: another overlay is open, ignoring");
                 } else {
                     // Scope the config borrow to the open call: the `RefCell`
@@ -1924,11 +1958,7 @@ impl State {
             Action::EnterBookmarkMode => {
                 // Same modal-overlay refusal gate as `OpenBookmarkSwitcher`:
                 // only one modal overlay owns keyboard focus at a time.
-                if self.niri.confirm_dialog.is_open()
-                    || self.niri.is_locked()
-                    || self.niri.screenshot_ui.is_open()
-                    || self.niri.window_mru_ui.is_open()
-                {
+                if self.niri.modal_overlay_blocks_bookmark_overlay() {
                     debug!("enter-bookmark-mode: another overlay is open, ignoring");
                 } else {
                     // Scope the config borrow to the open call: the `RefCell`
