@@ -473,6 +473,7 @@ pub enum Action {
     // `RemoveBookmark`/`RemoveBookmarkById` origin split above.
     #[knuffel(skip)]
     JumpToBookmarkViaKey(u64),
+    OpenBookmarkSwitcher,
 }
 
 impl From<jiji_ipc::Action> for Action {
@@ -865,6 +866,7 @@ impl From<jiji_ipc::Action> for Action {
             jiji_ipc::Action::MoveBookmark { id, pos } => Self::MoveBookmark { id, pos },
             jiji_ipc::Action::AssignBookmarkKey { id, key } => Self::AssignBookmarkKey { id, key },
             jiji_ipc::Action::UnassignBookmarkKey { id } => Self::UnassignBookmarkKey(id),
+            jiji_ipc::Action::OpenBookmarkSwitcher {} => Self::OpenBookmarkSwitcher,
             // jiji_ipc::Action is #[non_exhaustive]: any new variant added to
             // jiji_ipc without a matching arm here is a coding error that
             // surfaces as a panic when the unmapped action is dispatched.
@@ -1497,6 +1499,12 @@ mod tests {
     fn walk_bookmarks_backward_parses() {
         let action = parse_action("walk-bookmarks-backward");
         assert_eq!(action, Action::WalkBookmarksBackward);
+    }
+
+    #[test]
+    fn open_bookmark_switcher_parses() {
+        let action = parse_action("open-bookmark-switcher");
+        assert_eq!(action, Action::OpenBookmarkSwitcher);
     }
 
     #[test]

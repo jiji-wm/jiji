@@ -1468,6 +1468,21 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(long))]
         id: u64,
     },
+    /// Open the bookmark switcher overlay, tagging every visible bookmarked
+    /// window with a letter hint; pressing a hint jumps straight to that
+    /// bookmark.
+    ///
+    /// A no-op when no bookmarked window is currently visible (nothing to
+    /// tag), and likewise when another modal overlay already holds keyboard
+    /// focus. The overlay itself holds no bookmark state: a hint is a
+    /// stateless shortcut for the `JumpToBookmark` jump by bookmark id.
+    /// Modality only suppresses input, not client activity: if the hinted
+    /// window closes while the overlay is still open, its bookmark is
+    /// pruned before the removal completes, so the hint's id goes stale and
+    /// the jump errors with an unknown-id `BookmarkNotFound` — discarded by
+    /// the caller, so pressing a stale hint is a user-visible no-op that
+    /// still dismisses the overlay.
+    OpenBookmarkSwitcher {},
 }
 
 // Used by #[serde(default)] on SwitchActivityPrevious.

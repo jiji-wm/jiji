@@ -1,3 +1,4 @@
+pub mod bookmark_switcher;
 pub mod config_error_notification;
 pub mod confirm_dialog;
 pub mod hotkey_overlay;

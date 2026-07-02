@@ -158,6 +158,9 @@ impl State {
         let hide_confirm_dialog =
             self.niri.confirm_dialog.is_open() && should_hide_confirm_dialog(&event);
 
+        let hide_bookmark_switcher =
+            self.niri.bookmark_switcher.is_open() && should_hide_bookmark_switcher(&event);
+
         let mut consumed_by_a11y = false;
         use InputEvent::*;
         match event {
@@ -214,6 +217,11 @@ impl State {
         }
 
         if hide_confirm_dialog && self.niri.confirm_dialog.hide() {
+            self.niri.queue_redraw_all();
+        }
+
+        if hide_bookmark_switcher {
+            self.niri.bookmark_switcher.close();
             self.niri.queue_redraw_all();
         }
     }
@@ -552,6 +560,52 @@ impl State {
                     }
 
                     // Don't send this press to any clients.
+                    this.niri.suppressed_keys.insert(key_code);
+                    return FilterResult::Intercept(None);
+                }
+
+                // While the bookmark switcher is open it owns every key press:
+                // a hint letter jumps, everything else dismisses. Releases fall
+                // through to the suppressed-keys logic below so they are
+                // swallowed too. The confirm dialog above wins if both somehow
+                // race.
+                if this.niri.bookmark_switcher.is_open() && pressed {
+                    // A pure modifier keeps the overlay open (you might be
+                    // reaching for a chord, or just resting a finger). This
+                    // list is a superset of the accessibility
+                    // modifier-forwarding list above, additionally holding
+                    // for lock and level-shift keys.
+                    if raw.is_some_and(crate::ui::bookmark_switcher::is_modifier_keysym) {
+                        this.niri.suppressed_keys.insert(key_code);
+                        return FilterResult::Intercept(None);
+                    }
+
+                    // `raw` reports the base (layout-unshifted) keysym, so a
+                    // shifted hint letter still matches its base sym. Only treat
+                    // a press as a hint when no modifiers are held; a shifted or
+                    // otherwise chorded letter is a dismiss, not a jump.
+                    let hint = if modifiers.is_empty() {
+                        raw.and_then(|raw| this.niri.bookmark_switcher.hint_for_keysym(raw))
+                    } else {
+                        None
+                    };
+                    if let Some(id) = hint {
+                        // Reuse the full jump arm (post-jump bookkeeping and
+                        // all). Modality only suppresses input, not client
+                        // activity: if the hinted window has closed since the
+                        // overlay opened, `Layout::remove_window` already
+                        // pruned its bookmark, so this id is stale and the
+                        // jump yields `Err(BookmarkNotFound)`, discarded here
+                        // (matching the MRU dispatch precedent) — a
+                        // user-visible no-op, though the overlay still
+                        // dismisses below. `hint_for_keysym` breadcrumbs which
+                        // hint fired so that no-op is diagnosable.
+                        this.do_action(Action::JumpToBookmark(id), false);
+                    }
+                    // Esc, an unmatched key, `raw == None`, and shifted/chorded
+                    // letters all land here: dismiss without jumping.
+                    this.niri.bookmark_switcher.close();
+                    this.niri.queue_redraw_all();
                     this.niri.suppressed_keys.insert(key_code);
                     return FilterResult::Intercept(None);
                 }
@@ -1773,6 +1827,25 @@ impl State {
                         self.post_jump_bookkeeping(prev_output, switched_activity);
                     }
                 }
+            }
+            Action::OpenBookmarkSwitcher => {
+                // Only one modal overlay owns keyboard focus at a time: refuse
+                // to open behind a confirm dialog, the lock screen, the
+                // screenshot UI, or the MRU switcher.
+                if self.niri.confirm_dialog.is_open()
+                    || self.niri.is_locked()
+                    || self.niri.screenshot_ui.is_open()
+                    || self.niri.window_mru_ui.is_open()
+                {
+                    debug!("open-bookmark-switcher: another overlay is open, ignoring");
+                } else if self.niri.bookmark_switcher.open(&self.niri.layout) {
+                    // The overlay does not self-redraw; opening (or the
+                    // idempotent re-open refresh) needs an explicit redraw.
+                    self.niri.queue_redraw_all();
+                }
+                // A `false` return means nothing was visible to tag (or every
+                // hint failed to rasterise); `open` logged the reason and left
+                // the overlay closed.
             }
             Action::MoveWindowToWorkspace(reference, focus) => {
                 // Move-to-self short-circuit. Resolve source (the active
@@ -6059,6 +6132,26 @@ fn should_hide_hotkey_overlay<I: InputBackend>(event: &InputEvent<I>) -> bool {
 fn should_hide_confirm_dialog<I: InputBackend>(event: &InputEvent<I>) -> bool {
     match event {
         InputEvent::Keyboard { event } if event.state() == KeyState::Pressed => true,
+        InputEvent::PointerButton { event } if event.state() == ButtonState::Pressed => true,
+        InputEvent::PointerAxis { .. }
+        | InputEvent::GestureSwipeBegin { .. }
+        | InputEvent::GesturePinchBegin { .. }
+        | InputEvent::TouchDown { .. }
+        | InputEvent::TouchMotion { .. }
+        | InputEvent::TabletToolTip { .. }
+        | InputEvent::TabletToolButton { .. } => true,
+        _ => false,
+    }
+}
+
+/// Pointer/touch/tablet events that dismiss the bookmark switcher.
+///
+/// Mirrors [`should_hide_confirm_dialog`] but omits the keyboard arm: while the
+/// switcher is open, key presses are handled (and swallowed) inside the
+/// `on_keyboard` filter closure, so routing them through here too would be
+/// redundant.
+fn should_hide_bookmark_switcher<I: InputBackend>(event: &InputEvent<I>) -> bool {
+    match event {
         InputEvent::PointerButton { event } if event.state() == ButtonState::Pressed => true,
         InputEvent::PointerAxis { .. }
         | InputEvent::GestureSwipeBegin { .. }

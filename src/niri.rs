@@ -166,6 +166,7 @@ use crate::render_helpers::{
 };
 #[cfg(feature = "xdp-gnome-screencast")]
 use crate::screencasting::Screencasting;
+use crate::ui::bookmark_switcher::{BookmarkSwitcher, BookmarkSwitcherRenderElement};
 use crate::ui::config_error_notification::ConfigErrorNotification;
 use crate::ui::confirm_dialog::{ConfirmDialog, ConfirmDialogRenderElement};
 use crate::ui::hotkey_overlay::HotkeyOverlay;
@@ -425,6 +426,7 @@ pub struct Niri {
     pub config_error_notification: ConfigErrorNotification,
     pub hotkey_overlay: HotkeyOverlay,
     pub confirm_dialog: ConfirmDialog,
+    pub bookmark_switcher: BookmarkSwitcher,
 
     pub window_mru_ui: WindowMruUi,
     pub pending_mru_commit: Option<PendingMruCommit>,
@@ -565,6 +567,7 @@ pub enum KeyboardFocus {
     ConfirmDialog,
     Overview,
     Mru,
+    BookmarkSwitcher,
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -714,6 +717,7 @@ impl KeyboardFocus {
             KeyboardFocus::ConfirmDialog => None,
             KeyboardFocus::Overview => None,
             KeyboardFocus::Mru => None,
+            KeyboardFocus::BookmarkSwitcher => None,
         }
     }
 
@@ -726,6 +730,7 @@ impl KeyboardFocus {
             KeyboardFocus::ConfirmDialog => None,
             KeyboardFocus::Overview => None,
             KeyboardFocus::Mru => None,
+            KeyboardFocus::BookmarkSwitcher => None,
         }
     }
 
@@ -1261,6 +1266,8 @@ impl State {
             KeyboardFocus::ScreenshotUi
         } else if self.niri.window_mru_ui.is_open() {
             KeyboardFocus::Mru
+        } else if self.niri.bookmark_switcher.is_open() {
+            KeyboardFocus::BookmarkSwitcher
         } else if let Some(output) = self.niri.layout.active_output() {
             let mon = self.niri.layout.monitor_for_output(output).unwrap();
             let ctx_ = self.niri.layout.ctx_for(mon);
@@ -2601,6 +2608,7 @@ impl Niri {
         }
 
         let confirm_dialog = ConfirmDialog::new(animation_clock.clone(), config.clone());
+        let bookmark_switcher = BookmarkSwitcher::new();
 
         #[cfg(feature = "dbus")]
         let a11y = A11y::new(event_loop.clone());
@@ -2784,6 +2792,7 @@ impl Niri {
             config_error_notification,
             hotkey_overlay,
             confirm_dialog,
+            bookmark_switcher,
 
             window_mru_ui,
             pending_mru_commit: None,
@@ -4230,6 +4239,7 @@ impl Niri {
             KeyboardFocus::ConfirmDialog => true,
             KeyboardFocus::Overview => true,
             KeyboardFocus::Mru => true,
+            KeyboardFocus::BookmarkSwitcher => true,
         };
 
         self.layout.refresh(layout_is_active);
@@ -4531,6 +4541,13 @@ impl Niri {
         // Then, the Alt-Tab switcher.
         self.window_mru_ui
             .render_output(self, output, ctx.r(), &mut |elem| push(elem.into()));
+
+        // Then, the bookmark switcher hints, above the windows but below the
+        // confirm dialog and hotkey overlay.
+        self.bookmark_switcher
+            .render_output(&self.layout, output, ctx.renderer, &mut |elem| {
+                push(elem.into())
+            });
 
         // Don't draw the focus ring on the workspaces while interactively moving above those
         // workspaces, since the interactively-moved window already has a focus ring.
@@ -6929,6 +6946,7 @@ niri_render_elements! {
         SolidColor = SolidColorRenderElement,
         ScreenshotUi = ScreenshotUiRenderElement,
         WindowMruUi = WindowMruUiRenderElement<R>,
+        BookmarkSwitcher = BookmarkSwitcherRenderElement,
         ConfirmDialog = ConfirmDialogRenderElement,
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.
