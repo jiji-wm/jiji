@@ -53,6 +53,7 @@ use crate::layout::{
     ActivateWindow, DoActionError, DoActionOutcome, LayoutElement, MoveWindowToPoolOutcome,
 };
 use crate::niri::{CastTarget, PointerVisibility, State};
+use crate::ui::confirm_dialog::ConfirmRequest;
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::{spawn, spawn_sh};
@@ -154,8 +155,8 @@ impl State {
         let hide_hotkey_overlay =
             self.niri.hotkey_overlay.is_open() && should_hide_hotkey_overlay(&event);
 
-        let hide_exit_confirm_dialog =
-            self.niri.exit_confirm_dialog.is_open() && should_hide_exit_confirm_dialog(&event);
+        let hide_confirm_dialog =
+            self.niri.confirm_dialog.is_open() && should_hide_confirm_dialog(&event);
 
         let mut consumed_by_a11y = false;
         use InputEvent::*;
@@ -212,7 +213,7 @@ impl State {
             self.niri.queue_redraw_all();
         }
 
-        if hide_exit_confirm_dialog && self.niri.exit_confirm_dialog.hide() {
+        if hide_confirm_dialog && self.niri.confirm_dialog.hide() {
             self.niri.queue_redraw_all();
         }
     }
@@ -520,10 +521,28 @@ impl State {
                     }
                 }
 
-                if this.niri.exit_confirm_dialog.is_open() && pressed {
+                if this.niri.confirm_dialog.is_open() && pressed {
                     if raw == Some(Keysym::Return) {
-                        info!("quitting after confirming exit dialog");
-                        this.niri.stop_signal.stop();
+                        match this.niri.confirm_dialog.confirm() {
+                            Some(ConfirmRequest::Exit) => {
+                                info!("quitting after confirming exit dialog");
+                                this.niri.stop_signal.stop();
+                            }
+                            Some(ConfirmRequest::RemoveBookmark { id }) => {
+                                // The bookmark may have been pruned (window
+                                // closed) while the dialog was open; that
+                                // degrades the confirm to a cancel rather
+                                // than an error.
+                                if let Err(err) = this.niri.layout.remove_bookmark(Some(id)) {
+                                    debug!(
+                                        "remove_bookmark on confirm: {err:?}, treating as cancel"
+                                    );
+                                }
+                            }
+                            None => unreachable!(
+                                "the dialog is open, so show() must have set a pending request"
+                            ),
+                        }
                     }
 
                     // Don't send this press to any clients.
@@ -736,7 +755,7 @@ impl State {
 
         match action {
             Action::Quit(skip_confirmation) => {
-                if !skip_confirmation && self.niri.exit_confirm_dialog.show() {
+                if !skip_confirmation && self.niri.confirm_dialog.show(ConfirmRequest::Exit) {
                     self.niri.queue_redraw_all();
                     return Ok(DoActionOutcome::Handled);
                 }
@@ -5824,7 +5843,7 @@ fn should_hide_hotkey_overlay<I: InputBackend>(event: &InputEvent<I>) -> bool {
     }
 }
 
-fn should_hide_exit_confirm_dialog<I: InputBackend>(event: &InputEvent<I>) -> bool {
+fn should_hide_confirm_dialog<I: InputBackend>(event: &InputEvent<I>) -> bool {
     match event {
         InputEvent::Keyboard { event } if event.state() == KeyState::Pressed => true,
         InputEvent::PointerButton { event } if event.state() == ButtonState::Pressed => true,

@@ -167,7 +167,7 @@ use crate::render_helpers::{
 #[cfg(feature = "xdp-gnome-screencast")]
 use crate::screencasting::Screencasting;
 use crate::ui::config_error_notification::ConfigErrorNotification;
-use crate::ui::exit_confirm_dialog::{ExitConfirmDialog, ExitConfirmDialogRenderElement};
+use crate::ui::confirm_dialog::{ConfirmDialog, ConfirmDialogRenderElement};
 use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::mru::{MruCloseRequest, WindowMruUi, WindowMruUiRenderElement};
 use crate::ui::screen_transition::{self, ScreenTransition};
@@ -424,7 +424,7 @@ pub struct Niri {
     pub screenshot_ui: ScreenshotUi,
     pub config_error_notification: ConfigErrorNotification,
     pub hotkey_overlay: HotkeyOverlay,
-    pub exit_confirm_dialog: ExitConfirmDialog,
+    pub confirm_dialog: ConfirmDialog,
 
     pub window_mru_ui: WindowMruUi,
     pub pending_mru_commit: Option<PendingMruCommit>,
@@ -554,7 +554,7 @@ pub enum KeyboardFocus {
     LayerShell { surface: WlSurface },
     LockScreen { surface: Option<WlSurface> },
     ScreenshotUi,
-    ExitConfirmDialog,
+    ConfirmDialog,
     Overview,
     Mru,
 }
@@ -703,7 +703,7 @@ impl KeyboardFocus {
             KeyboardFocus::LayerShell { surface } => Some(surface),
             KeyboardFocus::LockScreen { surface } => surface.as_ref(),
             KeyboardFocus::ScreenshotUi => None,
-            KeyboardFocus::ExitConfirmDialog => None,
+            KeyboardFocus::ConfirmDialog => None,
             KeyboardFocus::Overview => None,
             KeyboardFocus::Mru => None,
         }
@@ -715,7 +715,7 @@ impl KeyboardFocus {
             KeyboardFocus::LayerShell { surface } => Some(surface),
             KeyboardFocus::LockScreen { surface } => surface,
             KeyboardFocus::ScreenshotUi => None,
-            KeyboardFocus::ExitConfirmDialog => None,
+            KeyboardFocus::ConfirmDialog => None,
             KeyboardFocus::Overview => None,
             KeyboardFocus::Mru => None,
         }
@@ -1094,7 +1094,7 @@ impl State {
         let pointer = &self.niri.seat.get_pointer().unwrap();
         let location = pointer.current_location();
 
-        if !self.niri.exit_confirm_dialog.is_open()
+        if !self.niri.confirm_dialog.is_open()
             && !self.niri.is_locked()
             && !self.niri.screenshot_ui.is_open()
         {
@@ -1205,8 +1205,8 @@ impl State {
         }
 
         // Compute the current focus.
-        let focus = if self.niri.exit_confirm_dialog.is_open() {
-            KeyboardFocus::ExitConfirmDialog
+        let focus = if self.niri.confirm_dialog.is_open() {
+            KeyboardFocus::ConfirmDialog
         } else if self.niri.is_locked() {
             KeyboardFocus::LockScreen {
                 surface: self.niri.lock_surface_focus(),
@@ -2538,7 +2538,7 @@ impl Niri {
             hotkey_overlay.show();
         }
 
-        let exit_confirm_dialog = ExitConfirmDialog::new(animation_clock.clone(), config.clone());
+        let confirm_dialog = ConfirmDialog::new(animation_clock.clone(), config.clone());
 
         #[cfg(feature = "dbus")]
         let a11y = A11y::new(event_loop.clone());
@@ -2721,7 +2721,7 @@ impl Niri {
             screenshot_ui,
             config_error_notification,
             hotkey_overlay,
-            exit_confirm_dialog,
+            confirm_dialog,
 
             window_mru_ui,
             pending_mru_commit: None,
@@ -3328,7 +3328,7 @@ impl Niri {
         extended_bounds: bool,
         pos: Point<f64, Logical>,
     ) -> Option<(Output, &Workspace<Mapped>)> {
-        if self.exit_confirm_dialog.is_open() || self.is_locked() || self.screenshot_ui.is_open() {
+        if self.confirm_dialog.is_open() || self.is_locked() || self.screenshot_ui.is_open() {
             return None;
         }
 
@@ -3361,7 +3361,7 @@ impl Niri {
     /// The cursor may be inside the window's activation region, but not within the window's input
     /// region.
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<&Mapped> {
-        if self.exit_confirm_dialog.is_open()
+        if self.confirm_dialog.is_open()
             || self.is_locked()
             || self.screenshot_ui.is_open()
             || self.window_mru_ui.is_open()
@@ -3417,7 +3417,7 @@ impl Niri {
         // The ordering here must be consistent with the ordering in render() so that input is
         // consistent with the visuals.
 
-        if self.exit_confirm_dialog.is_open() {
+        if self.confirm_dialog.is_open() {
             return rv;
         } else if self.is_locked() {
             let Some(state) = self.output_state.get(output) else {
@@ -4162,7 +4162,7 @@ impl Niri {
             // layer-shell, the layout will briefly draw as active, despite never having focus.
             KeyboardFocus::LockScreen { .. } => true,
             KeyboardFocus::ScreenshotUi => true,
-            KeyboardFocus::ExitConfirmDialog => true,
+            KeyboardFocus::ConfirmDialog => true,
             KeyboardFocus::Overview => true,
             KeyboardFocus::Mru => true,
         };
@@ -4234,7 +4234,7 @@ impl Niri {
 
         self.layout.advance_animations();
         self.config_error_notification.advance_animations();
-        self.exit_confirm_dialog.advance_animations();
+        self.confirm_dialog.advance_animations();
         self.screenshot_ui.advance_animations();
         self.window_mru_ui.advance_animations();
 
@@ -4401,8 +4401,8 @@ impl Niri {
             }
         }
 
-        // Next, the exit confirm dialog.
-        self.exit_confirm_dialog
+        // Next, the confirm dialog.
+        self.confirm_dialog
             .render(ctx.renderer, output, &mut |elem| push(elem.into()));
 
         // Next, the config error notification too.
@@ -4835,7 +4835,7 @@ impl Niri {
             state.unfinished_animations_remain = self.layout.are_animations_ongoing(Some(output));
             state.unfinished_animations_remain |=
                 self.config_error_notification.are_animations_ongoing();
-            state.unfinished_animations_remain |= self.exit_confirm_dialog.are_animations_ongoing();
+            state.unfinished_animations_remain |= self.confirm_dialog.are_animations_ongoing();
             state.unfinished_animations_remain |= self.screenshot_ui.are_animations_ongoing();
             state.unfinished_animations_remain |= self.window_mru_ui.are_animations_ongoing();
             state.unfinished_animations_remain |= state.screen_transition.is_some();
@@ -6864,7 +6864,7 @@ niri_render_elements! {
         SolidColor = SolidColorRenderElement,
         ScreenshotUi = ScreenshotUiRenderElement,
         WindowMruUi = WindowMruUiRenderElement<R>,
-        ExitConfirmDialog = ExitConfirmDialogRenderElement,
+        ConfirmDialog = ConfirmDialogRenderElement,
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,

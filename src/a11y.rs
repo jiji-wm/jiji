@@ -17,7 +17,7 @@ use crate::window::mapped::MappedId;
 const ID_ROOT: NodeId = NodeId(0);
 const ID_ANNOUNCEMENT: NodeId = NodeId(1);
 const ID_SCREENSHOT_UI: NodeId = NodeId(2);
-const ID_EXIT_CONFIRM_DIALOG: NodeId = NodeId(3);
+const ID_CONFIRM_DIALOG: NodeId = NodeId(3);
 const ID_OVERVIEW: NodeId = NodeId(4);
 const ID_MRU: NodeId = NodeId(5);
 
@@ -217,6 +217,18 @@ impl Niri {
             }
         }
 
+        // Rebuild the confirm dialog node on every focus-in so its label and
+        // description match the currently pending request — otherwise Orca
+        // would keep announcing whatever kind built the initial tree (e.g.
+        // "Exit jiji" for a bookmark-removal prompt).
+        if focus == ID_CONFIRM_DIALOG && update_focus {
+            let kind = self.confirm_dialog_kind_for_a11y();
+            nodes.push((
+                ID_CONFIRM_DIALOG,
+                crate::ui::confirm_dialog::a11y_node(kind),
+            ));
+        }
+
         let update = TreeUpdate {
             nodes,
             tree: None,
@@ -268,10 +280,19 @@ impl Niri {
         self.a11y_announce(self.hotkey_overlay.a11y_text());
     }
 
+    /// The confirm dialog's kind for a11y purposes, falling back to `Exit`
+    /// while the dialog is fully hidden (e.g. the very first tree build,
+    /// before any dialog has ever been shown).
+    fn confirm_dialog_kind_for_a11y(&self) -> crate::ui::confirm_dialog::ConfirmKind {
+        self.confirm_dialog
+            .kind()
+            .unwrap_or(crate::ui::confirm_dialog::ConfirmKind::Exit)
+    }
+
     fn a11y_focus(&self) -> NodeId {
         match self.keyboard_focus {
             KeyboardFocus::ScreenshotUi => ID_SCREENSHOT_UI,
-            KeyboardFocus::ExitConfirmDialog => ID_EXIT_CONFIRM_DIALOG,
+            KeyboardFocus::ConfirmDialog => ID_CONFIRM_DIALOG,
             KeyboardFocus::Overview => ID_OVERVIEW,
             KeyboardFocus::Mru => ID_MRU,
             _ => ID_ROOT,
@@ -301,7 +322,8 @@ impl Niri {
         let mut screenshot_ui = Node::new(Role::Group);
         screenshot_ui.set_label("Screenshot UI");
 
-        let exit_confirm_dialog = crate::ui::exit_confirm_dialog::a11y_node();
+        let confirm_dialog_kind = self.confirm_dialog_kind_for_a11y();
+        let confirm_dialog = crate::ui::confirm_dialog::a11y_node(confirm_dialog_kind);
 
         let mut overview = Node::new(Role::Group);
         overview.set_label("Overview");
@@ -313,7 +335,7 @@ impl Niri {
         root.set_children(vec![
             ID_ANNOUNCEMENT,
             ID_SCREENSHOT_UI,
-            ID_EXIT_CONFIRM_DIALOG,
+            ID_CONFIRM_DIALOG,
             ID_OVERVIEW,
             ID_MRU,
         ]);
@@ -334,7 +356,7 @@ impl Niri {
                 (ID_ROOT, root),
                 (ID_ANNOUNCEMENT, node),
                 (ID_SCREENSHOT_UI, screenshot_ui),
-                (ID_EXIT_CONFIRM_DIALOG, exit_confirm_dialog),
+                (ID_CONFIRM_DIALOG, confirm_dialog),
                 (ID_OVERVIEW, overview),
                 (ID_MRU, mru),
             ],
