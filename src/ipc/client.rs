@@ -8,9 +8,9 @@ use anyhow::{anyhow, bail, Context};
 use jiji_config::OutputName;
 use jiji_ipc::socket::Socket;
 use jiji_ipc::{
-    Action, Activity, Bookmark, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput,
-    Mode, Output, OutputConfigChanged, Overview, Request, Response, Transform, Window,
-    WindowLayout, Workspace,
+    Action, Activity, Bookmark, BookmarkRuleInfo, Cast, CastKind, CastTarget, Event,
+    KeyboardLayouts, LogicalOutput, Mode, Output, OutputConfigChanged, Overview, Request, Response,
+    Transform, Window, WindowLayout, Workspace,
 };
 use serde_json::json;
 
@@ -996,6 +996,40 @@ fn print_bookmarks(bookmarks: &[Bookmark]) {
 
     println!("Bookmarks:");
     for bm in bookmarks {
+        // Human-only display tags, deliberately unescaped: names may contain
+        // quotes/brackets. Machine consumers read the structured IPC field.
+        let name = bm
+            .name
+            .as_deref()
+            .map(|n| format!(" [name \"{n}\"]"))
+            .unwrap_or_default();
+        let key = bm
+            .key
+            .as_deref()
+            .map(|k| format!(" [key {k}]"))
+            .unwrap_or_default();
+
+        // A dangling rule bookmark has no attached window: print the rule
+        // instead of the window/workspace/activity placement.
+        let Some(window) = bm.window_id else {
+            // The server's wire invariant guarantees `rule: Some` whenever
+            // `window_id` is `None` (see `build_bookmarks_ipc`). A `None`
+            // here means a server/client version skew broke that contract —
+            // surface it loudly rather than silently printing a placeholder.
+            let rule = match bm.rule.as_ref() {
+                Some(rule) => format_bookmark_rule(rule),
+                None => {
+                    tracing::warn!(
+                        "bookmark {} is windowless but carries no rule (server/client skew?)",
+                        bm.id
+                    );
+                    "invalid: no rule".to_owned()
+                }
+            };
+            println!("  [{id}] dangling ({rule}){name}{key}", id = bm.id);
+            continue;
+        };
+
         let (ws, out) = match &bm.workspace {
             None => ("ws (mid-move)".to_owned(), String::new()),
             Some(placement) => {
@@ -1013,28 +1047,29 @@ fn print_bookmarks(bookmarks: &[Bookmark]) {
             }
         };
         let title = bm.title.as_deref().unwrap_or("(untitled)");
-        let act = match bm.activity_name.as_deref() {
-            Some(name) => format!("\"{name}\""),
-            None => format!("{}", bm.activity_id),
+        let act = match (bm.activity_name.as_deref(), bm.activity_id) {
+            (Some(name), _) => format!("\"{name}\""),
+            (None, Some(id)) => format!("{id}"),
+            (None, None) => "(none)".to_owned(),
         };
-        // Human-only display tag, deliberately unescaped: names may contain
-        // quotes/brackets. Machine consumers read the structured IPC field.
-        let name = bm
-            .name
-            .as_deref()
-            .map(|n| format!(" [name \"{n}\"]"))
-            .unwrap_or_default();
-        let key = bm
-            .key
-            .as_deref()
-            .map(|k| format!(" [key {k}]"))
-            .unwrap_or_default();
         println!(
             "  [{id}] window {window} \"{title}\" on {ws}{out} [activity {act}]{name}{key}",
             id = bm.id,
-            window = bm.window_id,
         );
     }
+}
+
+/// Format a rule-anchored bookmark's matcher for `jiji msg bookmarks` output,
+/// e.g. `rule app-id="^firefox$"` or `rule app-id="^foo$" title="bar"`.
+fn format_bookmark_rule(rule: &BookmarkRuleInfo) -> String {
+    let mut parts = vec!["rule".to_owned()];
+    if let Some(app_id) = &rule.app_id {
+        parts.push(format!("app-id=\"{app_id}\""));
+    }
+    if let Some(title) = &rule.title {
+        parts.push(format!("title=\"{title}\""));
+    }
+    parts.join(" ")
 }
 
 fn print_cast(cast: &Cast) {

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use calloop::timer::{TimeoutAction, Timer};
 use input::event::gesture::GestureEventCoordinates as _;
+use jiji_config::utils::RegexEq;
 use jiji_config::{
     key_to_wire_string, Action, Bind, Binds, Config, Key, ModKey, Modifiers, MruDirection,
     SwitchBinds, Trigger, WorkspaceReference,
@@ -47,7 +48,9 @@ use self::resize_grab::ResizeGrab;
 use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
-use crate::layout::bookmarks::{BookmarkJumpOutcome, BookmarkKey, BookmarkName, WalkDirection};
+use crate::layout::bookmarks::{
+    BookmarkJumpOutcome, BookmarkKey, BookmarkName, BookmarkRule, WalkDirection,
+};
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{
     ActivateWindow, DoActionError, DoActionOutcome, LayoutElement, MoveWindowToPoolOutcome,
@@ -58,7 +61,7 @@ use crate::ui::confirm_dialog::ConfirmRequest;
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::{spawn, spawn_sh};
-use crate::utils::{center, get_monotonic_time, CastSessionId, ResizeEdge};
+use crate::utils::{center, get_monotonic_time, with_toplevel_role, CastSessionId, ResizeEdge};
 
 pub mod backend_ext;
 pub mod move_grab;
@@ -1719,6 +1722,61 @@ impl State {
                         warn!(
                             "confirm dialog unavailable; not removing bookmark without confirmation"
                         );
+                    }
+                }
+            }
+            Action::AddBookmarkRule { app_id, title } => {
+                let compile = |src: Option<String>| -> Result<Option<RegexEq>, DoActionError> {
+                    match src {
+                        None => Ok(None),
+                        Some(s) => s.parse::<RegexEq>().map(Some).map_err(|err| {
+                            DoActionError::BookmarkRuleInvalid {
+                                reason: format!("{err}"),
+                            }
+                        }),
+                    }
+                };
+                let app_id_re = compile(app_id).map_err(|err| {
+                    debug!("add_bookmark_rule: {err:?}, propagating");
+                    err
+                })?;
+                let title_re = compile(title).map_err(|err| {
+                    debug!("add_bookmark_rule: {err:?}, propagating");
+                    err
+                })?;
+                let rule = BookmarkRule::new(app_id_re, title_re).map_err(|err| {
+                    let err = DoActionError::BookmarkRuleInvalid {
+                        reason: err.to_string(),
+                    };
+                    debug!("add_bookmark_rule: {err:?}, propagating");
+                    err
+                })?;
+                self.niri.layout.add_bookmark_rule(rule);
+
+                // Creation-time attach: sweep the current windows and attach the
+                // rule to the first un-bookmarked match in iteration order. The
+                // per-window app-id/raw title are snapshotted first so the
+                // `&mut layout` attach call does not overlap the `&layout`
+                // iteration.
+                let candidates: Vec<_> = self
+                    .niri
+                    .layout
+                    .windows_all()
+                    .map(|(_, mapped)| {
+                        let (app_id, title) = with_toplevel_role(mapped.toplevel(), |role| {
+                            (role.app_id.clone(), role.title.clone())
+                        });
+                        (mapped.window.clone(), app_id, title)
+                    })
+                    .collect();
+                for (window, app_id, title) in candidates {
+                    if self
+                        .niri
+                        .layout
+                        .try_attach_bookmark_rules(&window, app_id.as_deref(), title.as_deref())
+                        .is_some()
+                    {
+                        break;
                     }
                 }
             }

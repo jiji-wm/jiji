@@ -23,7 +23,7 @@ use crate::handlers::XDG_ACTIVATION_TOKEN_TIMEOUT;
 use crate::layout::{ActivateWindow, AddWindowTarget, LayoutElement as _};
 use crate::niri::{CastTarget, ClientState, LockState, State};
 use crate::utils::transaction::Transaction;
-use crate::utils::{is_mapped, send_scale_transform};
+use crate::utils::{is_mapped, send_scale_transform, with_toplevel_role};
 use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped};
 
 impl CompositorHandler for State {
@@ -225,6 +225,13 @@ impl CompositorHandler for State {
                         })
                         .map(|(mapped, _)| mapped.window.clone());
 
+                    // Snapshot the toplevel's app-id/raw title for rule-anchored
+                    // bookmark matching before `Mapped::new` consumes the window
+                    // (which `toplevel` borrows) and before taking `&mut layout`.
+                    let (rule_app_id, rule_title) = with_toplevel_role(toplevel, |role| {
+                        (role.app_id.clone(), role.title.clone())
+                    });
+
                     // The mapped pre-commit hook deals with dma-bufs on its own.
                     self.remove_default_dmabuf_pre_commit_hook(surface);
                     let hook = add_mapped_toplevel_pre_commit_hook(toplevel);
@@ -254,6 +261,15 @@ impl CompositorHandler for State {
                         activate,
                     );
                     let output = output.cloned();
+
+                    // Attach any matching rule-anchored bookmark now that the
+                    // window is in the layout — activity/workspace resolution
+                    // reads post-insert state, so this must run after add_window.
+                    self.niri.layout.try_attach_bookmark_rules(
+                        &window,
+                        rule_app_id.as_deref(),
+                        rule_title.as_deref(),
+                    );
 
                     // The window state cannot contain Fullscreen and Maximized at once. Therefore,
                     // if the window ended up fullscreen, then we only know that it is also

@@ -34,6 +34,7 @@ use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
 use crate::backend::IpcOutputMap;
 use crate::input::pick_window_grab::PickWindowGrab;
 use crate::layout::activity::ActivityId;
+use crate::layout::bookmarks::{AnchorWire, BookmarkRule};
 use crate::layout::workspace::WorkspaceId;
 use crate::layout::{
     format_do_action_error, DoActionError, DoActionOutcome, Layout, LayoutElement,
@@ -493,7 +494,9 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
             | Err(err @ DoActionError::BookmarkNotFound { .. })
             | Err(err @ DoActionError::BookmarkKeyInvalid { .. })
             | Err(err @ DoActionError::BookmarkKeyCollision { .. })
-            | Err(err @ DoActionError::BookmarkNameInvalid { .. }) => {
+            | Err(err @ DoActionError::BookmarkNameInvalid { .. })
+            | Err(err @ DoActionError::BookmarkDangling { .. })
+            | Err(err @ DoActionError::BookmarkRuleInvalid { .. }) => {
                 // Terminal errors. Same shape as `WindowNotFound`:
                 // forward and advance the walk — do not re-block.
                 let _ = waiter.tx.send_blocking(Err(err));
@@ -868,7 +871,9 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                     | Err(err @ DoActionError::BookmarkNotFound { .. })
                     | Err(err @ DoActionError::BookmarkKeyInvalid { .. })
                     | Err(err @ DoActionError::BookmarkKeyCollision { .. })
-                    | Err(err @ DoActionError::BookmarkNameInvalid { .. }) => {
+                    | Err(err @ DoActionError::BookmarkNameInvalid { .. })
+                    | Err(err @ DoActionError::BookmarkDangling { .. })
+                    | Err(err @ DoActionError::BookmarkRuleInvalid { .. }) => {
                         let _ = tx.send_blocking(Err(err));
                     }
                 }
@@ -1019,10 +1024,15 @@ pub(crate) struct BookmarkWindowMeta {
 /// post-partial-disconnect). The saved activity is tried first so a shared
 /// workspace yields the position the user actually navigated from.
 ///
+/// A dangling rule bookmark (no attached window) yields an entry with
+/// `window_id`, `workspace`, and `activity_id` all `None` and `rule: Some`.
+///
 /// # Panics
 ///
-/// Panics if a bookmark's window cannot be resolved via `windows_all()`. This is
-/// the prune-on-close invariant: every live bookmark must name a live window.
+/// Panics if an *attached* bookmark's window cannot be resolved via
+/// `windows_all()`. This is the prune-on-close invariant: every attached
+/// bookmark must name a live window. Dangling rule anchors are skipped before
+/// the lookup.
 pub(crate) fn build_bookmarks_ipc<W: LayoutElement>(
     layout: &Layout<W>,
     window_meta_of: impl Fn(&W) -> BookmarkWindowMeta,
@@ -1033,8 +1043,38 @@ pub(crate) fn build_bookmarks_ipc<W: LayoutElement>(
         .iter()
         .enumerate()
         .map(|(position, bookmark)| {
-            let window = bookmark.anchor().window();
-            let activity_id = bookmark.anchor().activity();
+            let rule_info = |r: &BookmarkRule| jiji_ipc::BookmarkRuleInfo {
+                app_id: r.app_id_source().map(str::to_owned),
+                title: r.title_source().map(str::to_owned),
+            };
+
+            // A dangling rule anchor has no window, workspace, or activity.
+            // `AnchorWire::DanglingRule` carries the rule directly (not an
+            // `Option`), so `rule: Some(..)` below is structural: the anchor
+            // model makes a windowless entry a rule by construction, not by
+            // a runtime assertion.
+            let (window, activity_id, rule) = match bookmark.anchor().wire() {
+                AnchorWire::DanglingRule(rule) => {
+                    return jiji_ipc::Bookmark {
+                        id: bookmark.id().get(),
+                        position,
+                        window_id: None,
+                        title: None,
+                        app_id: None,
+                        workspace: None,
+                        activity_id: None,
+                        activity_name: None,
+                        name: bookmark.name().map(|n| n.as_str().to_owned()),
+                        key: bookmark.key().map(|k| key_to_wire_string(k.key())),
+                        rule: Some(rule_info(rule)),
+                    };
+                }
+                AnchorWire::Attached {
+                    window,
+                    activity,
+                    rule,
+                } => (window, activity, rule.map(rule_info)),
+            };
 
             let w = layout
                 .windows_all()
@@ -1098,14 +1138,15 @@ pub(crate) fn build_bookmarks_ipc<W: LayoutElement>(
             jiji_ipc::Bookmark {
                 id: bookmark.id().get(),
                 position,
-                window_id: id,
+                window_id: Some(id),
                 title,
                 app_id,
                 workspace,
-                activity_id: activity_id.get(),
+                activity_id: Some(activity_id.get()),
                 activity_name,
                 name: bookmark.name().map(|n| n.as_str().to_owned()),
                 key: bookmark.key().map(|k| key_to_wire_string(k.key())),
+                rule,
             }
         })
         .collect()

@@ -531,11 +531,10 @@ impl BookmarkSwitcher {
         let visible = Self::collect_visible_windows(layout);
 
         let mut hints = build_hints(
-            layout
-                .bookmarks()
-                .list()
-                .iter()
-                .map(|bookmark| (bookmark.id().get(), bookmark.anchor().window().clone())),
+            layout.bookmarks().list().iter().filter_map(|bookmark| {
+                // Dangling rule bookmarks have no window to hint.
+                Some((bookmark.id().get(), bookmark.anchor().window()?.clone()))
+            }),
             &visible,
             &keymap.full_alphabet,
         );
@@ -602,11 +601,10 @@ impl BookmarkSwitcher {
         let visible: HashSet<Window> = titles.keys().cloned().collect();
 
         let mut hints = build_hints(
-            layout
-                .bookmarks()
-                .list()
-                .iter()
-                .map(|bookmark| (bookmark.id().get(), bookmark.anchor().window().clone())),
+            layout.bookmarks().list().iter().filter_map(|bookmark| {
+                // Dangling rule bookmarks have no window to hint.
+                Some((bookmark.id().get(), bookmark.anchor().window()?.clone()))
+            }),
             &visible,
             &keymap.mode_alphabet,
         );
@@ -621,7 +619,8 @@ impl BookmarkSwitcher {
             .list()
             .iter()
             .filter_map(|bookmark| {
-                let window = bookmark.anchor().window();
+                // Dangling rule bookmarks have no window, so no search entry.
+                let window = bookmark.anchor().window()?;
                 let title = titles.get(window)?;
                 Some(SearchEntry::new(
                     bookmark.id().get(),

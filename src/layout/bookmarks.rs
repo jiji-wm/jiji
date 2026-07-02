@@ -16,6 +16,7 @@
 
 use std::fmt;
 
+use jiji_config::utils::RegexEq;
 use jiji_config::{Key, OrderMode, RepressPolicy, Trigger};
 
 use super::activity::ActivityId;
@@ -151,36 +152,195 @@ impl BookmarkId {
     }
 }
 
+/// Why [`BookmarkRule::new`] rejected a rule.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookmarkRuleError {
+    /// Neither `app_id` nor `title` was given; a rule that matches nothing is
+    /// rejected.
+    Empty,
+}
+
+impl fmt::Display for BookmarkRuleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "at least one of app-id or title is required"),
+        }
+    }
+}
+
+/// A durable window-matching rule for a rule-anchored bookmark.
+///
+/// Constructed only via [`BookmarkRule::new`], which requires at least one
+/// field (a rule matching nothing is meaningless); the private fields keep
+/// every live rule valid by construction — outside callers can't smuggle in
+/// an empty rule, though a same-module literal (`BookmarkRule { app_id: None,
+/// title: None }`) would still bypass the check, as with any private-field
+/// invariant in this module. Matching reuses the window-rules semantics (see
+/// `window_matches` in `src/window/mod.rs`): present fields are AND-ed, and
+/// each is an [`regex::Regex::is_match`] test — on the app-id and on the
+/// **raw** (machine-tagged) title, the same strings a user writes window-rule
+/// regexes against. A rule that names a field the window lacks (e.g. a
+/// `title` regex on a titleless window) does not match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookmarkRule {
+    app_id: Option<RegexEq>,
+    title: Option<RegexEq>,
+}
+
+impl BookmarkRule {
+    /// Build a rule from optional app-id and title regexes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BookmarkRuleError::Empty`] when both fields are `None`.
+    pub fn new(app_id: Option<RegexEq>, title: Option<RegexEq>) -> Result<Self, BookmarkRuleError> {
+        if app_id.is_none() && title.is_none() {
+            return Err(BookmarkRuleError::Empty);
+        }
+        Ok(Self { app_id, title })
+    }
+
+    /// Whether this rule matches a window with the given app-id and raw title.
+    ///
+    /// Present fields are AND-ed; an absent window field against a present rule
+    /// field is a non-match.
+    pub(crate) fn matches(&self, app_id: Option<&str>, title: Option<&str>) -> bool {
+        if let Some(re) = &self.app_id {
+            let Some(app_id) = app_id else {
+                return false;
+            };
+            if !re.0.is_match(app_id) {
+                return false;
+            }
+        }
+        if let Some(re) = &self.title {
+            let Some(title) = title else {
+                return false;
+            };
+            if !re.0.is_match(title) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The app-id regex source string, if the rule constrains app-id.
+    pub(crate) fn app_id_source(&self) -> Option<&str> {
+        self.app_id.as_ref().map(|re| re.0.as_str())
+    }
+
+    /// The title regex source string, if the rule constrains title.
+    pub(crate) fn title_source(&self) -> Option<&str> {
+        self.title.as_ref().map(|re| re.0.as_str())
+    }
+}
+
+/// The window a rule anchor is currently attached to, plus the activity it was
+/// attached under.
+///
+/// Kept as a single struct so `window` and `activity` can never be half-set: a
+/// rule anchor is either dangling ([`BookmarkAnchor::Rule`] with `attached:
+/// None`) or fully attached (both fields present).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowAttachment<Id> {
+    window: Id,
+    activity: ActivityId,
+}
+
 /// What a bookmark points at.
 ///
-/// Only the window anchor exists today: a bookmark pins a concrete window under
-/// the activity it was created in. Future anchor kinds (a rule that re-resolves
-/// to whatever window currently matches, or a dangling anchor whose window has
-/// closed but whose slot is retained) would join as sibling variants; keeping
-/// this an enum from the outset means adding one does not disturb the window
-/// case.
+/// A [`BookmarkAnchor::Window`] pins a concrete window; a
+/// [`BookmarkAnchor::Rule`] pins a durable matcher that attaches to the first
+/// matching window mapped after it was created and dangles (retaining its slot,
+/// id, name, and key) when that window closes, re-attaching to the next match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BookmarkAnchor<Id> {
     /// A concrete window plus the activity it was bookmarked under. The activity
     /// is carried context for restore (which activity to switch into), not part
     /// of the bookmark's identity — one window has at most one bookmark.
     Window { window: Id, activity: ActivityId },
+    /// A rule that attaches to a matching window on map. `attached: None` is the
+    /// dangling state (no live window yet, or the previous one closed); the slot
+    /// survives so the bookmark's id, name, key, and position persist across the
+    /// dangle.
+    Rule {
+        rule: BookmarkRule,
+        attached: Option<WindowAttachment<Id>>,
+    },
 }
 
 impl<Id> BookmarkAnchor<Id> {
-    /// The anchored window.
-    pub(crate) fn window(&self) -> &Id {
+    /// The anchored window, or `None` for a dangling rule anchor.
+    pub(crate) fn window(&self) -> Option<&Id> {
         match self {
-            BookmarkAnchor::Window { window, .. } => window,
+            BookmarkAnchor::Window { window, .. } => Some(window),
+            BookmarkAnchor::Rule { attached, .. } => attached.as_ref().map(|a| &a.window),
         }
     }
 
-    /// The activity the bookmark was created under.
-    pub(crate) fn activity(&self) -> ActivityId {
+    /// The `(window, activity)` pair for an attached anchor, or `None` while
+    /// dangling.
+    ///
+    /// A single destructure of both halves together, so a caller that wants
+    /// the pair can't observe (or need to `expect`-justify) the impossible
+    /// half-set state that two independent single-field accessors would each
+    /// leave implicit by returning their own `Option`s.
+    pub(crate) fn attachment(&self) -> Option<(&Id, ActivityId)> {
         match self {
-            BookmarkAnchor::Window { activity, .. } => *activity,
+            BookmarkAnchor::Window { window, activity } => Some((window, *activity)),
+            BookmarkAnchor::Rule { attached, .. } => {
+                attached.as_ref().map(|a| (&a.window, a.activity))
+            }
         }
     }
+
+    /// The wire-boundary split of this anchor: attached (window + activity,
+    /// plus the rule if this was a rule anchor — a rule can be attached and
+    /// still report its matcher) or dangling.
+    ///
+    /// Unlike [`Self::attachment`] paired with a separate [`Self::rule`] call,
+    /// this is a single match over the anchor, so the "a windowless entry
+    /// always carries a rule" wire invariant holds by construction:
+    /// [`AnchorWire::DanglingRule`] carries `&BookmarkRule` directly, not an
+    /// `Option`, because only a dangling [`BookmarkAnchor::Rule`] can lack a
+    /// window and that arm is the only one this variant is built from.
+    pub(crate) fn wire(&self) -> AnchorWire<'_, Id> {
+        match self {
+            BookmarkAnchor::Window { window, activity } => AnchorWire::Attached {
+                window,
+                activity: *activity,
+                rule: None,
+            },
+            BookmarkAnchor::Rule {
+                rule,
+                attached: Some(a),
+            } => AnchorWire::Attached {
+                window: &a.window,
+                activity: a.activity,
+                rule: Some(rule),
+            },
+            BookmarkAnchor::Rule {
+                rule,
+                attached: None,
+            } => AnchorWire::DanglingRule(rule),
+        }
+    }
+}
+
+/// The wire-boundary split of a [`BookmarkAnchor`], returned by
+/// [`BookmarkAnchor::wire`].
+pub(crate) enum AnchorWire<'a, Id> {
+    /// The anchor has a live window (a plain window anchor, or an attached
+    /// rule anchor). `rule` is `Some` only for the latter.
+    Attached {
+        window: &'a Id,
+        activity: ActivityId,
+        rule: Option<&'a BookmarkRule>,
+    },
+    /// The anchor is a dangling rule: no window, but the rule that will
+    /// re-attach it is always present.
+    DanglingRule(&'a BookmarkRule),
 }
 
 /// One bookmark: a stable id, an anchor, an optional display name, and an
@@ -363,9 +523,61 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
         self.binds_epoch = self.binds_epoch.wrapping_add(1);
     }
 
-    /// Position of the bookmark anchoring `window`, if any.
+    /// Position of the bookmark anchoring `window`, if any. Matches both a
+    /// `Window` anchor and an attached `Rule` anchor; dangling rule anchors
+    /// (no live window) never match.
     fn position_of_window(&self, window: &Id) -> Option<usize> {
-        self.list.iter().position(|b| b.anchor.window() == window)
+        self.list
+            .iter()
+            .position(|b| b.anchor.window() == Some(window))
+    }
+
+    /// Append a dangling rule-anchored bookmark, minting a fresh id. The rule
+    /// attaches to a window later via [`Self::attach_first_matching`].
+    pub fn add_rule(&mut self, rule: BookmarkRule) -> BookmarkId {
+        let id = self.mint_id();
+        self.list.push(Bookmark {
+            id,
+            anchor: BookmarkAnchor::Rule {
+                rule,
+                attached: None,
+            },
+            name: None,
+            key: None,
+        });
+        id
+    }
+
+    /// Attach the first dangling rule whose matcher accepts `window` to it, in
+    /// list order (list order is priority). Returns the attached bookmark's id,
+    /// or `None` if no dangling rule matched.
+    ///
+    /// No-op — returns `None` — when `window` is already bookmarked (a `Window`
+    /// anchor or an already-attached rule): one window has at most one bookmark.
+    /// Later matching rules stay dangling.
+    pub fn attach_first_matching(
+        &mut self,
+        window: Id,
+        activity: ActivityId,
+        app_id: Option<&str>,
+        title: Option<&str>,
+    ) -> Option<BookmarkId> {
+        if self.position_of_window(&window).is_some() {
+            return None;
+        }
+        let pos = self.list.iter().position(|b| {
+            matches!(
+                &b.anchor,
+                BookmarkAnchor::Rule { rule, attached }
+                    if attached.is_none() && rule.matches(app_id, title)
+            )
+        })?;
+        let id = self.list[pos].id;
+        let BookmarkAnchor::Rule { attached, .. } = &mut self.list[pos].anchor else {
+            unreachable!("position selected a dangling Rule anchor");
+        };
+        *attached = Some(WindowAttachment { window, activity });
+        Some(id)
     }
 
     /// Bookmark a window, or re-press an already-bookmarked one.
@@ -509,6 +721,11 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
     /// step lands directly on the boundary entry (last for backward, first for
     /// forward). This stale-cursor guard makes correctness independent of
     /// refresh timing.
+    ///
+    /// Dangling rule anchors (no live window) are transparent to the walk: the
+    /// step continues past them in `direction`, honoring `wrap`, until it lands
+    /// on an attached entry or exhausts the list (an all-dangling list yields
+    /// `None`).
     pub fn walk_target(
         &self,
         direction: WalkDirection,
@@ -519,21 +736,29 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
         if len == 0 {
             return None;
         }
-        let target = match self.walk_base(focused) {
-            Some(base) => step(base, direction, len, wrap),
+        let mut candidate = match self.walk_base(focused) {
+            Some(base) => step(base, direction, len, wrap)?,
             None => match direction {
-                WalkDirection::Backward => Some(len - 1),
-                WalkDirection::Forward => Some(0),
+                WalkDirection::Backward => len - 1,
+                WalkDirection::Forward => 0,
             },
         };
-        target.map(WalkTarget)
+        // Advance past dangling entries. Bounded by `len` so an all-dangling
+        // list terminates rather than looping under wrap.
+        for _ in 0..len {
+            if self.list[candidate].anchor.window().is_some() {
+                return Some(WalkTarget(candidate));
+            }
+            candidate = step(candidate, direction, len, wrap)?;
+        }
+        None
     }
 
     /// The base index a walk steps from, or `None` when there is no current
     /// position (first step lands on a boundary).
     fn walk_base(&self, focused: Option<&Id>) -> Option<usize> {
         if let Some(i) = self.walk_cursor {
-            if i < self.list.len() && Some(self.list[i].anchor.window()) == focused {
+            if i < self.list.len() && self.list[i].anchor.window() == focused {
                 return Some(i);
             }
         }
@@ -556,8 +781,13 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
             target < self.list.len(),
             "walk target is minted only from a validated list index"
         );
+        let window = self.list[target]
+            .anchor
+            .window()
+            .expect("walk_target skips dangling entries, so the target is attached")
+            .clone();
         self.walk_cursor = Some(target);
-        self.last_seen_focus = Some(self.list[target].anchor.window().clone());
+        self.last_seen_focus = Some(window);
         self.return_target = None;
     }
 
@@ -636,23 +866,38 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
         }
     }
 
-    /// Drop the bookmark anchoring `window` (if any), keeping the list free of
-    /// dead windows, and clear `return_target` if it held the closed window.
+    /// React to `window` closing: remove a `Window` anchor pointing at it, but
+    /// *dangle* an attached `Rule` anchor in place (clear its attachment while
+    /// keeping the entry), and clear `return_target` if it held the closed
+    /// window.
     ///
-    /// At most one bookmark anchors a window, so this removes at most one entry.
-    /// The cursor is adjusted with a snapshot-then-subtract discipline so the
-    /// shape stays correct if the one-per-window invariant is ever relaxed:
-    /// pruning the cursor's own entry returns the cursor to `None` (matching
-    /// [`Self::remove_by_id`]), and each removal strictly before the cursor
-    /// decrements it.
+    /// A dangled rule keeps its slot — id, name, key, and list position all
+    /// survive, and the walk cursor for it is left unchanged (the entry did not
+    /// move). `binds_epoch` is deliberately *not* bumped for a dangle: the
+    /// id→key mapping is unchanged, so the synthetic bind stays armed and
+    /// re-becomes functional when the rule re-attaches.
+    ///
+    /// A removed `Window` anchor adjusts the cursor with the same
+    /// snapshot-then-subtract discipline as [`Self::remove_by_id`]: pruning the
+    /// cursor's own entry returns the cursor to `None`, and each removal
+    /// strictly before the cursor decrements it.
     pub fn prune_window(&mut self, window: &Id) {
         let original_cursor = self.walk_cursor;
         let mut kept = Vec::with_capacity(self.list.len());
         let mut removed_cursor_entry = false;
         let mut removed_before_cursor = 0usize;
         let mut removed_key = false;
-        for (idx, bm) in self.list.drain(..).enumerate() {
-            if bm.anchor.window() == window {
+        for (idx, mut bm) in self.list.drain(..).enumerate() {
+            let is_window_anchor_match = matches!(
+                &bm.anchor,
+                BookmarkAnchor::Window { window: w, .. } if w == window
+            );
+            let is_attached_rule_match = matches!(
+                &bm.anchor,
+                BookmarkAnchor::Rule { attached: Some(a), .. } if &a.window == window
+            );
+
+            if is_window_anchor_match {
                 if bm.key.is_some() {
                     removed_key = true;
                 }
@@ -663,6 +908,15 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
                         removed_before_cursor += 1;
                     }
                 }
+                // Dropped: not pushed to `kept`.
+            } else if is_attached_rule_match {
+                // Dangle in place: keep the slot, drop only the attachment. No
+                // epoch bump (id→key mapping unchanged), no cursor adjustment
+                // (the entry did not move).
+                if let BookmarkAnchor::Rule { attached, .. } = &mut bm.anchor {
+                    *attached = None;
+                }
+                kept.push(bm);
             } else {
                 kept.push(bm);
             }
@@ -687,7 +941,7 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
     pub(crate) fn id_for_window(&self, window: &Id) -> Option<BookmarkId> {
         self.list
             .iter()
-            .find(|b| b.anchor.window() == window)
+            .find(|b| b.anchor.window() == Some(window))
             .map(|b| b.id)
     }
 
@@ -781,7 +1035,10 @@ mod tests {
     }
 
     fn windows(bm: &Bookmarks<usize>) -> Vec<usize> {
-        bm.list().iter().map(|b| *b.anchor().window()).collect()
+        bm.list()
+            .iter()
+            .filter_map(|b| b.anchor().window().copied())
+            .collect()
     }
 
     /// Test-only setup helper: park the walk cursor on `idx` via a real
@@ -796,7 +1053,10 @@ mod tests {
         } else if idx == len - 1 {
             bm.walk_target(WalkDirection::Backward, None, false)
         } else {
-            let prev_window = *bm.list()[idx - 1].anchor().window();
+            let prev_window = *bm.list()[idx - 1]
+                .anchor()
+                .window()
+                .expect("test helper only used with window-anchored bookmarks");
             bm.walk_target(WalkDirection::Forward, Some(&prev_window), false)
         }
         .expect("idx must be in bounds");
@@ -1480,6 +1740,262 @@ mod tests {
                 .map(BookmarkName::as_str),
             Some("mail"),
             "name survives reorder, keyed by id"
+        );
+    }
+
+    // --- Rule-anchored bookmarks ---
+
+    fn rule(app_id: Option<&str>, title: Option<&str>) -> BookmarkRule {
+        BookmarkRule::new(
+            app_id.map(|s| s.parse().expect("valid test regex")),
+            title.map(|s| s.parse().expect("valid test regex")),
+        )
+        .expect("at least one field given")
+    }
+
+    fn is_dangling(bm: &Bookmarks<usize>, id: BookmarkId) -> bool {
+        bm.list()
+            .iter()
+            .find(|b| b.id() == id)
+            .expect("bookmark exists")
+            .anchor()
+            .window()
+            .is_none()
+    }
+
+    #[test]
+    fn rule_ctor_rejects_zero_fields() {
+        assert_eq!(
+            BookmarkRule::new(None, None),
+            Err(BookmarkRuleError::Empty),
+            "a rule with no fields matches nothing and is rejected",
+        );
+        assert!(BookmarkRule::new(Some("^x$".parse().unwrap()), None).is_ok());
+    }
+
+    #[test]
+    fn add_rule_appends_dangling_with_fresh_id() {
+        let mut bm = Bookmarks::<usize>::default();
+        let id = bm.add_rule(rule(Some("^firefox$"), None));
+        assert_eq!(id.get(), 0, "fresh id minted");
+        assert!(bm.next_id() > id.get(), "next_id stays ahead");
+        assert_eq!(bm.list().len(), 1);
+        assert!(is_dangling(&bm, id), "a fresh rule starts dangling");
+    }
+
+    #[test]
+    fn attach_first_matching_honors_list_order_priority() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        // Two dangling rules both match window 1; the earlier one wins.
+        let first = bm.add_rule(rule(Some("^app$"), None));
+        let second = bm.add_rule(rule(Some("^app$"), None));
+        let attached = bm.attach_first_matching(1, a, Some("app"), None);
+        assert_eq!(attached, Some(first), "list order is priority");
+        assert!(!is_dangling(&bm, first), "the winner attached");
+        assert!(is_dangling(&bm, second), "the loser stays dangling");
+    }
+
+    #[test]
+    fn attach_skips_already_bookmarked_window() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let _ = bm.add_or_repress(1, a, RepressPolicy::MoveToFront);
+        let rid = bm.add_rule(rule(Some("^app$"), None));
+        // Window 1 is already bookmarked (a Window anchor), so no attach.
+        assert_eq!(
+            bm.attach_first_matching(1, a, Some("app"), None),
+            None,
+            "one window, one bookmark",
+        );
+        assert!(is_dangling(&bm, rid), "the rule stays dangling");
+    }
+
+    #[test]
+    fn attach_sets_window_and_activity_together() {
+        let (_, b) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let rid = bm.add_rule(rule(Some("^app$"), None));
+        assert_eq!(bm.attach_first_matching(7, b, Some("app"), None), Some(rid));
+        let anchor = bm.list()[0].anchor();
+        assert_eq!(anchor.window(), Some(&7));
+        assert_eq!(anchor.attachment().map(|(_, activity)| activity), Some(b));
+    }
+
+    #[test]
+    fn matching_is_and_over_present_fields_on_app_id_and_raw_title() {
+        let r = rule(Some("^fire"), Some("tab$"));
+        assert!(r.matches(Some("firefox"), Some("mytab")), "both match");
+        assert!(
+            !r.matches(Some("firefox"), Some("nope")),
+            "title must match"
+        );
+        assert!(
+            !r.matches(Some("chromium"), Some("mytab")),
+            "app-id must match"
+        );
+        // A present rule field against an absent window field is a non-match.
+        assert!(!r.matches(None, Some("mytab")));
+        assert!(!r.matches(Some("firefox"), None));
+        // App-id-only rule ignores the title entirely.
+        let r = rule(Some("^fire"), None);
+        assert!(r.matches(Some("firefox"), None));
+        assert!(r.matches(Some("firefox"), Some("anything")));
+    }
+
+    #[test]
+    fn prune_dangles_rule_in_place_keeping_slot_and_epoch() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let rid = bm.add_rule(rule(Some("^app$"), None));
+        assert_eq!(bm.attach_first_matching(1, a, Some("app"), None), Some(rid));
+        let name = BookmarkName::new("mail").unwrap();
+        assert!(bm.rename(rid, Some(name)));
+        bm.assign_key(
+            rid,
+            key(Modifiers::SUPER, smithay::input::keyboard::Keysym::m),
+        )
+        .unwrap();
+        let epoch_before = bm.binds_epoch();
+
+        bm.prune_window(&1);
+
+        assert_eq!(bm.list().len(), 1, "the slot survives the dangle");
+        assert!(is_dangling(&bm, rid), "the rule dangled in place");
+        assert_eq!(
+            bm.list()[0].name().map(BookmarkName::as_str),
+            Some("mail"),
+            "name survives the dangle",
+        );
+        assert!(bm.list()[0].key().is_some(), "key survives the dangle");
+        assert_eq!(
+            bm.binds_epoch(),
+            epoch_before,
+            "a dangle keeps the id→key mapping, so no epoch bump",
+        );
+
+        // Re-attach reuses the same id and re-becomes functional.
+        assert_eq!(
+            bm.attach_first_matching(2, a, Some("app"), None),
+            Some(rid),
+            "re-attach reuses the same bookmark id",
+        );
+        assert!(!is_dangling(&bm, rid));
+    }
+
+    #[test]
+    fn prune_still_removes_window_anchors() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let _ = bm.add_or_repress(1, a, RepressPolicy::MoveToFront);
+        let _ = bm.add_or_repress(2, a, RepressPolicy::MoveToFront);
+        bm.prune_window(&1);
+        assert_eq!(windows(&bm), [2], "a Window anchor is removed entirely");
+        assert_eq!(bm.list().len(), 1);
+    }
+
+    #[test]
+    fn prune_cursor_unchanged_for_dangled_rule_but_decremented_for_removed_window() {
+        let (a, _) = two_activities();
+
+        // A rule entry before the cursor dangling in place leaves the cursor put.
+        let mut bm = Bookmarks::<usize>::default();
+        let r0 = bm.add_rule(rule(Some("^app$"), None));
+        let _ = bm.add_or_repress(2, a, RepressPolicy::MoveToFront);
+        let _ = bm.add_or_repress(3, a, RepressPolicy::MoveToFront);
+        assert_eq!(bm.attach_first_matching(1, a, Some("app"), None), Some(r0));
+        // Layout: [rule→1, win 2, win 3]. Cursor on index 2 (window 3).
+        commit_walk_at(&mut bm, 2);
+        bm.prune_window(&1);
+        assert_eq!(
+            bm.walk_cursor(),
+            Some(2),
+            "dangling a rule in place keeps every entry, so the cursor is unchanged",
+        );
+
+        // A Window anchor before the cursor being removed decrements the cursor.
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2, 3] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        commit_walk_at(&mut bm, 2);
+        bm.prune_window(&1);
+        assert_eq!(
+            bm.walk_cursor(),
+            Some(1),
+            "removing a Window anchor before the cursor decrements it",
+        );
+    }
+
+    #[test]
+    fn walk_skips_dangling_entries_including_wrap() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        // Layout: [win 1, dangling rule, win 3].
+        let _ = bm.add_or_repress(1, a, RepressPolicy::MoveToFront);
+        let _ = bm.add_rule(rule(Some("^never$"), None));
+        let _ = bm.add_or_repress(3, a, RepressPolicy::MoveToFront);
+
+        // Forward from window 1 (index 0) steps past the dangling index 1 to index 2.
+        assert_eq!(
+            bm.walk_target(WalkDirection::Forward, Some(&1), false)
+                .map(WalkTarget::index),
+            Some(2),
+        );
+        // Backward from window 3 (index 2) skips index 1 down to index 0.
+        assert_eq!(
+            bm.walk_target(WalkDirection::Backward, Some(&3), false)
+                .map(WalkTarget::index),
+            Some(0),
+        );
+        // Forward off the end from window 3 with wrap lands on window 1 (index 0),
+        // skipping the dangling entry on the way.
+        commit_walk_at(&mut bm, 2);
+        assert_eq!(
+            bm.walk_target(WalkDirection::Forward, Some(&3), true)
+                .map(WalkTarget::index),
+            Some(0),
+        );
+    }
+
+    #[test]
+    fn all_dangling_walk_is_none() {
+        let mut bm = Bookmarks::<usize>::default();
+        let _ = bm.add_rule(rule(Some("^a$"), None));
+        let _ = bm.add_rule(rule(Some("^b$"), None));
+        assert_eq!(
+            bm.walk_target(WalkDirection::Forward, None, true)
+                .map(WalkTarget::index),
+            None,
+            "an all-dangling list has no walk target even with wrap",
+        );
+        assert_eq!(
+            bm.walk_target(WalkDirection::Backward, None, false)
+                .map(WalkTarget::index),
+            None,
+        );
+    }
+
+    #[test]
+    fn repress_on_rule_attached_window_applies_policy() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let _ = bm.add_or_repress(9, a, RepressPolicy::MoveToFront);
+        let rid = bm.add_rule(rule(Some("^app$"), None));
+        assert_eq!(bm.attach_first_matching(1, a, Some("app"), None), Some(rid));
+        // Layout: [win 9, rule→1]. Re-press window 1 under MoveToFront promotes it.
+        let out = bm.add_or_repress(1, a, RepressPolicy::MoveToFront);
+        assert_eq!(out, AddOutcome::MovedToFront);
+        assert_eq!(windows(&bm), [1, 9], "the rule bookmark moved to front");
+
+        // Under Remove, re-press asks for confirmation naming the rule bookmark's id.
+        let out = bm.add_or_repress(1, a, RepressPolicy::Remove);
+        assert_eq!(out, AddOutcome::RemovalNeedsConfirm(rid));
+        // Confirming destroys the rule entirely.
+        assert!(bm.remove_by_id(rid).is_some());
+        assert!(
+            bm.list().iter().all(|b| b.id() != rid),
+            "removing a rule bookmark kills the rule",
         );
     }
 }

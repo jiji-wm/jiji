@@ -241,9 +241,13 @@ pub struct PickedColor {
 
 /// One curated bookmark, enriched at query time.
 ///
-/// The prune-on-close invariant guarantees the anchored window is alive, so
-/// `window_id` always resolves. `workspace` carries the rest of the placement;
-/// see [`WorkspacePlacement`] for its own field contract.
+/// A bookmark anchors either a concrete window or a matching rule. For a
+/// window anchor (and an attached rule), the prune-on-close invariant
+/// guarantees the window is alive, so `window_id` resolves and `rule` is `None`
+/// (or `Some` for an attached rule). A *dangling* rule anchor — a rule with no
+/// currently-matching window — carries `window_id`, `workspace`, and
+/// `activity_id` all `None` and `rule: Some`. `workspace` carries the rest of
+/// the placement; see [`WorkspacePlacement`] for its own field contract.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct Bookmark {
@@ -251,20 +255,22 @@ pub struct Bookmark {
     pub id: u64,
     /// 0-based position in the presentation-order list.
     pub position: usize,
-    /// Anchored window id, as in [`Window::id`].
-    pub window_id: u64,
+    /// Anchored window id, as in [`Window::id`]. `None` for a dangling rule
+    /// bookmark (no currently-attached window).
+    pub window_id: Option<u64>,
     /// Window title (machine tags stripped, as in [`Window::title`]).
     pub title: Option<String>,
     /// Application ID, if set.
     pub app_id: Option<String>,
     /// The bookmarked window's workspace placement. `None` when the window is
-    /// mid-interactive-move (detached from its workspace); the prune-on-close
-    /// invariant guarantees no other `None` case for a live entry.
+    /// mid-interactive-move (detached from its workspace), or when the bookmark
+    /// is a dangling rule anchor with no attached window.
     pub workspace: Option<WorkspacePlacement>,
-    /// Id of the activity the bookmark was saved under (may be dead).
-    pub activity_id: u64,
+    /// Id of the activity the bookmark was saved under (may be dead). `None` for
+    /// a dangling rule bookmark.
+    pub activity_id: Option<u64>,
     /// Name of the saved activity; `None` when it has been removed (restore then
-    /// falls back to the activity picker).
+    /// falls back to the activity picker), or for a dangling rule bookmark.
     pub activity_name: Option<String>,
     /// User-facing display name, set via [`Action::RenameBookmark`]. `None`
     /// when unnamed. A display label only — [`Bookmark::id`] stays the sole
@@ -274,6 +280,23 @@ pub struct Bookmark {
     /// [`Action::AssignBookmarkKey`] (e.g. `"Mod+M"`). `None` when no key is
     /// assigned.
     pub key: Option<String>,
+    /// The matching rule, for a rule-anchored bookmark (attached or dangling).
+    /// `None` for a plain window anchor.
+    pub rule: Option<BookmarkRuleInfo>,
+}
+
+/// The matcher of a rule-anchored bookmark, as regex source strings.
+///
+/// At least one field is present (a rule matches on app-id, title, or both).
+/// The strings are the raw regex sources the rule was created with — the same
+/// syntax window-rule regexes use.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct BookmarkRuleInfo {
+    /// The app-id regex source, if the rule constrains app-id.
+    pub app_id: Option<String>,
+    /// The title regex source, if the rule constrains title.
+    pub title: Option<String>,
 }
 
 /// A bookmarked window's workspace, at query time.
@@ -1372,9 +1395,10 @@ pub enum Action {
     // --- Bookmark cohort ---
     //
     // These actions operate on the curated bookmark list: an ordered, uncapped
-    // set of windows (one bookmark per window) the user pins for quick return.
-    // Walking steps through the list; jumping targets a bookmark by id. None of
-    // these actions belong to the activity-action group above.
+    // list where each bookmark anchors either a concrete window or a
+    // window-matching rule (at most one bookmark per window). Walking steps
+    // through the list; jumping targets a bookmark by id. None of these
+    // actions belong to the activity-action group above.
     /// Bookmark the focused window, or re-press its existing bookmark per the
     /// configured `bookmarks { repress }` policy.
     ///
@@ -1385,6 +1409,24 @@ pub enum Action {
     /// this applies the same way whether the re-press came from a keybind or
     /// from this IPC call.
     AddBookmark {},
+    /// Add a rule-anchored bookmark that attaches to the first matching window
+    /// mapped after it is created, and re-attaches to the next match when that
+    /// window closes.
+    ///
+    /// At least one of `--app-id` or `--title` is required; both are regexes
+    /// (the same syntax as window rules), AND-ed when both are given, and
+    /// `--title` matches the raw (machine-tagged) title. At creation the rule
+    /// also sweeps the current windows and attaches to the first un-bookmarked
+    /// match, if any. Returns `Err("invalid bookmark rule: <reason>")`
+    /// (terminal) when a regex fails to compile or neither field is given.
+    AddBookmarkRule {
+        /// App-id regex the rule matches against.
+        #[cfg_attr(feature = "clap", arg(long))]
+        app_id: Option<String>,
+        /// Title regex the rule matches against (raw, machine-tagged title).
+        #[cfg_attr(feature = "clap", arg(long))]
+        title: Option<String>,
+    },
     /// Remove a bookmark.
     ///
     /// With `--id`, removes that bookmark immediately, or returns

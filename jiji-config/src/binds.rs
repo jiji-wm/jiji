@@ -435,6 +435,15 @@ pub enum Action {
     #[knuffel(skip)]
     UnsetWorkspaceStickyByRef(#[knuffel(argument)] WorkspaceReference),
     AddBookmark,
+    // IPC-only: a rule bookmark is created at runtime and carries regex source
+    // strings, not a static KDL bind. Parsing/validation happens at dispatch
+    // (`RegexEq::from_str`, then `BookmarkRule::new`) so `From<jiji_ipc::Action>`
+    // stays infallible.
+    #[knuffel(skip)]
+    AddBookmarkRule {
+        app_id: Option<String>,
+        title: Option<String>,
+    },
     WalkBookmarksForward,
     WalkBookmarksBackward,
     // The KDL bind removes the focused window's bookmark behind the confirm
@@ -868,6 +877,9 @@ impl From<jiji_ipc::Action> for Action {
                 workspace: Some(reference),
             } => Self::UnsetWorkspaceStickyByRef(WorkspaceReference::from(reference)),
             jiji_ipc::Action::AddBookmark {} => Self::AddBookmark,
+            jiji_ipc::Action::AddBookmarkRule { app_id, title } => {
+                Self::AddBookmarkRule { app_id, title }
+            }
             jiji_ipc::Action::RemoveBookmark { id: Some(id) } => Self::RemoveBookmarkById(id),
             jiji_ipc::Action::RemoveBookmark { id: None } => Self::RemoveBookmark(true),
             jiji_ipc::Action::WalkBookmarksForward {} => Self::WalkBookmarksForward,

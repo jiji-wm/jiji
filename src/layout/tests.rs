@@ -13,7 +13,7 @@ use smithay::output::{Mode, PhysicalProperties, Subpixel};
 use smithay::utils::Rectangle;
 
 use super::activity::ActivityId;
-use super::bookmarks::{BookmarkJumpOutcome, BookmarkKey, WalkDirection};
+use super::bookmarks::{BookmarkJumpOutcome, BookmarkKey, BookmarkRule, WalkDirection};
 use super::monitor::ActivityStrip;
 use super::*;
 
@@ -798,6 +798,13 @@ enum Op {
         layout_config: Box<jiji_config::LayoutPart>,
     },
     AddBookmark,
+    AddBookmarkRule(#[proptest(strategy = "0..3u8")] u8),
+    TryAttachBookmarkRule {
+        #[proptest(strategy = "0..6usize")]
+        id: usize,
+        #[proptest(strategy = "0..3u8")]
+        app: u8,
+    },
     WalkBookmarksForward,
     WalkBookmarksBackward,
     RemoveBookmarkById(#[proptest(strategy = "0..6u64")] u64),
@@ -1731,6 +1738,30 @@ impl Op {
             }
             Op::AddBookmark => {
                 layout.add_bookmark();
+            }
+            Op::AddBookmarkRule(which) => {
+                // Canned matcher set: a handful of app-id regexes so random
+                // churn produces both matching and non-matching windows.
+                let app = match which % 3 {
+                    0 => "^a$",
+                    1 => "^b$",
+                    _ => "^c$",
+                };
+                let rule = BookmarkRule::new(Some(app.parse().unwrap()), None)
+                    .expect("canned rule has a field");
+                let _ = layout.add_bookmark_rule(rule);
+            }
+            Op::TryAttachBookmarkRule { id, app } => {
+                // Simulate the map-time attach hook: feed a canned app-id for an
+                // existing window so dangling rules can attach.
+                if layout.has_window(&id) {
+                    let app = match app % 3 {
+                        0 => "a",
+                        1 => "b",
+                        _ => "c",
+                    };
+                    let _ = layout.try_attach_bookmark_rules(&id, Some(app), None);
+                }
             }
             Op::WalkBookmarksForward => {
                 let _ = layout.walk_bookmarks(WalkDirection::Forward);
@@ -8995,6 +9026,20 @@ fn do_action_error_display_matches_wire_contract() {
             }
         ),
         "invalid bookmark name: : must not be empty",
+    );
+    // Rule-anchored bookmark tokens.
+    assert_eq!(
+        format!("{}", DoActionError::BookmarkDangling { id: 4 }),
+        "bookmark has no attached window: id=4",
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DoActionError::BookmarkRuleInvalid {
+                reason: "at least one of app-id or title is required".to_owned(),
+            }
+        ),
+        "invalid bookmark rule: at least one of app-id or title is required",
     );
 }
 
@@ -23290,7 +23335,7 @@ fn narrow_with_animation_snaps_then_culls() {
 fn bookmark_snapshot(
     layout: &Layout<TestWindow>,
 ) -> (
-    Vec<(u64, usize, Option<jiji_config::Key>)>,
+    Vec<(u64, Option<usize>, Option<jiji_config::Key>, Option<String>)>,
     Option<usize>,
     u64,
     Option<usize>,
@@ -23301,7 +23346,14 @@ fn bookmark_snapshot(
     (
         bm.list()
             .iter()
-            .map(|b| (b.id().get(), *b.anchor().window(), b.key().map(|k| k.key())))
+            .map(|b| {
+                (
+                    b.id().get(),
+                    b.anchor().window().copied(),
+                    b.key().map(|k| k.key()),
+                    b.name().map(|n| n.as_str().to_owned()),
+                )
+            })
             .collect(),
         bm.walk_cursor(),
         bm.next_id(),
@@ -23408,7 +23460,11 @@ fn bookmark_restore_plan_tier2_dead_activity_leaves_anchor() {
     // The anchor still records the (now dead) saved activity — restore does not
     // rewrite it.
     assert_eq!(
-        layout.bookmarks.list()[0].anchor().activity(),
+        layout.bookmarks.list()[0]
+            .anchor()
+            .attachment()
+            .expect("test bookmark is window-anchored")
+            .1,
         beta,
         "anchor keeps the saved activity even when it is dead",
     );
@@ -23611,7 +23667,11 @@ fn bookmark_jump_under_mru_promotes_to_front() {
         .bookmarks
         .list()
         .iter()
-        .map(|b| *b.anchor().window())
+        .map(|b| {
+            *b.anchor()
+                .window()
+                .expect("test bookmark is window-anchored")
+        })
         .collect();
     assert_eq!(windows, [1, 2, 3]);
 
@@ -23622,7 +23682,11 @@ fn bookmark_jump_under_mru_promotes_to_front() {
         .bookmarks
         .list()
         .iter()
-        .map(|b| *b.anchor().window())
+        .map(|b| {
+            *b.anchor()
+                .window()
+                .expect("test bookmark is window-anchored")
+        })
         .collect();
     assert_eq!(windows, [1, 2, 3], "window 1 was already at front");
 
@@ -23631,7 +23695,7 @@ fn bookmark_jump_under_mru_promotes_to_front() {
         .bookmarks
         .list()
         .iter()
-        .find(|b| *b.anchor().window() == 3)
+        .find(|b| b.anchor().window() == Some(&3))
         .expect("window 3 bookmarked")
         .id()
         .get();
@@ -23640,7 +23704,11 @@ fn bookmark_jump_under_mru_promotes_to_front() {
         .bookmarks
         .list()
         .iter()
-        .map(|b| *b.anchor().window())
+        .map(|b| {
+            *b.anchor()
+                .window()
+                .expect("test bookmark is window-anchored")
+        })
         .collect();
     assert_eq!(windows, [3, 1, 2], "jump promoted window 3 to front");
     layout.verify_invariants();
@@ -23673,7 +23741,11 @@ fn bookmark_observe_focus_fires_through_layout_refresh() {
         .bookmarks
         .list()
         .iter()
-        .map(|b| *b.anchor().window())
+        .map(|b| {
+            *b.anchor()
+                .window()
+                .expect("test bookmark is window-anchored")
+        })
         .collect();
     assert_eq!(windows, [1, 2, 3], "appended in order, no promotion yet");
 
@@ -23684,7 +23756,11 @@ fn bookmark_observe_focus_fires_through_layout_refresh() {
         .bookmarks
         .list()
         .iter()
-        .map(|b| *b.anchor().window())
+        .map(|b| {
+            *b.anchor()
+                .window()
+                .expect("test bookmark is window-anchored")
+        })
         .collect();
     assert_eq!(
         windows,
@@ -23698,7 +23774,11 @@ fn bookmark_observe_focus_fires_through_layout_refresh() {
         .bookmarks
         .list()
         .iter()
-        .map(|b| *b.anchor().window())
+        .map(|b| {
+            *b.anchor()
+                .window()
+                .expect("test bookmark is window-anchored")
+        })
         .collect();
     assert_eq!(
         windows,
@@ -23743,7 +23823,11 @@ fn move_bookmark_reorders_and_unknown_id_is_loud() {
         .bookmarks
         .list()
         .iter()
-        .map(|b| *b.anchor().window())
+        .map(|b| {
+            *b.anchor()
+                .window()
+                .expect("test bookmark is window-anchored")
+        })
         .collect();
     assert_eq!(windows, [2, 3, 1], "move clamps to last index");
     assert!(
@@ -23932,10 +24016,11 @@ fn build_bookmarks_ipc_maps_fields_including_dead_activity() {
     let e = &ipc[0];
     assert_eq!(e.id, bid, "bookmark id");
     assert_eq!(e.position, 0, "0-based list position");
-    assert_eq!(e.window_id, 1);
+    assert_eq!(e.window_id, Some(1));
     assert_eq!(e.title.as_deref(), Some("title-1"));
     assert_eq!(e.app_id.as_deref(), Some("app-1"));
-    assert_eq!(e.activity_id, beta.get());
+    assert_eq!(e.activity_id, Some(beta.get()));
+    assert_eq!(e.rule, None, "a window-anchored bookmark carries no rule");
     assert_eq!(
         e.activity_name.as_deref(),
         Some("beta"),
@@ -23976,7 +24061,7 @@ fn build_bookmarks_ipc_maps_fields_including_dead_activity() {
     let e = &ipc[0];
     assert_eq!(
         e.activity_id,
-        beta.get(),
+        Some(beta.get()),
         "anchor keeps the dead activity id"
     );
     assert_eq!(e.activity_name, None, "dead activity resolves no name");
@@ -23985,6 +24070,285 @@ fn build_bookmarks_ipc_maps_fields_including_dead_activity() {
         Some(1),
         "workspace still resolves via declaration-order fallback",
     );
+    layout.verify_invariants();
+}
+
+#[test]
+fn build_bookmarks_ipc_dangling_rule_entry() {
+    use crate::ipc::server::{build_bookmarks_ipc, BookmarkWindowMeta};
+    use crate::layout::bookmarks::BookmarkRule;
+
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    layout.add_bookmark_rule(
+        BookmarkRule::new(Some("^firefox$".parse().unwrap()), None).expect("valid rule"),
+    );
+
+    let meta = |w: &TestWindow| BookmarkWindowMeta {
+        id: *w.id() as u64,
+        title: None,
+        app_id: None,
+    };
+    let ipc = build_bookmarks_ipc(&layout, meta);
+    assert_eq!(ipc.len(), 1);
+    let e = &ipc[0];
+    assert_eq!(e.window_id, None, "a dangling rule has no window");
+    assert_eq!(e.activity_id, None, "and no activity");
+    assert_eq!(e.activity_name, None);
+    assert!(e.workspace.is_none(), "and no workspace placement");
+    let rule = e.rule.as_ref().expect("a dangling entry carries rule info");
+    assert_eq!(rule.app_id.as_deref(), Some("^firefox$"));
+    assert_eq!(rule.title, None);
+    layout.verify_invariants();
+}
+
+// --- Rule-anchored bookmarks ---
+
+#[test]
+fn try_attach_prefers_active_activity_when_workspace_tagged_with_it() {
+    use crate::layout::bookmarks::BookmarkRule;
+
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let beta = layout.create_activity("beta".to_owned()).expect("create");
+    layout.switch_activity(beta);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+
+    // Share window 1's workspace between alpha (declared first) and beta.
+    let ws_id = layout
+        .window_ws_and_activity_hint(&1)
+        .expect("window on a live workspace");
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("share must succeed");
+
+    // Active is beta and the workspace is tagged with it → attach under beta,
+    // even though alpha comes first in declaration order.
+    let rid = layout.add_bookmark_rule(
+        BookmarkRule::new(Some("^app$".parse().unwrap()), None).expect("valid rule"),
+    );
+    assert_eq!(
+        layout.try_attach_bookmark_rules(&1, Some("app"), None),
+        Some(rid),
+    );
+    assert_eq!(
+        layout.bookmarks.list()[0]
+            .anchor()
+            .attachment()
+            .expect("attached")
+            .1,
+        beta,
+        "active activity is preferred when the workspace is tagged with it",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn try_attach_falls_back_to_declaration_order_when_active_absent() {
+    use crate::layout::bookmarks::BookmarkRule;
+
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let beta = layout.create_activity("beta".to_owned()).expect("create");
+    // Window on a beta-only workspace, then make alpha active so the active
+    // activity is NOT in the workspace's set.
+    layout.switch_activity(beta);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.switch_activity(alpha);
+
+    let rid = layout.add_bookmark_rule(
+        BookmarkRule::new(Some("^app$".parse().unwrap()), None).expect("valid rule"),
+    );
+    assert_eq!(
+        layout.try_attach_bookmark_rules(&1, Some("app"), None),
+        Some(rid),
+    );
+    assert_eq!(
+        layout.bookmarks.list()[0]
+            .anchor()
+            .attachment()
+            .expect("attached")
+            .1,
+        beta,
+        "with the active activity absent, the first workspace activity is used",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn rule_bookmark_dangles_on_real_window_close() {
+    use crate::layout::bookmarks::BookmarkRule;
+
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    let rid = layout.add_bookmark_rule(
+        BookmarkRule::new(Some("^app$".parse().unwrap()), None).expect("valid rule"),
+    );
+    assert_eq!(
+        layout.try_attach_bookmark_rules(&1, Some("app"), None),
+        Some(rid),
+    );
+    assert_eq!(layout.bookmarks.list()[0].anchor().window(), Some(&1));
+
+    // Close via the real removal entry point (which prunes bookmarks).
+    Op::CloseWindow(1).apply(&mut layout);
+    assert!(
+        layout
+            .bookmarks
+            .list()
+            .iter()
+            .any(|b| b.id() == rid && b.anchor().window().is_none()),
+        "closing the window dangles the rule in place, keeping the slot",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn jump_to_dangling_rule_errors_and_leaves_state_bit_identical() {
+    use crate::layout::bookmarks::BookmarkRule;
+
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let rid = layout.add_bookmark_rule(
+        BookmarkRule::new(Some("^nope$".parse().unwrap()), None).expect("valid rule"),
+    );
+    let before = bookmark_snapshot(&layout);
+    let err = layout
+        .jump_to_bookmark(rid.get())
+        .expect_err("a dangling target must error");
+    assert!(
+        matches!(err, DoActionError::BookmarkDangling { id } if id == rid.get()),
+        "dangling jump is a terminal BookmarkDangling",
+    );
+    assert_eq!(
+        bookmark_snapshot(&layout),
+        before,
+        "a dangling jump mutates nothing",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn rule_bookmark_survives_add_map_close_remap_under_invariants() {
+    use crate::layout::bookmarks::BookmarkRule;
+
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let rid = layout.add_bookmark_rule(
+        BookmarkRule::new(Some("^app$".parse().unwrap()), None).expect("valid rule"),
+    );
+    layout.verify_invariants();
+
+    // Map a matching window and attach.
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    assert_eq!(
+        layout.try_attach_bookmark_rules(&1, Some("app"), None),
+        Some(rid),
+    );
+    layout.verify_invariants();
+
+    // Close it → the rule dangles in place.
+    Op::CloseWindow(1).apply(&mut layout);
+    assert!(layout
+        .bookmarks
+        .list()
+        .iter()
+        .any(|b| b.id() == rid && b.anchor().window().is_none()));
+    layout.verify_invariants();
+
+    // Re-map a matching window → the same bookmark id re-attaches.
+    Op::AddWindow {
+        params: TestWindowParams::new(2),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&2);
+    assert_eq!(
+        layout.try_attach_bookmark_rules(&2, Some("app"), None),
+        Some(rid),
+    );
+    assert_eq!(layout.bookmarks.list()[0].anchor().window(), Some(&2));
+    layout.verify_invariants();
+}
+
+#[test]
+fn creation_time_sweep_attaches_first_un_bookmarked_match_in_iteration_order() {
+    use crate::layout::bookmarks::BookmarkRule;
+
+    // Two already-mapped matching windows before the rule exists, mirroring
+    // `Action::AddBookmarkRule`'s creation-time sweep in `src/input/mod.rs`:
+    // snapshot the current windows, then call `try_attach_bookmark_rules` per
+    // candidate in `windows_all()` order, stopping at the first success.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    Op::AddWindow {
+        params: TestWindowParams::new(2),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&2);
+
+    let rid = layout.add_bookmark_rule(
+        BookmarkRule::new(Some("^app$".parse().unwrap()), None).expect("valid rule"),
+    );
+
+    let candidates: Vec<usize> = layout.windows_all().map(|(_, w)| *w.id()).collect();
+    let mut attached_to = None;
+    for window in candidates {
+        if layout
+            .try_attach_bookmark_rules(&window, Some("app"), None)
+            .is_some()
+        {
+            attached_to = Some(window);
+            break;
+        }
+    }
+
+    assert_eq!(
+        attached_to,
+        Some(1),
+        "the sweep attaches to the first matching window in iteration order",
+    );
+    assert_eq!(
+        layout.bookmarks.list()[0].id(),
+        rid,
+        "the same rule bookmark id attached",
+    );
+    assert_eq!(
+        layout.bookmarks.list()[0].anchor().window(),
+        Some(&1),
+        "window 1 got the rule",
+    );
+
+    // The rule is no longer dangling, so a further sweep call for window 2
+    // does not re-attach it (one bookmark per window; only one rule).
+    assert_eq!(
+        layout.try_attach_bookmark_rules(&2, Some("app"), None),
+        None,
+        "the rule already attached to window 1; window 2 stays un-bookmarked",
+    );
+    assert_eq!(layout.bookmarks.list().len(), 1, "still a single bookmark");
     layout.verify_invariants();
 }
 

@@ -496,6 +496,7 @@ fn action_name(action: &Action) -> String {
             command.split_ascii_whitespace().next().unwrap_or("")
         ),
         Action::AddBookmark => String::from("Add Bookmark"),
+        Action::AddBookmarkRule { .. } => String::from("Add Bookmark Rule"),
         Action::RemoveBookmark(_) => String::from("Remove Bookmark"),
         Action::RemoveBookmarkById(_) => String::from("Remove Bookmark"),
         Action::WalkBookmarksForward => String::from("Walk Bookmarks Forward"),

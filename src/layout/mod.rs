@@ -63,8 +63,8 @@ pub use self::activity::{
     ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
 };
 use self::bookmarks::{
-    AddOutcome, AssignKeyError, BookmarkAnchor, BookmarkId, BookmarkJumpOutcome, BookmarkKey,
-    BookmarkName, Bookmarks, WalkDirection,
+    AddOutcome, AssignKeyError, BookmarkId, BookmarkJumpOutcome, BookmarkKey, BookmarkName,
+    BookmarkRule, Bookmarks, WalkDirection,
 };
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{ActivitySwitch, Monitor, SlideDirection, WorkspaceSwitch};
@@ -437,9 +437,10 @@ pub struct Layout<W: LayoutElement> {
     /// Curated window bookmarks the user walks with forward/backward.
     ///
     /// Cross-field guarantee, asserted in [`Self::verify_invariants`]: every
-    /// bookmark anchors a window present in `windows_all()` (prune-on-close
-    /// drops dead entries), ids are unique, and the walk cursor is in bounds
-    /// when `Some`.
+    /// *attached* bookmark (window anchor, or a rule anchor with a live
+    /// attachment) anchors a window present in `windows_all()` (prune-on-close
+    /// drops dead entries); a dangling rule anchor is exempt (no window to
+    /// check). Ids are unique, and the walk cursor is in bounds when `Some`.
     bookmarks: Bookmarks<W::Id>,
     /// Whether the layout should draw as active.
     ///
@@ -687,6 +688,14 @@ pub(crate) enum DoActionError {
     /// containing a control character). Terminal error — no state mutation.
     /// `name` is the offending raw string as given by the caller.
     BookmarkNameInvalid { name: String, reason: String },
+    /// A jump (`Action::JumpToBookmark` or a keybind-driven jump) targeted a
+    /// rule bookmark that currently has no attached window. Terminal error — no
+    /// state mutation.
+    BookmarkDangling { id: u64 },
+    /// `Action::AddBookmarkRule` was dispatched with a rule that fails to
+    /// compile (a bad regex) or names no fields at all. Terminal error — no
+    /// state mutation. `reason` describes the failure.
+    BookmarkRuleInvalid { reason: String },
 }
 
 impl From<ActivitySwitchBlock> for DoActionError {
@@ -785,6 +794,8 @@ impl fmt::Display for DoActionError {
             Self::BookmarkNameInvalid { name, reason } => {
                 write!(f, "invalid bookmark name: {name}: {reason}")
             }
+            Self::BookmarkDangling { id } => write!(f, "bookmark has no attached window: id={id}"),
+            Self::BookmarkRuleInvalid { reason } => write!(f, "invalid bookmark rule: {reason}"),
         }
     }
 }
@@ -6365,6 +6376,62 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Append a dangling rule-anchored bookmark, minting a fresh id. The rule
+    /// attaches to a matching window when one is mapped (or, at creation, via
+    /// the caller's own inventory sweep) — see [`Self::try_attach_bookmark_rules`].
+    pub(crate) fn add_bookmark_rule(&mut self, rule: BookmarkRule) -> BookmarkId {
+        self.bookmarks.add_rule(rule)
+    }
+
+    /// Try to attach a dangling rule bookmark to `window`, whose app-id and raw
+    /// (machine-tagged) title the caller supplies (the generic `LayoutElement`
+    /// exposes neither). Returns the attached bookmark id, or `None` if the
+    /// window is not on a live workspace, is already bookmarked, or no dangling
+    /// rule matched.
+    ///
+    /// The attach activity is resolved view-keyed: the active activity if the
+    /// window's workspace is tagged with it, otherwise the first of the
+    /// workspace's activities in the registry's declaration order.
+    pub(crate) fn try_attach_bookmark_rules(
+        &mut self,
+        window: &W::Id,
+        app_id: Option<&str>,
+        title: Option<&str>,
+    ) -> Option<BookmarkId> {
+        let Some(ws_id) = self.window_ws_and_activity_hint(window) else {
+            // The window has no live workspace hint (e.g. it's mid-move, or not
+            // yet resolvable). No rule can attach to it this round; a dangling
+            // rule stays dangling untraceably otherwise, so log the miss.
+            trace!("try_attach_bookmark_rules: no workspace hint for window, skipping");
+            return None;
+        };
+        let active = self.activities.active_id();
+        let ws = self
+            .workspaces
+            .get(&ws_id)
+            .expect("ws_id came from window_ws_and_activity_hint, which only returns ids of live workspaces in self.workspaces");
+        let activity = if ws.activities().contains(&active) {
+            active
+        } else {
+            self.activities
+                .iter()
+                .map(|a| a.id())
+                .find(|id| ws.activities().contains(id))
+                .expect("workspace.activities is a non-empty subset of live activities")
+        };
+        let attached =
+            self.bookmarks
+                .attach_first_matching(window.clone(), activity, app_id, title);
+        if let Some(id) = attached {
+            debug!(
+                "try_attach_bookmark_rules: attached bookmark {} to window in activity {:?}",
+                id.get(),
+                activity
+            );
+        }
+        attached
+    }
+
     /// The bookmark id anchoring the focused window, if any.
     ///
     /// Used to resolve the id at confirm-dialog *show* time (not confirm
@@ -6520,9 +6587,13 @@ impl<W: LayoutElement> Layout<W> {
             return Ok(BookmarkJumpOutcome::Noop);
         };
         // Copy the anchor out before mutating so the plan/gate see a stable read.
+        // `walk_target` skips dangling entries, so the target is attached.
         let (window, activity) = {
             let anchor = self.bookmarks.list()[target.index()].anchor();
-            (anchor.window().clone(), anchor.activity())
+            let (window, activity) = anchor
+                .attachment()
+                .expect("walk target is attached (walk_target skips dangling)");
+            (window.clone(), activity)
         };
         let plan = self.plan_bookmark_restore(&window, activity);
         if let BookmarkRestorePlan::Switch(_) = plan {
@@ -6543,6 +6614,8 @@ impl<W: LayoutElement> Layout<W> {
     ///
     /// Errors:
     /// - `Err(DoActionError::BookmarkNotFound { id })` — terminal; no state mutation.
+    /// - `Err(DoActionError::BookmarkDangling { id })` — terminal; the target is a rule bookmark
+    ///   with no currently-attached window. No state mutation.
     /// - `Err(DoActionError::ActivitySwitchBlocked(_))` — parkable; the IPC queue re-dispatches the
     ///   action in full. Because this gate fires before any mutation, the bookmark state remains
     ///   bit-identical, and re-dispatch sees the same state.
@@ -6554,7 +6627,10 @@ impl<W: LayoutElement> Layout<W> {
             let Some(bm) = self.bookmarks.get_by_raw(id) else {
                 return Err(DoActionError::BookmarkNotFound { id });
             };
-            (bm.anchor().window().clone(), bm.anchor().activity())
+            let Some((window, activity)) = bm.anchor().attachment() else {
+                return Err(DoActionError::BookmarkDangling { id });
+            };
+            (window.clone(), activity)
         };
         let plan = self.plan_bookmark_restore(&window, activity);
         if let BookmarkRestorePlan::Switch(_) = plan {
@@ -6668,7 +6744,10 @@ impl<W: LayoutElement> Layout<W> {
             let Some(bm) = self.bookmarks.get_by_raw(id) else {
                 return Err(DoActionError::BookmarkNotFound { id });
             };
-            (bm.anchor().window().clone(), bm.anchor().activity())
+            let Some((window, activity)) = bm.anchor().attachment() else {
+                return Err(DoActionError::BookmarkDangling { id });
+            };
+            (window.clone(), activity)
         };
         let order = self.options.bookmarks.order;
         let return_enabled = self.options.bookmarks.return_to_previous;
@@ -8597,18 +8676,21 @@ impl<W: LayoutElement> Layout<W> {
         // Activities-internal invariants: active/previous cursor validity + distinctness.
         self.activities.verify_invariants();
 
-        // Bookmark cross-field invariants. Every anchor window is present in
-        // `windows_all()` (prune-on-close guarantee), ids are unique, at most one
-        // bookmark anchors any window, no two bookmarks hold an equal key,
-        // `next_id` stays ahead of every listed id, and the walk cursor is in
-        // bounds when `Some`. Saved-activity liveness and list order are
-        // deliberately NOT asserted: dead activities are legal (the restore
-        // fallback covers them), and no order property is a standing invariant.
-        // Key uniqueness here is raw `Key` equality; normalized (`ModKey`-aware)
-        // collisions are excluded both at assign time (input dispatch, against
-        // config binds and sibling bookmarks) and on every config reload
-        // (`revalidate_bookmark_keys`, same two checks) — this generic-`Layout`
-        // code cannot itself re-check `ModKey` normalization.
+        // Bookmark cross-field invariants. Ids are unique, `next_id` stays ahead
+        // of every listed id, no two bookmarks hold an equal key, and the walk
+        // cursor is in bounds when `Some` — these apply to every entry. Window
+        // uniqueness and windows_all-presence (the prune-on-close guarantee)
+        // apply to `Window` anchors AND *attached* `Rule` anchors: an attached
+        // rule implies a live window, asserted here. Dangling rule anchors carry
+        // no window and are exempt from the window checks. Saved-activity
+        // liveness and list order are deliberately NOT asserted: dead activities
+        // are legal (the restore fallback covers them), and no order property is
+        // a standing invariant. Key uniqueness here is raw `Key` equality;
+        // normalized (`ModKey`-aware) collisions are excluded both at assign time
+        // (input dispatch, against config binds and sibling bookmarks) and on
+        // every config reload (`revalidate_bookmark_keys`, same two checks) —
+        // this generic-`Layout` code cannot itself re-check `ModKey`
+        // normalization.
         {
             let list = self.bookmarks.list();
             if let Some(cursor) = self.bookmarks.walk_cursor() {
@@ -8624,7 +8706,6 @@ impl<W: LayoutElement> Layout<W> {
             let mut seen_windows: Vec<&W::Id> = Vec::with_capacity(list.len());
             let mut seen_keys: Vec<jiji_config::Key> = Vec::with_capacity(list.len());
             for bookmark in list {
-                let BookmarkAnchor::Window { window, .. } = bookmark.anchor();
                 assert!(
                     seen_ids.insert(bookmark.id().get()),
                     "duplicate bookmark id {} in list",
@@ -8636,16 +8717,21 @@ impl<W: LayoutElement> Layout<W> {
                     bookmark.id().get(),
                     self.bookmarks.next_id(),
                 );
-                assert!(
-                    !seen_windows.contains(&window),
-                    "more than one bookmark anchors window {window:?}",
-                );
-                seen_windows.push(window);
-                assert!(
-                    self.windows_all().any(|(_, w)| w.id() == window),
-                    "bookmark references window {window:?} absent from windows_all \
-                     (prune-on-close guarantee broken)",
-                );
+                // A live window (a `Window` anchor, or an attached `Rule`) is
+                // subject to uniqueness and prune-on-close; a dangling rule
+                // anchor is exempt.
+                if let Some(window) = bookmark.anchor().window() {
+                    assert!(
+                        !seen_windows.contains(&window),
+                        "more than one bookmark anchors window {window:?}",
+                    );
+                    seen_windows.push(window);
+                    assert!(
+                        self.windows_all().any(|(_, w)| w.id() == window),
+                        "bookmark references window {window:?} absent from windows_all \
+                         (prune-on-close guarantee broken)",
+                    );
+                }
                 if let Some(key) = bookmark.key() {
                     let key = key.key();
                     assert!(
