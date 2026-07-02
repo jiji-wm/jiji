@@ -53,6 +53,7 @@ use crate::layout::{
     ActivateWindow, DoActionError, DoActionOutcome, LayoutElement, MoveWindowToPoolOutcome,
 };
 use crate::niri::{CastTarget, PointerVisibility, State};
+use crate::ui::bookmark_switcher::{ModeCommand, PressOutcome};
 use crate::ui::confirm_dialog::ConfirmRequest;
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
@@ -564,48 +565,76 @@ impl State {
                     return FilterResult::Intercept(None);
                 }
 
-                // While the bookmark switcher is open it owns every key press:
-                // a hint letter jumps, everything else dismisses. Releases fall
-                // through to the suppressed-keys logic below so they are
-                // swallowed too. The confirm dialog above wins if both somehow
-                // race.
+                // While the bookmark switcher is open (either the standalone
+                // hint overlay or leader mode) it owns every key press: a
+                // hint letter jumps, a command letter (mode only) runs its
+                // command, everything else dismisses. Releases fall through
+                // to the suppressed-keys logic below so they are swallowed
+                // too. The confirm dialog above wins if both somehow race.
+                //
+                // `raw` reports the base (layout-unshifted) keysym, so a
+                // shifted hint/command letter still matches its base sym;
+                // `chorded` (any modifier held) routes a shifted or
+                // otherwise chorded letter to a dismiss rather than a
+                // jump/command.
                 if this.niri.bookmark_switcher.is_open() && pressed {
-                    // A pure modifier keeps the overlay open (you might be
-                    // reaching for a chord, or just resting a finger). This
-                    // list is a superset of the accessibility
-                    // modifier-forwarding list above, additionally holding
-                    // for lock and level-shift keys.
-                    if raw.is_some_and(crate::ui::bookmark_switcher::is_modifier_keysym) {
-                        this.niri.suppressed_keys.insert(key_code);
-                        return FilterResult::Intercept(None);
+                    let chorded = !modifiers.is_empty();
+                    match this.niri.bookmark_switcher.press_outcome(raw, chorded) {
+                        PressOutcome::HoldOpen => {
+                            // A pure modifier keeps the overlay open (you
+                            // might be reaching for a chord, or just resting
+                            // a finger).
+                            this.niri.suppressed_keys.insert(key_code);
+                            return FilterResult::Intercept(None);
+                        }
+                        PressOutcome::Jump(id) => {
+                            // Reuse the full jump arm (post-jump bookkeeping
+                            // and all). Modality only suppresses input, not
+                            // client activity: if the hinted window has
+                            // closed since the overlay opened,
+                            // `Layout::remove_window` already pruned its
+                            // bookmark, so this id is stale and the jump
+                            // yields `Err(BookmarkNotFound)`, discarded here
+                            // (matching the MRU dispatch precedent) — a
+                            // user-visible no-op, though the overlay still
+                            // dismisses below. `press_outcome` breadcrumbs
+                            // which hint fired so that no-op is diagnosable.
+                            this.do_action(Action::JumpToBookmark(id), false);
+                            this.niri.bookmark_switcher.close();
+                            this.niri.queue_redraw_all();
+                        }
+                        PressOutcome::Command(cmd) => {
+                            // Close (and redraw) before dispatching: `Add`
+                            // (on a repress under the `remove` policy) and
+                            // `RemoveFocused` both show the confirm dialog,
+                            // which must not open behind a still-open
+                            // switcher — an open switcher would otherwise
+                            // keep intercepting keys ahead of the dialog,
+                            // eating its confirm/cancel keystrokes. There is
+                            // no headless harness for this input path (no
+                            // `TestInputBackend` in this codebase), so this
+                            // ordering isn't regression-pinned by a test —
+                            // reordering it would silently reintroduce a
+                            // switcher-eats-dialog-keys bug that manual
+                            // testing might not catch immediately.
+                            this.niri.bookmark_switcher.close();
+                            this.niri.queue_redraw_all();
+                            let action = match cmd {
+                                ModeCommand::Add => Action::AddBookmark,
+                                ModeCommand::RemoveFocused => Action::RemoveBookmark(false),
+                                ModeCommand::WalkBackward => Action::WalkBookmarksBackward,
+                                ModeCommand::WalkForward => Action::WalkBookmarksForward,
+                            };
+                            debug!(
+                                "bookmark mode: command {cmd:?} matched, dispatching {action:?}"
+                            );
+                            this.do_action(action, false);
+                        }
+                        PressOutcome::Dismiss => {
+                            this.niri.bookmark_switcher.close();
+                            this.niri.queue_redraw_all();
+                        }
                     }
-
-                    // `raw` reports the base (layout-unshifted) keysym, so a
-                    // shifted hint letter still matches its base sym. Only treat
-                    // a press as a hint when no modifiers are held; a shifted or
-                    // otherwise chorded letter is a dismiss, not a jump.
-                    let hint = if modifiers.is_empty() {
-                        raw.and_then(|raw| this.niri.bookmark_switcher.hint_for_keysym(raw))
-                    } else {
-                        None
-                    };
-                    if let Some(id) = hint {
-                        // Reuse the full jump arm (post-jump bookkeeping and
-                        // all). Modality only suppresses input, not client
-                        // activity: if the hinted window has closed since the
-                        // overlay opened, `Layout::remove_window` already
-                        // pruned its bookmark, so this id is stale and the
-                        // jump yields `Err(BookmarkNotFound)`, discarded here
-                        // (matching the MRU dispatch precedent) — a
-                        // user-visible no-op, though the overlay still
-                        // dismisses below. `hint_for_keysym` breadcrumbs which
-                        // hint fired so that no-op is diagnosable.
-                        this.do_action(Action::JumpToBookmark(id), false);
-                    }
-                    // Esc, an unmatched key, `raw == None`, and shifted/chorded
-                    // letters all land here: dismiss without jumping.
-                    this.niri.bookmark_switcher.close();
-                    this.niri.queue_redraw_all();
                     this.niri.suppressed_keys.insert(key_code);
                     return FilterResult::Intercept(None);
                 }
@@ -1664,10 +1693,14 @@ impl State {
                             "confirm dialog unavailable; not removing bookmark without confirmation"
                         );
                     }
+                } else {
+                    // No focused window, or the focused window has no
+                    // bookmark: a boundary no-op, same class as walking off
+                    // the end of the list. No dialog to show.
+                    debug!(
+                        "remove_bookmark: no focused window or focused window has no bookmark, no-op"
+                    );
                 }
-                // No focused window, or the focused window has no bookmark:
-                // a boundary no-op, same class as walking off the end of the
-                // list. No dialog to show.
             }
             Action::RemoveBookmarkById(id) => {
                 if let Err(err) = self.niri.layout.remove_bookmark(Some(id)) {
@@ -1846,6 +1879,25 @@ impl State {
                 // A `false` return means nothing was visible to tag (or every
                 // hint failed to rasterise); `open` logged the reason and left
                 // the overlay closed.
+            }
+            Action::EnterBookmarkMode => {
+                // Same modal-overlay refusal gate as `OpenBookmarkSwitcher`:
+                // only one modal overlay owns keyboard focus at a time.
+                if self.niri.confirm_dialog.is_open()
+                    || self.niri.is_locked()
+                    || self.niri.screenshot_ui.is_open()
+                    || self.niri.window_mru_ui.is_open()
+                {
+                    debug!("enter-bookmark-mode: another overlay is open, ignoring");
+                } else if self.niri.bookmark_switcher.open_mode(&self.niri.layout) {
+                    // The overlay does not self-redraw; opening (or the
+                    // idempotent re-open refresh) needs an explicit redraw.
+                    self.niri.queue_redraw_all();
+                }
+                // Unlike `OpenBookmarkSwitcher`, `open_mode` only refuses
+                // entry when the command sheet itself fails to rasterise —
+                // zero visible bookmarks still opens (the sheet is useful on
+                // its own).
             }
             Action::MoveWindowToWorkspace(reference, focus) => {
                 // Move-to-self short-circuit. Resolve source (the active

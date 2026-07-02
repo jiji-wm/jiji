@@ -506,6 +506,7 @@ fn action_name(action: &Action) -> String {
         Action::UnassignBookmarkKey(_) => String::from("Unassign Bookmark Key"),
         Action::JumpToBookmarkViaKey(_) => String::from("Jump to Bookmark"),
         Action::OpenBookmarkSwitcher => String::from("Open Bookmark Switcher"),
+        Action::EnterBookmarkMode => String::from("Enter Bookmark Mode"),
         _ => String::from("FIXME: Unknown"),
     }
 }

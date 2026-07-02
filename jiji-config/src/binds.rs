@@ -474,6 +474,7 @@ pub enum Action {
     #[knuffel(skip)]
     JumpToBookmarkViaKey(u64),
     OpenBookmarkSwitcher,
+    EnterBookmarkMode,
 }
 
 impl From<jiji_ipc::Action> for Action {
@@ -867,6 +868,7 @@ impl From<jiji_ipc::Action> for Action {
             jiji_ipc::Action::AssignBookmarkKey { id, key } => Self::AssignBookmarkKey { id, key },
             jiji_ipc::Action::UnassignBookmarkKey { id } => Self::UnassignBookmarkKey(id),
             jiji_ipc::Action::OpenBookmarkSwitcher {} => Self::OpenBookmarkSwitcher,
+            jiji_ipc::Action::EnterBookmarkMode {} => Self::EnterBookmarkMode,
             // jiji_ipc::Action is #[non_exhaustive]: any new variant added to
             // jiji_ipc without a matching arm here is a coding error that
             // surfaces as a panic when the unmapped action is dispatched.
@@ -1505,6 +1507,12 @@ mod tests {
     fn open_bookmark_switcher_parses() {
         let action = parse_action("open-bookmark-switcher");
         assert_eq!(action, Action::OpenBookmarkSwitcher);
+    }
+
+    #[test]
+    fn enter_bookmark_mode_parses() {
+        let action = parse_action("enter-bookmark-mode");
+        assert_eq!(action, Action::EnterBookmarkMode);
     }
 
     #[test]

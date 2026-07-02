@@ -1483,6 +1483,19 @@ pub enum Action {
     /// the caller, so pressing a stale hint is a user-visible no-op that
     /// still dismisses the overlay.
     OpenBookmarkSwitcher {},
+    /// Open the bookmark switcher overlay in leader/prefix mode: the same
+    /// per-window hints as [`Action::OpenBookmarkSwitcher`], plus a one-line
+    /// command sheet that reads a handful of command letters (add, remove
+    /// the focused bookmark, walk backward/forward) ahead of hint matching.
+    ///
+    /// Unlike `OpenBookmarkSwitcher`, this is not a no-op when no bookmarked
+    /// window is currently visible — the command sheet alone is useful on
+    /// its own (e.g. to add the first bookmark), so mode entry works with
+    /// zero hints. It is still a no-op when another modal overlay already
+    /// holds keyboard focus. Like `OpenBookmarkSwitcher`, this is a
+    /// single-shot open: one dispatch fully opens the mode, which then
+    /// dismisses itself on any non-hint, non-command key.
+    EnterBookmarkMode {},
 }
 
 // Used by #[serde(default)] on SwitchActivityPrevious.
