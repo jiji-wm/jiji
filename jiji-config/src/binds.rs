@@ -432,6 +432,22 @@ pub enum Action {
     UnsetWorkspaceSticky,
     #[knuffel(skip)]
     UnsetWorkspaceStickyByRef(#[knuffel(argument)] WorkspaceReference),
+    AddBookmark,
+    WalkBookmarksForward,
+    WalkBookmarksBackward,
+    // Runtime bookmark ids are meaningless in static config (they are not stable
+    // across restarts). `#[knuffel(skip)]` keeps these variants out of KDL parse
+    // while making them reachable from IPC dispatch and the `From<jiji_ipc::Action>`
+    // arm. Follows the `FocusWindow(u64)` precedent.
+    #[knuffel(skip)]
+    RemoveBookmark(Option<u64>),
+    #[knuffel(skip)]
+    JumpToBookmark(u64),
+    #[knuffel(skip)]
+    MoveBookmark {
+        id: u64,
+        pos: usize,
+    },
 }
 
 impl From<jiji_ipc::Action> for Action {
@@ -815,6 +831,12 @@ impl From<jiji_ipc::Action> for Action {
             jiji_ipc::Action::UnsetWorkspaceSticky {
                 workspace: Some(reference),
             } => Self::UnsetWorkspaceStickyByRef(WorkspaceReference::from(reference)),
+            jiji_ipc::Action::AddBookmark {} => Self::AddBookmark,
+            jiji_ipc::Action::RemoveBookmark { id } => Self::RemoveBookmark(id),
+            jiji_ipc::Action::WalkBookmarksForward {} => Self::WalkBookmarksForward,
+            jiji_ipc::Action::WalkBookmarksBackward {} => Self::WalkBookmarksBackward,
+            jiji_ipc::Action::JumpToBookmark { id } => Self::JumpToBookmark(id),
+            jiji_ipc::Action::MoveBookmark { id, pos } => Self::MoveBookmark { id, pos },
             // jiji_ipc::Action is #[non_exhaustive]: any new variant added to
             // jiji_ipc without a matching arm here is a coding error that
             // surfaces as a panic when the unmapped action is dispatched.
@@ -1362,5 +1384,23 @@ mod tests {
         // Bare `add-workspace-up;` must parse to `Action::AddWorkspaceUp`.
         let action = parse_action("add-workspace-up");
         assert_eq!(action, Action::AddWorkspaceUp);
+    }
+
+    #[test]
+    fn add_bookmark_parses() {
+        let action = parse_action("add-bookmark");
+        assert_eq!(action, Action::AddBookmark);
+    }
+
+    #[test]
+    fn walk_bookmarks_forward_parses() {
+        let action = parse_action("walk-bookmarks-forward");
+        assert_eq!(action, Action::WalkBookmarksForward);
+    }
+
+    #[test]
+    fn walk_bookmarks_backward_parses() {
+        let action = parse_action("walk-bookmarks-backward");
+        assert_eq!(action, Action::WalkBookmarksBackward);
     }
 }

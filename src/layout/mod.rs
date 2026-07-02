@@ -61,6 +61,7 @@ pub use self::activity::{
     SetWorkspaceActivitiesError, SetWorkspaceStickyError, SwitchActivityError,
     ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
 };
+use self::bookmarks::{BookmarkAnchor, BookmarkJumpOutcome, Bookmarks, WalkDirection};
 pub use self::monitor::MonitorRenderElement;
 use self::monitor::{ActivitySwitch, Monitor, SlideDirection, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
@@ -85,6 +86,7 @@ use crate::utils::{
 use crate::window::ResolvedWindowRules;
 
 pub mod activity;
+pub mod bookmarks;
 pub mod closing_window;
 pub mod floating;
 pub mod focus_ring;
@@ -428,6 +430,13 @@ pub struct Layout<W: LayoutElement> {
     /// are stamped with `self.activities.active_id()` at construction; this field owns the
     /// seed that makes the ctor contract realizable.
     activities: Activities,
+    /// Curated window bookmarks the user walks with forward/backward.
+    ///
+    /// Cross-field guarantee, asserted in [`Self::verify_invariants`]: every
+    /// bookmark anchors a window present in `windows_all()` (prune-on-close
+    /// drops dead entries), ids are unique, and the walk cursor is in bounds
+    /// when `Some`.
+    bookmarks: Bookmarks<W::Id>,
     /// Whether the layout should draw as active.
     ///
     /// This normally indicates that the layout has keyboard focus, but not always. E.g. when the
@@ -485,6 +494,19 @@ pub(crate) enum ActivitySwitchBlock {
     InteractiveMove,
     Dnd,
     WorkspaceSwitchGesture,
+}
+
+/// How a bookmark restore should reach its target window. Computed read-only by
+/// [`Layout::plan_bookmark_restore`] so the caller can gate on an activity-switch
+/// hard block before committing any bookmark state mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BookmarkRestorePlan {
+    /// Switch the active activity to this id, then focus the window. Only this
+    /// variant is subject to the activity-switch hard-block gate.
+    Switch(ActivityId),
+    /// Focus the window under the current activity — no switch needed (already
+    /// visible) or possible (mid-move / degenerate picker result). Never gated.
+    ActivateOnly,
 }
 
 impl fmt::Display for ActivitySwitchBlock {
@@ -639,6 +661,12 @@ pub(crate) enum DoActionError {
     /// always returns `Some` for `Index` and upstream clamps out-of-range
     /// indices, so the `Index` form keeps its clamp behaviour unchanged.
     FocusWorkspaceTargetUnknown { reference: String },
+    /// A remove/jump/move-bookmark action was dispatched with a bookmark id
+    /// absent from the list. Terminal error — the waiter is signalled
+    /// immediately, never parked. One variant serves all three actions: the
+    /// failure semantics and wire message are identical, and the caller knows
+    /// which verb it invoked.
+    BookmarkNotFound { id: u64 },
 }
 
 impl From<ActivitySwitchBlock> for DoActionError {
@@ -729,6 +757,7 @@ impl fmt::Display for DoActionError {
             Self::FocusWorkspaceTargetUnknown { reference } => {
                 write!(f, "workspace not found: {reference}")
             }
+            Self::BookmarkNotFound { id } => write!(f, "bookmark not found: id={id}"),
         }
     }
 }
@@ -1178,6 +1207,7 @@ impl<W: LayoutElement> Layout<W> {
             disconnected_workspace_ids: Vec::new(),
             workspaces: HashMap::new(),
             activities: Activities::new(Activity::new_runtime(DEFAULT_ACTIVITY_NAME.to_owned())),
+            bookmarks: Bookmarks::default(),
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,
@@ -1223,6 +1253,7 @@ impl<W: LayoutElement> Layout<W> {
             disconnected_workspace_ids: workspace_ids,
             workspaces,
             activities,
+            bookmarks: Bookmarks::default(),
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,
@@ -2186,7 +2217,23 @@ impl<W: LayoutElement> Layout<W> {
         Some(&self.monitors[mon_idx].output)
     }
 
+    /// Remove a window from the layout because it closed.
+    ///
+    /// Prunes the bookmark anchored to this window before delegating to
+    /// [`Self::remove_window_inner`]. The in-layout detach-for-relocation in
+    /// `interactive_move_update` calls the inner directly instead: pruning a
+    /// merely-relocating window (re-added immediately) would silently destroy
+    /// its bookmark every time it is dragged.
     pub fn remove_window(
+        &mut self,
+        window: &W::Id,
+        transaction: Transaction,
+    ) -> Option<RemovedTile<W>> {
+        self.bookmarks.prune_window(window);
+        self.remove_window_inner(window, transaction)
+    }
+
+    fn remove_window_inner(
         &mut self,
         window: &W::Id,
         transaction: Transaction,
@@ -6262,6 +6309,212 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Bookmark the focused window, or re-press its existing bookmark per the
+    /// configured policy.
+    ///
+    /// With no focused window (an empty active workspace) there is nothing to
+    /// point at, so this is a silent no-op — a keybind-driven interactive action
+    /// with no target, the same boundary class as walking off the end of the
+    /// list.
+    pub(crate) fn add_bookmark(&mut self) {
+        let Some(window) = self.focus() else {
+            return;
+        };
+        let window = window.id().clone();
+        let activity = self.activities.active_id();
+        let policy = self.options.bookmarks.repress;
+        // Fire-and-forget: whether this appended, moved, or was already at the
+        // front makes no difference to the caller, an unconditional keybind.
+        let _ = self.bookmarks.add_or_repress(window, activity, policy);
+    }
+
+    /// Remove a bookmark.
+    ///
+    /// `Some(id)`: an unknown id is a loud [`DoActionError::BookmarkNotFound`];
+    /// a known id is removed. `None`: the focused window's bookmark is removed,
+    /// or — with no focused window or no bookmark for it — a silent no-op. This
+    /// no-arg form performs the removal immediately; the confirmation gate is a
+    /// keybind/picker-path concern handled elsewhere.
+    pub(crate) fn remove_bookmark(&mut self, id: Option<u64>) -> Result<(), DoActionError> {
+        match id {
+            Some(raw) => {
+                let Some(bid) = self.bookmarks.id_for_raw(raw) else {
+                    return Err(DoActionError::BookmarkNotFound { id: raw });
+                };
+                self.bookmarks.remove_by_id(bid);
+                Ok(())
+            }
+            None => {
+                let Some(window) = self.focus() else {
+                    return Ok(());
+                };
+                let window = window.id().clone();
+                if let Some(bid) = self.bookmarks.id_for_window(&window) {
+                    self.bookmarks.remove_by_id(bid);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Compute how restoring the window bookmarked under `activity` would behave,
+    /// mirroring the tiered `Action::FocusWindow` dispatch arm from inside
+    /// generic `Layout<W>` code.
+    ///
+    /// Pure (read-only). Returns the plan; the caller gates and commits.
+    fn plan_bookmark_restore(&self, window: &W::Id, activity: ActivityId) -> BookmarkRestorePlan {
+        let active = self.active_activity_id();
+
+        // Mid-interactive-move: the window resolves via `windows_all()` but lives
+        // in no pool workspace. Restore is a best-effort no-op (activate-only),
+        // matching the `FocusWindow` arm's not-in-pool branch.
+        let Some(ws_id) = self.window_ws_and_activity_hint(window) else {
+            return BookmarkRestorePlan::ActivateOnly;
+        };
+
+        // Saved activity still live and the window's workspace reachable in it
+        // (view-keyed: a view of that activity contains `ws_id`). Use
+        // `WorkspaceView::ids().contains` rather than `ws.output_id()`, which is
+        // deliberately stale post-partial-disconnect.
+        let saved_reachable = self
+            .activities
+            .get(activity)
+            .is_some_and(|act| act.views().values().any(|v| v.ids().contains(&ws_id)));
+        if saved_reachable {
+            return if activity == active {
+                BookmarkRestorePlan::ActivateOnly
+            } else {
+                BookmarkRestorePlan::Switch(activity)
+            };
+        }
+
+        // Fallback, mirroring the `FocusWindow` arm. Visibility fast-path: the
+        // workspace is in some view of the *active* activity → activate-only.
+        let visible_in_active = self
+            .activities
+            .active()
+            .views()
+            .values()
+            .any(|v| v.ids().contains(&ws_id));
+        if visible_in_active {
+            return BookmarkRestorePlan::ActivateOnly;
+        }
+
+        // Hidden workspace, saved activity dead/unreachable: the picker decides.
+        // The hint is `None` by design — the `Mapped`-specific MRU plumb is
+        // unavailable in generic code, and the saved activity (the bookmark's own
+        // stronger context) is exactly what is dead or unreachable here.
+        let target = self.pick_activity_for_hidden_window(ws_id, None);
+        if target == active {
+            // Degenerate picker result (workspace tagged only with the active
+            // activity): nothing to switch into, activate-only.
+            BookmarkRestorePlan::ActivateOnly
+        } else {
+            BookmarkRestorePlan::Switch(target)
+        }
+    }
+
+    /// Execute a planned restore: switch the activity if the plan calls for it
+    /// (the caller must have cleared the hard-block gate first), then focus the
+    /// window. Returns whether an activity switch happened.
+    fn execute_bookmark_restore(&mut self, window: &W::Id, plan: BookmarkRestorePlan) -> bool {
+        let switched = match plan {
+            BookmarkRestorePlan::Switch(target) => {
+                self.switch_activity(target);
+                true
+            }
+            BookmarkRestorePlan::ActivateOnly => false,
+        };
+        self.activate_window(window);
+        switched
+    }
+
+    /// Walk one step through the bookmark list in `direction` and restore that
+    /// bookmark.
+    ///
+    /// Returns `Ok(BookmarkJumpOutcome::Noop)` for an empty list or a boundary
+    /// with wrap disabled (an expected interactive boundary, not an error).
+    /// Returns `Err(block)` if the restore would switch activities while a hard
+    /// block is in flight — and in that case the bookmark state is left
+    /// untouched, because the IPC server parks and re-dispatches the action in
+    /// full; mutating before the gate would double-step on re-dispatch. Walking
+    /// never changes list order.
+    pub(crate) fn walk_bookmarks(
+        &mut self,
+        direction: WalkDirection,
+    ) -> Result<BookmarkJumpOutcome, ActivitySwitchBlock> {
+        let focused = self.focus().map(|w| w.id().clone());
+        let wrap = self.options.bookmarks.walk_wrap;
+        let Some(target) = self
+            .bookmarks
+            .walk_target(direction, focused.as_ref(), wrap)
+        else {
+            return Ok(BookmarkJumpOutcome::Noop);
+        };
+        // Copy the anchor out before mutating so the plan/gate see a stable read.
+        let (window, activity) = {
+            let anchor = self.bookmarks.list()[target.index()].anchor();
+            (anchor.window().clone(), anchor.activity())
+        };
+        let plan = self.plan_bookmark_restore(&window, activity);
+        if let BookmarkRestorePlan::Switch(_) = plan {
+            if let Some(block) = self.is_activity_switch_hard_blocked() {
+                return Err(block);
+            }
+        }
+        self.bookmarks.commit_walk(target);
+        let switched_activity = self.execute_bookmark_restore(&window, plan);
+        Ok(BookmarkJumpOutcome::Jumped { switched_activity })
+    }
+
+    /// Jump directly to the bookmark with `id`, restoring the saved window and
+    /// activity.
+    ///
+    /// A jump is an activation (unlike a walk): under [`OrderMode::Mru`] it
+    /// promotes the bookmark to the front, and it clears the walk cursor.
+    ///
+    /// Errors:
+    /// - `Err(DoActionError::BookmarkNotFound { id })` — terminal; no state mutation.
+    /// - `Err(DoActionError::ActivitySwitchBlocked(_))` — parkable; the IPC queue re-dispatches the
+    ///   action in full. Because this gate fires before any mutation, the bookmark state remains
+    ///   bit-identical, and re-dispatch sees the same state.
+    pub(crate) fn jump_to_bookmark(
+        &mut self,
+        id: u64,
+    ) -> Result<BookmarkJumpOutcome, DoActionError> {
+        let (window, activity) = {
+            let Some(bm) = self.bookmarks.get_by_raw(id) else {
+                return Err(DoActionError::BookmarkNotFound { id });
+            };
+            (bm.anchor().window().clone(), bm.anchor().activity())
+        };
+        let plan = self.plan_bookmark_restore(&window, activity);
+        if let BookmarkRestorePlan::Switch(_) = plan {
+            if let Some(block) = self.is_activity_switch_hard_blocked() {
+                return Err(block.into());
+            }
+        }
+        let switched_activity = self.execute_bookmark_restore(&window, plan);
+        let order = self.options.bookmarks.order;
+        self.bookmarks.commit_jump(&window, order);
+        Ok(BookmarkJumpOutcome::Jumped { switched_activity })
+    }
+
+    /// Move the bookmark with `id` to `pos` (clamped to the last index).
+    ///
+    /// An unknown id is a loud [`DoActionError::BookmarkNotFound`]; a move to the
+    /// current position is a silent no-op.
+    pub(crate) fn move_bookmark(&mut self, id: u64, pos: usize) -> Result<(), DoActionError> {
+        let Some(bid) = self.bookmarks.id_for_raw(id) else {
+            return Err(DoActionError::BookmarkNotFound { id });
+        };
+        // `id` was just resolved via `id_for_raw` above, so `NotFound` cannot
+        // occur here; `Moved` vs. `SamePosition` makes no difference to the
+        // caller, an IPC-dispatched reposition.
+        let _ = self.bookmarks.move_to_pos(bid, pos);
+        Ok(())
+    }
+
     // Make every activity's `views` map cover every connected monitor. Required by the
     // per-activity bookend invariant: every (activity, connected-monitor) pair must hold a
     // `WorkspaceView` whose first and last workspaces satisfy the trailing-empty (and EWAF
@@ -8059,6 +8312,59 @@ impl<W: LayoutElement> Layout<W> {
 
         // Activities-internal invariants: active/previous cursor validity + distinctness.
         self.activities.verify_invariants();
+
+        // Bookmark cross-field invariants. Every anchor window is present in
+        // `windows_all()` (prune-on-close guarantee), ids are unique, at most one
+        // bookmark anchors any window, `next_id` stays ahead of every listed id,
+        // and the walk cursor is in bounds when `Some`. Saved-activity liveness
+        // and list order are deliberately NOT asserted: dead activities are legal
+        // (the restore fallback covers them), and no order property is a standing
+        // invariant.
+        {
+            let list = self.bookmarks.list();
+            if let Some(cursor) = self.bookmarks.walk_cursor() {
+                assert!(
+                    cursor < list.len(),
+                    "bookmark walk cursor {cursor} out of bounds (len {})",
+                    list.len(),
+                );
+            }
+            let mut seen_ids = HashSet::new();
+            // `W::Id` is only `PartialEq`, so window uniqueness uses a linear
+            // scan rather than a hash set — fine for a hand-curated list.
+            let mut seen_windows: Vec<&W::Id> = Vec::with_capacity(list.len());
+            for bookmark in list {
+                let BookmarkAnchor::Window { window, .. } = bookmark.anchor();
+                assert!(
+                    seen_ids.insert(bookmark.id().get()),
+                    "duplicate bookmark id {} in list",
+                    bookmark.id().get(),
+                );
+                assert!(
+                    bookmark.id().get() < self.bookmarks.next_id(),
+                    "bookmark id {} not below next_id {}",
+                    bookmark.id().get(),
+                    self.bookmarks.next_id(),
+                );
+                assert!(
+                    !seen_windows.contains(&window),
+                    "more than one bookmark anchors window {window:?}",
+                );
+                seen_windows.push(window);
+                assert!(
+                    self.windows_all().any(|(_, w)| w.id() == window),
+                    "bookmark references window {window:?} absent from windows_all \
+                     (prune-on-close guarantee broken)",
+                );
+            }
+            if let Some(target) = self.bookmarks.return_target() {
+                assert!(
+                    self.windows_all().any(|(_, w)| w.id() == target),
+                    "bookmark return target {target:?} absent from windows_all \
+                     (prune-on-close guarantee broken)",
+                );
+            }
+        }
 
         // Every Workspace.activities is a non-empty subset of the Activities keyset.
         // Walks the full pool unconditionally (before the zero-monitor / any-monitor split below);
@@ -10796,7 +11102,9 @@ impl<W: LayoutElement> Layout<W> {
                     width,
                     is_full_width,
                     is_floating,
-                } = self.remove_window(window, Transaction::new()).unwrap();
+                } = self
+                    .remove_window_inner(window, Transaction::new())
+                    .unwrap();
 
                 tile.stop_move_animations();
                 tile.interactive_move_offset = Point::from((0., 0.));
@@ -12020,6 +12328,16 @@ impl<W: LayoutElement> Layout<W> {
         let _span = tracy_client::span!("Layout::refresh");
 
         self.is_active = is_active;
+
+        // Observe the focus for the bookmark state machine before touching any
+        // monitor. Capture the focused id first (shared borrow) so the mutable
+        // borrow of `self.bookmarks` does not overlap. This heals a stale walk
+        // cursor and, under MRU order, promotes the focused bookmark to front;
+        // a walk's own focus change is filtered out synchronously at commit.
+        let focused = self.focus().map(|w| w.id().clone());
+        let bookmark_order = self.options.bookmarks.order;
+        self.bookmarks
+            .observe_focus(focused.as_ref(), bookmark_order);
 
         let mut ongoing_scrolling_dnd = self.dnd.is_some().then_some(true);
 

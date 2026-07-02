@@ -495,6 +495,12 @@ fn action_name(action: &Action) -> String {
             // Fairly crude but should get the job done in most cases.
             command.split_ascii_whitespace().next().unwrap_or("")
         ),
+        Action::AddBookmark => String::from("Add Bookmark"),
+        Action::RemoveBookmark(_) => String::from("Remove Bookmark"),
+        Action::WalkBookmarksForward => String::from("Walk Bookmarks Forward"),
+        Action::WalkBookmarksBackward => String::from("Walk Bookmarks Backward"),
+        Action::JumpToBookmark(_) => String::from("Jump to Bookmark"),
+        Action::MoveBookmark { .. } => String::from("Move Bookmark"),
         _ => String::from("FIXME: Unknown"),
     }
 }

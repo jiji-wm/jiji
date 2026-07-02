@@ -13,6 +13,7 @@ use smithay::output::{Mode, PhysicalProperties, Subpixel};
 use smithay::utils::Rectangle;
 
 use super::activity::ActivityId;
+use super::bookmarks::{BookmarkJumpOutcome, WalkDirection};
 use super::monitor::ActivityStrip;
 use super::*;
 
@@ -795,6 +796,17 @@ enum Op {
     UpdateConfig {
         #[proptest(strategy = "arbitrary_layout_part().prop_map(Box::new)")]
         layout_config: Box<jiji_config::LayoutPart>,
+    },
+    AddBookmark,
+    WalkBookmarksForward,
+    WalkBookmarksBackward,
+    RemoveBookmarkById(#[proptest(strategy = "0..6u64")] u64),
+    JumpToBookmarkById(#[proptest(strategy = "0..6u64")] u64),
+    MoveBookmark {
+        #[proptest(strategy = "0..6u64")]
+        id: u64,
+        #[proptest(strategy = "0..6usize")]
+        pos: usize,
     },
 }
 
@@ -1716,6 +1728,24 @@ impl Op {
                 };
 
                 layout.update_options(options);
+            }
+            Op::AddBookmark => {
+                layout.add_bookmark();
+            }
+            Op::WalkBookmarksForward => {
+                let _ = layout.walk_bookmarks(WalkDirection::Forward);
+            }
+            Op::WalkBookmarksBackward => {
+                let _ = layout.walk_bookmarks(WalkDirection::Backward);
+            }
+            Op::RemoveBookmarkById(id) => {
+                let _ = layout.remove_bookmark(Some(id));
+            }
+            Op::JumpToBookmarkById(id) => {
+                let _ = layout.jump_to_bookmark(id);
+            }
+            Op::MoveBookmark { id, pos } => {
+                let _ = layout.move_bookmark(id, pos);
             }
         }
     }
@@ -8644,6 +8674,11 @@ fn do_action_error_display_matches_wire_contract() {
         format!("{}", DoActionError::WindowNotFound { id: 42 }),
         "window not found: id=42",
     );
+    // Bookmark id-miss token — serves remove/jump/move.
+    assert_eq!(
+        format!("{}", DoActionError::BookmarkNotFound { id: 9 }),
+        "bookmark not found: id=9",
+    );
     // Cross-activity `move-window` target-unreachable token. Replaces the
     // pre-fix silent `Response::Handled` (false-success line in the CLI)
     // for unknown ids and disconnected-output targets.
@@ -8978,6 +9013,14 @@ fn do_action_error_envelope_matches_wire_contract() {
         (
             DoActionError::MoveWindowTargetUnreachable { ws_id: 0 },
             "workspace not reachable for move: id=0",
+        ),
+        (
+            DoActionError::BookmarkNotFound { id: 9 },
+            "bookmark not found: id=9",
+        ),
+        (
+            DoActionError::BookmarkNotFound { id: 0 },
+            "bookmark not found: id=0",
         ),
         (
             DoActionError::AddWorkspaceToActivity(AddWorkspaceToActivityError::ActivityNotFound),
@@ -23180,5 +23223,478 @@ fn narrow_with_animation_snaps_then_culls() {
         !layout.workspaces.contains_key(&shared_ws),
         "exclusive empty middle workspace must be culled even under an in-flight animation",
     );
+    layout.verify_invariants();
+}
+
+// --- Bookmark restore, gate, and prune integration ---
+
+/// Snapshot of the observable bookmark state: `(id, window)` per entry in order,
+/// the walk cursor, `next_id`, `return_target`, and the focus hook's
+/// `last_seen_focus`. Used to pin bit-identity across a hard-blocked action (the
+/// no-mutation-before-gate contract).
+#[allow(clippy::type_complexity)]
+fn bookmark_snapshot(
+    layout: &Layout<TestWindow>,
+) -> (
+    Vec<(u64, usize)>,
+    Option<usize>,
+    u64,
+    Option<usize>,
+    Option<usize>,
+) {
+    let bm = &layout.bookmarks;
+    (
+        bm.list()
+            .iter()
+            .map(|b| (b.id().get(), *b.anchor().window()))
+            .collect(),
+        bm.walk_cursor(),
+        bm.next_id(),
+        bm.return_target().copied(),
+        bm.last_seen_focus().copied(),
+    )
+}
+
+#[test]
+fn bookmark_restore_plan_tier1_switches_to_saved_activity() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let beta = layout.create_activity("beta".to_owned()).expect("create");
+    layout.switch_activity(beta);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+
+    // Switch back to alpha so beta is dormant; the window's workspace remains
+    // reachable in beta's dormant view.
+    layout.switch_activity(alpha);
+    assert_ne!(alpha, beta);
+
+    // The saved activity is live and holds the window's workspace, and it differs
+    // from the active activity → Switch(beta).
+    let plan = layout.plan_bookmark_restore(&1, beta);
+    assert_eq!(plan, BookmarkRestorePlan::Switch(beta));
+    layout.verify_invariants();
+}
+
+#[test]
+fn bookmark_jump_tier1_switches_and_focuses() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let beta = layout.create_activity("beta".to_owned()).expect("create");
+    layout.switch_activity(beta);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+    let id = layout.bookmarks.list()[0].id().get();
+
+    layout.switch_activity(alpha);
+    assert_eq!(layout.active_activity_id(), alpha);
+
+    let outcome = layout.jump_to_bookmark(id).expect("known bookmark");
+    assert_eq!(
+        outcome,
+        BookmarkJumpOutcome::Jumped {
+            switched_activity: true
+        },
+    );
+    assert_eq!(layout.active_activity_id(), beta, "jumped back into beta");
+    assert_eq!(
+        layout.focus().map(|w| *w.id()),
+        Some(1),
+        "window is focused after the jump",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn bookmark_restore_plan_tier2_dead_activity_leaves_anchor() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let beta = layout.create_activity("beta".to_owned()).expect("create");
+    layout.switch_activity(beta);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+
+    // Share the window's workspace with alpha so removing beta does not destroy it.
+    let ws_id = layout
+        .window_ws_and_activity_hint(&1)
+        .expect("window is on a live workspace");
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("share must succeed");
+
+    layout.switch_activity(alpha);
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("beta is removable (its only windowed workspace is shared)");
+
+    // Saved activity beta is now dead. The workspace is visible in the active
+    // (alpha) view, so the restore is activate-only — no switch.
+    let plan = layout.plan_bookmark_restore(&1, beta);
+    assert_eq!(plan, BookmarkRestorePlan::ActivateOnly);
+
+    // The anchor still records the (now dead) saved activity — restore does not
+    // rewrite it.
+    assert_eq!(
+        layout.bookmarks.list()[0].anchor().activity(),
+        beta,
+        "anchor keeps the saved activity even when it is dead",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn bookmark_restore_plan_tier3_dead_activity_hidden_falls_to_picker() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let beta = layout.create_activity("beta".to_owned()).expect("create");
+    let gamma = layout.create_activity("gamma".to_owned()).expect("create");
+    layout.switch_activity(beta);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+
+    // Share the window's workspace with gamma (not alpha) so removing beta
+    // does not destroy it, and the workspace stays out of alpha's view.
+    let ws_id = layout
+        .window_ws_and_activity_hint(&1)
+        .expect("window is on a live workspace");
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(beta.get()),
+                ActivityReferenceArg::Id(gamma.get()),
+            ],
+        )
+        .expect("share must succeed");
+
+    layout.switch_activity(alpha);
+    layout
+        .remove_activity(&ActivityReferenceArg::Id(beta.get()))
+        .expect("beta is removable (its only windowed workspace is shared)");
+
+    // Saved activity beta is now dead, and the workspace is not visible in
+    // alpha's (the active activity's) view — the hidden-window picker takes
+    // over. Only gamma still holds the workspace, so it wins.
+    let plan = layout.plan_bookmark_restore(&1, beta);
+    assert_eq!(plan, BookmarkRestorePlan::Switch(gamma));
+    layout.verify_invariants();
+}
+
+#[test]
+fn bookmark_restore_plan_mid_interactive_move_is_activate_only() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+
+    let output = layout
+        .outputs()
+        .find(|o| o.name() == "output1")
+        .cloned()
+        .expect("output1");
+    layout.interactive_move_begin(1, &output, Point::from((0., 0.)));
+
+    // Mid-move the window resolves via windows_all but has no workspace hint →
+    // best-effort activate-only.
+    let activity = layout.active_activity_id();
+    let plan = layout.plan_bookmark_restore(&1, activity);
+    assert_eq!(plan, BookmarkRestorePlan::ActivateOnly);
+    layout.interactive_move_end(&1);
+    layout.verify_invariants();
+}
+
+#[test]
+fn bookmark_jump_hard_blocked_leaves_state_bit_identical() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let beta = layout.create_activity("beta".to_owned()).expect("create");
+    layout.switch_activity(beta);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+    let id = layout.bookmarks.list()[0].id().get();
+
+    layout.switch_activity(alpha);
+    // Arm a drag-and-drop gesture: an activity-switch hard block.
+    let output = layout
+        .outputs()
+        .find(|o| o.name() == "output1")
+        .cloned()
+        .expect("output1");
+    layout.dnd_update(output, Point::from((0., 0.)));
+    assert!(
+        matches!(
+            layout.is_activity_switch_hard_blocked(),
+            Some(ActivitySwitchBlock::Dnd)
+        ),
+        "layout must be hard-blocked by DnD",
+    );
+
+    // The jump would switch into beta, but a hard block is in flight: it must
+    // return Err with ZERO mutation to the bookmark state (the IPC server parks
+    // and re-dispatches the full action; a pre-gate mutation would double-step).
+    let before = bookmark_snapshot(&layout);
+    let err = layout
+        .jump_to_bookmark(id)
+        .expect_err("must be hard-blocked");
+    assert!(matches!(err, DoActionError::ActivitySwitchBlocked(_)));
+    assert_eq!(bookmark_snapshot(&layout), before, "jump did not mutate");
+
+    // Same contract for a walk.
+    let before = bookmark_snapshot(&layout);
+    let err = layout
+        .walk_bookmarks(WalkDirection::Backward)
+        .expect_err("walk must be hard-blocked");
+    assert!(matches!(err, ActivitySwitchBlock::Dnd));
+    assert_eq!(bookmark_snapshot(&layout), before, "walk did not mutate");
+
+    layout.dnd_end();
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_window_prunes_bookmark_but_interactive_detach_does_not() {
+    // Closing a window prunes its bookmark.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+    assert_eq!(layout.bookmarks.list().len(), 1);
+
+    Op::CloseWindow(1).apply(&mut layout);
+    assert!(
+        layout.bookmarks.list().is_empty(),
+        "closing the window pruned its bookmark",
+    );
+
+    // A relocating interactive move must NOT prune the bookmark.
+    let mut layout = check_ops([Op::AddOutput(1), Op::AddOutput(2)]);
+    Op::AddWindow {
+        params: TestWindowParams::new(1),
+    }
+    .apply(&mut layout);
+    layout.activate_window(&1);
+    layout.add_bookmark();
+    assert_eq!(layout.bookmarks.list().len(), 1);
+
+    let output1 = layout
+        .outputs()
+        .find(|o| o.name() == "output1")
+        .cloned()
+        .expect("output1");
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .expect("output2");
+    layout.interactive_move_begin(1, &output1, Point::from((0., 0.)));
+    // Drive an update onto the other output: the window detaches for relocation
+    // via `remove_window_inner`, which must not prune.
+    layout.interactive_move_update(&1, Point::from((10., 10.)), output2, Point::from((0., 0.)));
+    assert_eq!(
+        layout.bookmarks.list().len(),
+        1,
+        "relocating drag must not discard the bookmark",
+    );
+    layout.interactive_move_end(&1);
+    layout.verify_invariants();
+}
+
+#[test]
+fn bookmark_jump_under_mru_promotes_to_front() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let options = Options {
+        bookmarks: jiji_config::BookmarksConfig {
+            order: jiji_config::OrderMode::Mru,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    layout.update_options(options);
+
+    for w in [1, 2, 3] {
+        Op::AddWindow {
+            params: TestWindowParams::new(w),
+        }
+        .apply(&mut layout);
+        layout.activate_window(&w);
+        layout.add_bookmark();
+    }
+    // Windows appended in order.
+    let windows: Vec<usize> = layout
+        .bookmarks
+        .list()
+        .iter()
+        .map(|b| *b.anchor().window())
+        .collect();
+    assert_eq!(windows, [1, 2, 3]);
+
+    // Jump to the first bookmark (window 1) — under MRU it promotes to front.
+    let id1 = layout.bookmarks.list()[0].id().get();
+    layout.jump_to_bookmark(id1).expect("known bookmark");
+    let windows: Vec<usize> = layout
+        .bookmarks
+        .list()
+        .iter()
+        .map(|b| *b.anchor().window())
+        .collect();
+    assert_eq!(windows, [1, 2, 3], "window 1 was already at front");
+
+    // Jump to window 3 (currently last) — it moves to front.
+    let id3 = layout
+        .bookmarks
+        .list()
+        .iter()
+        .find(|b| *b.anchor().window() == 3)
+        .expect("window 3 bookmarked")
+        .id()
+        .get();
+    layout.jump_to_bookmark(id3).expect("known bookmark");
+    let windows: Vec<usize> = layout
+        .bookmarks
+        .list()
+        .iter()
+        .map(|b| *b.anchor().window())
+        .collect();
+    assert_eq!(windows, [3, 1, 2], "jump promoted window 3 to front");
+    layout.verify_invariants();
+}
+
+#[test]
+fn bookmark_observe_focus_fires_through_layout_refresh() {
+    // Pins `observe_focus` at its only production call site — the top of
+    // `Layout::refresh` — rather than through `commit_jump`/`commit_walk`,
+    // which every other bookmark test drives instead.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let options = Options {
+        bookmarks: jiji_config::BookmarksConfig {
+            order: jiji_config::OrderMode::Mru,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    layout.update_options(options);
+
+    for w in [1, 2, 3] {
+        Op::AddWindow {
+            params: TestWindowParams::new(w),
+        }
+        .apply(&mut layout);
+        layout.activate_window(&w);
+        layout.add_bookmark();
+    }
+    let windows: Vec<usize> = layout
+        .bookmarks
+        .list()
+        .iter()
+        .map(|b| *b.anchor().window())
+        .collect();
+    assert_eq!(windows, [1, 2, 3], "appended in order, no promotion yet");
+
+    // Change focus to window 2 (currently mid-list) *without* going through
+    // jump/walk. Nothing observes this yet — the hook only fires on refresh.
+    layout.activate_window(&2);
+    let windows: Vec<usize> = layout
+        .bookmarks
+        .list()
+        .iter()
+        .map(|b| *b.anchor().window())
+        .collect();
+    assert_eq!(
+        windows,
+        [1, 2, 3],
+        "activating a window alone must not reorder bookmarks",
+    );
+
+    // Drive the production entry point.
+    Op::Refresh { is_active: true }.apply(&mut layout);
+    let windows: Vec<usize> = layout
+        .bookmarks
+        .list()
+        .iter()
+        .map(|b| *b.anchor().window())
+        .collect();
+    assert_eq!(
+        windows,
+        [2, 1, 3],
+        "refresh's observe_focus hook promoted the newly-focused window under MRU",
+    );
+
+    // A walk parks the cursor; refocusing away from the landed bookmark
+    // (again bypassing jump/walk) must heal the stale cursor on the next
+    // refresh — the same hook, its other documented effect.
+    layout
+        .walk_bookmarks(WalkDirection::Forward)
+        .expect("not hard-blocked");
+    assert!(
+        layout.bookmarks.walk_cursor().is_some(),
+        "walk parked the cursor",
+    );
+    layout.activate_window(&3);
+    Op::Refresh { is_active: true }.apply(&mut layout);
+    assert!(
+        layout.bookmarks.walk_cursor().is_none(),
+        "refresh's observe_focus hook healed the stale walk cursor",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn move_bookmark_reorders_and_unknown_id_is_loud() {
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    for w in [1, 2, 3] {
+        Op::AddWindow {
+            params: TestWindowParams::new(w),
+        }
+        .apply(&mut layout);
+        layout.activate_window(&w);
+        layout.add_bookmark();
+    }
+    let id1 = layout.bookmarks.list()[0].id().get();
+    // Move window 1 to the last position.
+    layout.move_bookmark(id1, 99).expect("known id, clamped");
+    let windows: Vec<usize> = layout
+        .bookmarks
+        .list()
+        .iter()
+        .map(|b| *b.anchor().window())
+        .collect();
+    assert_eq!(windows, [2, 3, 1], "move clamps to last index");
+
+    // Unknown id is a loud error.
+    let err = layout
+        .move_bookmark(9999, 0)
+        .expect_err("unknown id must be loud");
+    assert!(matches!(err, DoActionError::BookmarkNotFound { id: 9999 }));
     layout.verify_invariants();
 }

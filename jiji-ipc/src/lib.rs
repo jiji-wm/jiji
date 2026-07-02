@@ -1302,6 +1302,67 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(value_name = "ID-OR-INDEX-OR-NAME"))]
         workspace: Option<WorkspaceReferenceArg>,
     },
+    // --- Bookmark cohort ---
+    //
+    // These actions operate on the curated bookmark list: an ordered, uncapped
+    // set of windows (one bookmark per window) the user pins for quick return.
+    // Walking steps through the list; jumping targets a bookmark by id. None of
+    // these actions belong to the activity-action group above.
+    /// Bookmark the focused window, or re-press its existing bookmark per the
+    /// configured `bookmarks { repress }` policy.
+    ///
+    /// With no focused window this is a silent no-op — an interactive boundary,
+    /// not an error. `jiji msg action` returns `Response::Handled` either way.
+    AddBookmark {},
+    /// Remove a bookmark.
+    ///
+    /// With `--id`, removes that bookmark, or returns
+    /// `Err("bookmark not found: id=<id>")` (terminal) when the id is unknown.
+    /// Without `--id`, removes the focused window's bookmark, or is a silent
+    /// no-op when nothing matches.
+    RemoveBookmark {
+        /// Id of the bookmark to remove. Defaults to the focused window's
+        /// bookmark.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
+    /// Walk one step forward through the bookmark list and restore that bookmark.
+    ///
+    /// A silent no-op for an empty list or at the end with wrap disabled.
+    /// Returns `Err("activity switch blocked: <reason>")` while a hard block
+    /// (interactive move, DnD, workspace-switch gesture) is in flight AND the
+    /// target is in a different activity; a same-activity jump is never gated.
+    /// IPC callers are queued and re-dispatched on drain.
+    WalkBookmarksForward {},
+    /// Walk one step backward through the bookmark list and restore that
+    /// bookmark. Boundary, hard-block, and re-dispatch semantics match
+    /// `WalkBookmarksForward`.
+    WalkBookmarksBackward {},
+    /// Jump directly to a bookmark by id, restoring the saved window and
+    /// activity.
+    ///
+    /// Under MRU order the bookmark is promoted to the front. Returns
+    /// `Err("bookmark not found: id=<id>")` (terminal) when the id is unknown.
+    /// Returns `Err("activity switch blocked: <reason>")` while a hard block is
+    /// in flight AND the target is in a different activity.
+    JumpToBookmark {
+        /// Id of the bookmark to jump to.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+    },
+    /// Move a bookmark to a new position in the list (0-based, clamped to the
+    /// last index).
+    ///
+    /// Returns `Err("bookmark not found: id=<id>")` (terminal) when the id is
+    /// unknown; a move to the current position is a silent no-op.
+    MoveBookmark {
+        /// Id of the bookmark to move.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+        /// Target 0-based position, clamped to the last index.
+        #[cfg_attr(feature = "clap", arg(long))]
+        pos: usize,
+    },
 }
 
 // Used by #[serde(default)] on SwitchActivityPrevious.

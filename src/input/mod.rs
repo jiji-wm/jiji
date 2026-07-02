@@ -47,6 +47,7 @@ use self::resize_grab::ResizeGrab;
 use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
+use crate::layout::bookmarks::{BookmarkJumpOutcome, WalkDirection};
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{
     ActivateWindow, DoActionError, DoActionOutcome, LayoutElement, MoveWindowToPoolOutcome,
@@ -1543,6 +1544,70 @@ impl State {
                 self.niri.layer_shell_on_demand_focus = None;
                 // FIXME: granular
                 self.niri.queue_redraw_all();
+            }
+            Action::AddBookmark => {
+                self.niri.layout.add_bookmark();
+            }
+            Action::RemoveBookmark(id) => {
+                if let Err(err) = self.niri.layout.remove_bookmark(id) {
+                    debug!("remove_bookmark: {err:?}, propagating");
+                    return Err(err);
+                }
+            }
+            Action::WalkBookmarksForward => {
+                let prev_output = self.niri.layout.active_output().cloned();
+                match self.niri.layout.walk_bookmarks(WalkDirection::Forward) {
+                    Err(block) => {
+                        debug!("walk_bookmarks(forward): hard-blocked by {block:?}, parking for re-dispatch");
+                        return Err(block.into());
+                    }
+                    Ok(BookmarkJumpOutcome::Noop) => {
+                        debug!("walk_bookmarks(forward): boundary or empty list, no-op");
+                    }
+                    Ok(BookmarkJumpOutcome::Jumped { switched_activity }) => {
+                        self.post_jump_bookkeeping(prev_output, switched_activity);
+                    }
+                }
+            }
+            Action::WalkBookmarksBackward => {
+                let prev_output = self.niri.layout.active_output().cloned();
+                match self.niri.layout.walk_bookmarks(WalkDirection::Backward) {
+                    Err(block) => {
+                        debug!("walk_bookmarks(backward): hard-blocked by {block:?}, parking for re-dispatch");
+                        return Err(block.into());
+                    }
+                    Ok(BookmarkJumpOutcome::Noop) => {
+                        debug!("walk_bookmarks(backward): boundary or empty list, no-op");
+                    }
+                    Ok(BookmarkJumpOutcome::Jumped { switched_activity }) => {
+                        self.post_jump_bookkeeping(prev_output, switched_activity);
+                    }
+                }
+            }
+            Action::JumpToBookmark(id) => {
+                let prev_output = self.niri.layout.active_output().cloned();
+                match self.niri.layout.jump_to_bookmark(id) {
+                    Err(err) => {
+                        debug!("jump_to_bookmark: failed ({err:?}), propagating");
+                        return Err(err);
+                    }
+                    Ok(BookmarkJumpOutcome::Noop) => {
+                        // Structurally unreachable for a known bookmark
+                        // (rustdoc-level invariant on Layout::jump_to_bookmark),
+                        // but not panic-worthy: a breadcrumb keeps the path loud
+                        // without turning a future benign refactor into a crash.
+                        debug!("jump_to_bookmark: Noop outcome (unexpected for a known bookmark)");
+                    }
+                    Ok(BookmarkJumpOutcome::Jumped { switched_activity }) => {
+                        self.post_jump_bookkeeping(prev_output, switched_activity);
+                    }
+                }
+            }
+            Action::MoveBookmark { id, pos } => {
+                if let Err(err) = self.niri.layout.move_bookmark(id, pos) {
+                    debug!("move_bookmark: {err:?}, propagating");
+                    return Err(err);
+                }
             }
             Action::MoveWindowToWorkspace(reference, focus) => {
                 // Move-to-self short-circuit. Resolve source (the active
@@ -3532,6 +3597,36 @@ impl State {
             }
         }
         Ok(())
+    }
+
+    /// Perform the post-restore cursor-warp, redraw, and inhibitor bookkeeping
+    /// the bookmark walk/jump dispatch arms need after a successful jump.
+    ///
+    /// `prev_output` is the active output *before* the layout mutation. When the
+    /// jump crossed a monitor boundary, the cursor is warped to the new output;
+    /// otherwise it is warped to the focused window per the standard
+    /// `maybe_warp_cursor_to_focus` policy. The layer-shell on-demand focus slot
+    /// is cleared unconditionally (any jump terminates an on-demand focus
+    /// session), and `switched_activity` gates a reconcile of the
+    /// keyboard-shortcut inhibitors to the new activity's visibility set.
+    fn post_jump_bookkeeping(&mut self, prev_output: Option<Output>, switched_activity: bool) {
+        let new_output = self.niri.layout.active_output().cloned();
+        if new_output != prev_output {
+            if !self.maybe_warp_cursor_to_focus_centered() {
+                self.move_cursor_to_output(
+                    &new_output.expect("a jump landed on a window, so an output is active"),
+                );
+            }
+        } else {
+            self.maybe_warp_cursor_to_focus();
+        }
+        self.niri.layer_shell_on_demand_focus = None;
+        // FIXME: granular
+        self.niri.queue_redraw_all();
+        if switched_activity {
+            self.niri
+                .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
+        }
     }
 
     fn on_pointer_motion<I: InputBackend>(&mut self, event: I::PointerMotionEvent) {
