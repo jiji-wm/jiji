@@ -964,6 +964,9 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
     }
 
     /// Read accessor for the current walk cursor. `None` = not walking.
+    /// Only consumed by `verify_invariants` (debug) and tests — release builds
+    /// compile out both, so gate to match or `dead_code` fires.
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn walk_cursor(&self) -> Option<usize> {
         self.walk_cursor
     }
@@ -986,7 +989,10 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
         self.last_seen_focus.as_ref()
     }
 
-    /// Read accessor for `next_id`, for the monotonicity invariant.
+    /// Read accessor for `next_id`, for the monotonicity invariant. Only
+    /// consumed by `verify_invariants` (debug) and tests; gate to match so
+    /// release builds don't see it as dead.
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn next_id(&self) -> u64 {
         self.next_id
     }
