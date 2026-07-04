@@ -1512,6 +1512,30 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(long))]
         id: u64,
     },
+    /// Open the interactive key-capture prompt for a bookmark: the next key
+    /// or chord pressed becomes its dynamic keybind, subject to the same
+    /// validation as `AssignBookmarkKey` (a keyboard trigger, at least one
+    /// modifier, no collision with a config bind, a recent-windows bind, or
+    /// another bookmark's key).
+    ///
+    /// Returns `Err("bookmark not found: id=<id>")` (terminal) when the id is
+    /// unknown. A dangling rule anchor is a legal target — keys follow the
+    /// bookmark, not its current window.
+    ///
+    /// The `Ok` reply acknowledges the capture prompt *opening*, not the
+    /// eventual key assignment: that outcome (accepted, or rejected for
+    /// needing a modifier or colliding with an existing bind) is conveyed
+    /// on-screen by the prompt itself, never by a further IPC reply. When
+    /// another modal overlay already holds keyboard focus, the request is
+    /// still acknowledged `Ok` but the prompt does not open — the same
+    /// silent gate `OpenBookmarkSwitcher`/`EnterBookmarkMode` applies. The
+    /// prompt can also fail to open when it fails to rasterise; that path
+    /// warns internally and likewise still acknowledges `Ok`.
+    CaptureBookmarkKey {
+        /// Id of the bookmark to capture a key for.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+    },
     /// Set or clear a bookmark's display name.
     ///
     /// Omitting `--name` clears the name. Leading/trailing whitespace is

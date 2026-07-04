@@ -526,6 +526,7 @@ fn action_name(action: &Action) -> String {
         Action::MoveBookmark { .. } => String::from("Move Bookmark"),
         Action::AssignBookmarkKey { .. } => String::from("Assign Bookmark Key"),
         Action::UnassignBookmarkKey(_) => String::from("Unassign Bookmark Key"),
+        Action::CaptureBookmarkKey { .. } => String::from("Capture Bookmark Key"),
         Action::RenameBookmark { .. } => String::from("Rename Bookmark"),
         Action::JumpToBookmarkViaKey(_) => String::from("Jump to Bookmark"),
         Action::OpenBookmarkSwitcher => String::from("Open Bookmark Switcher"),

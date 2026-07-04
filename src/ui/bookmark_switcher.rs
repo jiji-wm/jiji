@@ -79,6 +79,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::mem;
 
+use jiji_config::{Key, Modifiers, Trigger};
 use ordered_float::NotNan;
 use pangocairo::cairo::{self, ImageSurface};
 use pangocairo::pango::FontDescription;
@@ -367,6 +368,25 @@ enum State<Id> {
         /// Scale-1 rasterised query line, re-rendered on every edit; the
         /// fail-safe fallback for [`BookmarkSwitcher::render_output`]'s
         /// per-frame at-scale render.
+        line: MemoryBuffer,
+    },
+    /// Interactive key capture: the next key or chord pressed becomes
+    /// `bookmark_id`'s dynamic keybind (see
+    /// [`jiji_ipc::Action::CaptureBookmarkKey`]). Draws no hints — just the
+    /// one-line prompt, carried by value like `Mode.sheet`/`Search.line`, so
+    /// "open but nothing drawable" is unrepresentable.
+    CaptureKey {
+        bookmark_id: u64,
+        /// The bookmark's display name, clean window title, or rule
+        /// description, resolved once at open (never re-derived per frame).
+        label: String,
+        /// The last validator rejection reason, if any, shown alongside
+        /// `label` until the next attempt (or a fresh rejection) replaces
+        /// it.
+        status: Option<String>,
+        /// Scale-1 rasterised current prompt line; re-rendered on every
+        /// rejection. The fail-safe fallback for
+        /// [`BookmarkSwitcher::render_output`]'s per-frame at-scale render.
         line: MemoryBuffer,
     },
 }
@@ -661,6 +681,73 @@ impl BookmarkSwitcher {
         true
     }
 
+    /// Opens interactive key capture for `bookmark_id`, prompting with
+    /// `label` (the bookmark's display name, clean window title, or rule
+    /// description — resolved by the caller). Returns `true` if it opened.
+    ///
+    /// Rasterises the initial (no-status) prompt line at scale 1 *before*
+    /// touching `self.state`, the same command-sheet gate [`Self::open_mode`]
+    /// applies: on rasterise failure this warns and returns `false`, leaving
+    /// the overlay in whatever state it was in rather than stranding it
+    /// mid-transition.
+    ///
+    /// Re-invoking while any switcher state is already open replaces it —
+    /// the same last-action-wins semantics as [`Self::open`]/
+    /// [`Self::open_mode`].
+    pub fn open_capture(&mut self, bookmark_id: u64, label: String) -> bool {
+        let text = capture_line_text(&label, None);
+        let line = match render_text(&text, 1.) {
+            Ok(line) => line,
+            Err(err) => {
+                warn!("bookmark key capture: prompt failed to rasterise: {err:?}, not opening");
+                return false;
+            }
+        };
+
+        self.state = State::CaptureKey {
+            bookmark_id,
+            label,
+            status: None,
+            line,
+        };
+        self.warned_empty_frame.set(false);
+        true
+    }
+
+    /// Records a validator rejection `reason` and re-renders the scale-1
+    /// prompt line so the overlay explains why the last key press was
+    /// refused. The overlay stays open for another attempt.
+    ///
+    /// On rasterise failure, keeps the previous `line` (still visible) and
+    /// logs at `debug!` — the [`Self::push_query_char`] precedent — never a
+    /// silent dismiss mid-error.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the overlay is not in [`State::CaptureKey`]; callers only
+    /// reach this from the `PressOutcome::KeyCandidate` validation path,
+    /// which is itself only reachable while capture is open.
+    pub fn capture_rejected(&mut self, reason: &str) {
+        let State::CaptureKey {
+            label,
+            status,
+            line,
+            ..
+        } = &mut self.state
+        else {
+            unreachable!("capture_rejected is only routed from State::CaptureKey")
+        };
+
+        *status = Some(reason.to_owned());
+        let text = capture_line_text(label, status.as_deref());
+        match render_text(&text, 1.) {
+            Ok(new_line) => *line = new_line,
+            Err(err) => debug!(
+                "bookmark key capture: prompt failed to rasterise: {err:?}, keeping previous line"
+            ),
+        }
+    }
+
     /// Routes an incoming key press while the overlay is open. Callers must
     /// gate on [`Self::is_open`] first; `Closed` panics rather than
     /// returning a meaningless [`PressOutcome::Dismiss`], because a caller
@@ -671,7 +758,13 @@ impl BookmarkSwitcher {
     /// trims it) mutate the overlay in place. The pure routing decision is
     /// made by [`press_outcome_core`]; this wrapper applies the state-changing
     /// ones and reports [`PressOutcome::SearchUpdated`] so the caller redraws.
-    pub fn press_outcome(&mut self, raw: Option<Keysym>, chorded: bool) -> PressOutcome {
+    ///
+    /// `modifiers` is the caller's own live keyboard-state read (the exact
+    /// value [`crate::input::modifiers_from_state`] just computed) — passed
+    /// straight through to [`press_outcome_core`], and, for
+    /// [`CoreOutcome::Candidate`] below, straight into
+    /// [`PressOutcome::KeyCandidate`]'s `key`, never re-derived.
+    pub fn press_outcome(&mut self, raw: Option<Keysym>, modifiers: Modifiers) -> PressOutcome {
         let core = match &self.state {
             State::Closed => {
                 unreachable!("press_outcome requires is_open(); caller must gate on it")
@@ -681,7 +774,7 @@ impl BookmarkSwitcher {
                     hints: hints.as_slice(),
                 },
                 raw,
-                chorded,
+                modifiers,
             ),
             State::Mode { hints, keymap, .. } => press_outcome_core(
                 RoutingContext::Mode {
@@ -689,10 +782,13 @@ impl BookmarkSwitcher {
                     keymap,
                 },
                 raw,
-                chorded,
+                modifiers,
             ),
             State::Search { entries, query, .. } => {
-                press_outcome_core(RoutingContext::Search { entries, query }, raw, chorded)
+                press_outcome_core(RoutingContext::Search { entries, query }, raw, modifiers)
+            }
+            State::CaptureKey { .. } => {
+                press_outcome_core(RoutingContext::<Window>::Capture, raw, modifiers)
             }
         };
 
@@ -720,6 +816,22 @@ impl BookmarkSwitcher {
             CoreOutcome::EnterSearch => self.enter_search(),
             CoreOutcome::Push(ch) => self.push_query_char(ch),
             CoreOutcome::Pop => self.pop_query_char(),
+            CoreOutcome::Candidate => {
+                let State::CaptureKey { bookmark_id, .. } = &self.state else {
+                    unreachable!("CoreOutcome::Candidate is only routed from State::CaptureKey")
+                };
+                let raw = raw.expect(
+                    "RoutingContext::Capture holds open on raw == None, so Candidate implies a \
+                     keysym is present",
+                );
+                PressOutcome::KeyCandidate {
+                    bookmark_id: *bookmark_id,
+                    key: Key {
+                        trigger: Trigger::Keysym(raw),
+                        modifiers,
+                    },
+                }
+            }
         }
     }
 
@@ -856,6 +968,10 @@ impl BookmarkSwitcher {
                 );
                 hints = open_hints.as_slice();
             }
+            State::CaptureKey { .. } => {
+                hints = &[];
+                matched = None;
+            }
         }
         let _span = tracy_client::span!("BookmarkSwitcher::render_output");
 
@@ -981,7 +1097,31 @@ impl BookmarkSwitcher {
                         line.clone()
                     }
                 };
-                if self.render_search_line(&buffer, output, renderer, scale, push) {
+                if self.render_bottom_center_line(&buffer, output, renderer, scale, push) {
+                    drew_any = true;
+                }
+            }
+            State::CaptureKey {
+                label,
+                status,
+                line,
+                ..
+            } => {
+                // Resolve the prompt buffer here (fresh at the output scale,
+                // falling back to the carried scale-1 `line`), the same
+                // shape as the `Search` arm above.
+                let text = capture_line_text(label, status.as_deref());
+                let buffer = match render_text(&text, scale) {
+                    Ok(buffer) => buffer,
+                    Err(err) => {
+                        debug!(
+                            "bookmark key capture prompt failed to rasterise at scale {scale}: \
+                             {err:?}"
+                        );
+                        line.clone()
+                    }
+                };
+                if self.render_bottom_center_line(&buffer, output, renderer, scale, push) {
                     drew_any = true;
                 }
             }
@@ -1000,11 +1140,11 @@ impl BookmarkSwitcher {
         // per-output calls this method doesn't otherwise need. In `Mode`,
         // the sheet drawing counts too — it draws whenever its upload
         // succeeds, so it should not fire alongside a drawn sheet. In
-        // `Search`, the rendered query line itself counts toward `drew_any`
-        // (see the `render_search_line` call above), so this breadcrumb
-        // fires only when even the query line failed to upload — the
-        // any-key-dismiss self-heal this comment describes does not apply to
-        // `Search`, where `Esc` is the only guaranteed exit.
+        // `Search` and `CaptureKey`, the rendered line itself counts toward
+        // `drew_any` (see the `render_bottom_center_line` calls above), so
+        // this breadcrumb fires only when even that line failed to upload —
+        // the any-key-dismiss self-heal this comment describes does not
+        // apply to either state, where `Esc` is the only guaranteed exit.
         if !drew_any && !self.warned_empty_frame.replace(true) {
             debug!(
                 "bookmark switcher: open but drew no hints on output {} this frame",
@@ -1084,19 +1224,20 @@ impl BookmarkSwitcher {
         true
     }
 
-    /// Draws the incremental-search query line `buffer`, anchored bottom-center
-    /// where the command sheet sits in [`State::Mode`]. Returns whether
-    /// anything was pushed.
+    /// Draws a one-line text buffer anchored bottom-center: the incremental-
+    /// search query line in [`State::Search`] or the key-capture prompt in
+    /// [`State::CaptureKey`]. Returns whether anything was pushed.
     ///
-    /// Unlike hints and the sheet, this line has **no** per-scale cache: its
-    /// text changes on every keystroke, so a `(query, scale)` cache would
-    /// explode in key space for no reuse. The caller rasterises it fresh at the
-    /// output scale each frame (a per-frame upload is already this module's
-    /// norm), falling back to the scale-1 buffer carried by [`State::Search`]
-    /// whenever the at-scale rasterise fails; this helper takes no cache borrow
-    /// at all, keeping it clear of the `RefCell` re-borrow hazard the
-    /// letter/sheet paths guard against.
-    fn render_search_line<R: NiriRenderer>(
+    /// Unlike hints and the sheet, neither caller keeps a per-scale cache for
+    /// this line: its text changes on every keystroke (query) or rejection
+    /// (capture status), so a cache keyed on the text would explode in key
+    /// space for no reuse. Each caller rasterises fresh at the output scale
+    /// every frame (a per-frame upload is already this module's norm),
+    /// falling back to its own carried scale-1 buffer whenever the at-scale
+    /// rasterise fails; this helper takes no cache borrow at all, keeping it
+    /// clear of the `RefCell` re-borrow hazard the letter/sheet paths guard
+    /// against.
+    fn render_bottom_center_line<R: NiriRenderer>(
         &self,
         buffer: &MemoryBuffer,
         output: &Output,
@@ -1113,7 +1254,7 @@ impl BookmarkSwitcher {
 
         let Ok(texture) = TextureBuffer::from_memory_buffer(renderer.as_gles_renderer(), buffer)
         else {
-            debug!("bookmark search line failed to upload as a texture at scale {scale}");
+            debug!("bookmark bottom-center line failed to upload as a texture at scale {scale}");
             return false;
         };
 
@@ -1164,6 +1305,13 @@ pub enum PressOutcome {
     /// (`Search` only) the query changed (entered, extended, or trimmed). The
     /// overlay stays open; the caller redraws.
     SearchUpdated,
+    /// (`CaptureKey` only) a non-cancel press: a candidate key for the
+    /// caller to validate and, on success, assign to `bookmark_id`. `key`'s
+    /// `modifiers` are exactly the caller's own live keyboard-state read,
+    /// passed straight through to [`BookmarkSwitcher::press_outcome`] as
+    /// this call's `modifiers` argument — never re-derived here, so a
+    /// captured key can never mismatch its own later dispatch.
+    KeyCandidate { bookmark_id: u64, key: Key },
 }
 
 /// The pure routing decision behind [`BookmarkSwitcher::press_outcome`],
@@ -1182,6 +1330,11 @@ enum CoreOutcome {
     Push(char),
     /// (`Search` only) delete the last query character.
     Pop,
+    /// (`Capture` only) a non-cancel press: a validation candidate. Carries
+    /// no payload — the outer [`BookmarkSwitcher::press_outcome`] wrapper
+    /// already has `raw`/`modifiers` in scope to build
+    /// [`PressOutcome::KeyCandidate`] from.
+    Candidate,
 }
 
 /// Which open state [`press_outcome_core`] is routing for, carrying just the
@@ -1202,6 +1355,10 @@ enum RoutingContext<'a, Id> {
         entries: &'a [SearchEntry<Id>],
         query: &'a str,
     },
+    /// Interactive key capture: every non-modifier keysym is a validation
+    /// candidate except a bare `Escape`, which cancels. Needs no data of its
+    /// own — routing reads only `raw`/`modifiers`, not any overlay state.
+    Capture,
 }
 
 /// Pure routing core behind [`BookmarkSwitcher::press_outcome`], generic over
@@ -1220,11 +1377,22 @@ enum RoutingContext<'a, Id> {
 ///   typed query); `Esc` dismisses; `Enter` jumps to the top match if one exists, else holds;
 ///   `Backspace` pops; an otherwise printable character is pushed; any other keysym (arrows,
 ///   F-keys) holds.
+/// - `Capture`: `raw == None` holds open; a *bare* (unchorded) `Escape` dismisses (cancels); any
+///   other keysym — including a *chorded* `Escape`, a legal assignable chord — becomes a validation
+///   candidate. Deliberately does not pre-filter a modifier-less candidate: the needs-a-modifier
+///   rejection comes from the shared validator in `crate::input`, so there is exactly one policy
+///   source for what makes a key valid.
+///
+/// `modifiers` is the caller's live keyboard-state read; `chorded` (any modifier held) is derived
+/// from it here so every context below stays behavior-identical to the pre-`Modifiers` `chorded:
+/// bool` parameter.
 fn press_outcome_core<Id>(
     ctx: RoutingContext<Id>,
     raw: Option<Keysym>,
-    chorded: bool,
+    modifiers: Modifiers,
 ) -> CoreOutcome {
+    let chorded = !modifiers.is_empty();
+
     if raw.is_some_and(is_modifier_keysym) {
         return CoreOutcome::HoldOpen;
     }
@@ -1299,6 +1467,15 @@ fn press_outcome_core<Id>(
                 }
             }
             CoreOutcome::HoldOpen
+        }
+        RoutingContext::Capture => {
+            let Some(raw) = raw else {
+                return CoreOutcome::HoldOpen;
+            };
+            if raw == Keysym::Escape && !chorded {
+                return CoreOutcome::Dismiss;
+            }
+            CoreOutcome::Candidate
         }
     }
 }
@@ -1495,7 +1672,7 @@ fn render_text(text: &str, scale: f64) -> anyhow::Result<MemoryBuffer> {
 /// by `query` (lowercased once), formats the status text with
 /// [`search_line_text`], and renders it as plain text. Shared by the edit-time
 /// scale-1 rasterise ([`BookmarkSwitcher::enter_search`] and friends) and the
-/// per-frame at-scale render ([`BookmarkSwitcher::render_search_line`]).
+/// per-frame at-scale render ([`BookmarkSwitcher::render_bottom_center_line`]).
 fn render_query_line<Id>(
     query: &str,
     entries: &[SearchEntry<Id>],
@@ -1540,6 +1717,19 @@ fn truncate_label(label: &str) -> String {
         truncated
     } else {
         label.to_owned()
+    }
+}
+
+/// The one-line key-capture prompt text, e.g. `press a key for Mail — esc
+/// cancels`, or with a rejection `status`, `press a key for Mail — needs a
+/// modifier — esc cancels`. Pure so it is unit-testable. `label` is
+/// truncated char-boundary-safe (the [`search_line_text`] top-label idiom)
+/// before composing.
+fn capture_line_text(label: &str, status: Option<&str>) -> String {
+    let label = truncate_label(label);
+    match status {
+        Some(reason) => format!("press a key for {label} — {reason} — esc cancels"),
+        None => format!("press a key for {label} — esc cancels"),
     }
 }
 
@@ -1687,7 +1877,7 @@ mod tests {
         let mut switcher = BookmarkSwitcher::new();
         assert!(!switcher.is_open());
 
-        switcher.press_outcome(None, false);
+        switcher.press_outcome(None, Modifiers::empty());
     }
 
     #[test]
@@ -1712,7 +1902,7 @@ mod tests {
             keymap: sticky_keymap,
         };
 
-        let outcome = switcher.press_outcome(Some(Keysym::from_char('a')), false);
+        let outcome = switcher.press_outcome(Some(Keysym::from_char('a')), Modifiers::empty());
         assert!(matches!(
             outcome,
             PressOutcome::Command { sticky: true, .. }
@@ -1728,7 +1918,7 @@ mod tests {
             keymap: default_keymap,
         };
 
-        let outcome = switcher.press_outcome(Some(Keysym::from_char('a')), false);
+        let outcome = switcher.press_outcome(Some(Keysym::from_char('a')), Modifiers::empty());
         assert!(matches!(
             outcome,
             PressOutcome::Command { sticky: false, .. }
@@ -1889,11 +2079,23 @@ mod tests {
         RoutingContext::Hints { hints }
     }
 
+    /// A `State::CaptureKey` routing context for the pure `press_outcome_core`
+    /// tests. The `u64` id stand-in is irrelevant here (`Capture` carries no
+    /// per-state data) — it just keeps the same generic instantiation as the
+    /// other `_ctx` helpers.
+    fn capture_ctx() -> RoutingContext<'static, u64> {
+        RoutingContext::Capture
+    }
+
     #[test]
     fn press_outcome_core_routes_modifier_to_hold_open() {
         let hints: Vec<Hint<u64>> = Vec::new();
         let keymap = default_keymap();
-        let outcome = press_outcome_core(mode_ctx(&hints, &keymap), Some(Keysym::Shift_L), false);
+        let outcome = press_outcome_core(
+            mode_ctx(&hints, &keymap),
+            Some(Keysym::Shift_L),
+            Modifiers::empty(),
+        );
         assert_eq!(outcome, CoreOutcome::HoldOpen);
     }
 
@@ -1904,35 +2106,35 @@ mod tests {
         let outcome = press_outcome_core(
             mode_ctx(&hints, &keymap),
             Some(Keysym::from_char('a')),
-            false,
+            Modifiers::empty(),
         );
         assert_eq!(outcome, CoreOutcome::Command(ModeCommand::Add));
 
         let outcome = press_outcome_core(
             mode_ctx(&hints, &keymap),
             Some(Keysym::from_char('d')),
-            false,
+            Modifiers::empty(),
         );
         assert_eq!(outcome, CoreOutcome::Command(ModeCommand::RemoveFocused));
 
         let outcome = press_outcome_core(
             mode_ctx(&hints, &keymap),
             Some(Keysym::from_char('x')),
-            false,
+            Modifiers::empty(),
         );
         assert_eq!(outcome, CoreOutcome::Command(ModeCommand::RemoveFocused));
 
         let outcome = press_outcome_core(
             mode_ctx(&hints, &keymap),
             Some(Keysym::from_char(',')),
-            false,
+            Modifiers::empty(),
         );
         assert_eq!(outcome, CoreOutcome::Command(ModeCommand::WalkBackward));
 
         let outcome = press_outcome_core(
             mode_ctx(&hints, &keymap),
             Some(Keysym::from_char('.')),
-            false,
+            Modifiers::empty(),
         );
         assert_eq!(outcome, CoreOutcome::Command(ModeCommand::WalkForward));
     }
@@ -1942,7 +2144,11 @@ mod tests {
         // In the standalone hint overlay, a command letter is just an
         // unmatched hint letter: dismiss.
         let hints: Vec<Hint<u64>> = Vec::new();
-        let outcome = press_outcome_core(hints_ctx(&hints), Some(Keysym::from_char('a')), false);
+        let outcome = press_outcome_core(
+            hints_ctx(&hints),
+            Some(Keysym::from_char('a')),
+            Modifiers::empty(),
+        );
         assert_eq!(outcome, CoreOutcome::Dismiss);
     }
 
@@ -1958,7 +2164,7 @@ mod tests {
             press_outcome_core(
                 mode_ctx(&hints, &keymap),
                 Some(Keysym::from_char('/')),
-                false
+                Modifiers::empty()
             ),
             CoreOutcome::EnterSearch
         );
@@ -1966,7 +2172,7 @@ mod tests {
             press_outcome_core(
                 mode_ctx(&hints, &keymap),
                 Some(Keysym::from_char('/')),
-                true
+                Modifiers::SHIFT
             ),
             CoreOutcome::EnterSearch
         );
@@ -1978,7 +2184,11 @@ mod tests {
         // key and dismisses.
         let hints: Vec<Hint<u64>> = Vec::new();
         assert_eq!(
-            press_outcome_core(hints_ctx(&hints), Some(Keysym::from_char('/')), false),
+            press_outcome_core(
+                hints_ctx(&hints),
+                Some(Keysym::from_char('/')),
+                Modifiers::empty()
+            ),
             CoreOutcome::Dismiss
         );
     }
@@ -1992,7 +2202,7 @@ mod tests {
         let outcome = press_outcome_core(
             mode_ctx(&hints, &keymap),
             Some(Keysym::from_char('a')),
-            true,
+            Modifiers::SHIFT,
         );
         assert_eq!(outcome, CoreOutcome::Dismiss);
     }
@@ -2003,17 +2213,22 @@ mod tests {
         // behaves identically in every state; `raw == None` dismisses in the
         // standalone hint overlay.
         let hints: Vec<Hint<u64>> = Vec::new();
-        let outcome = press_outcome_core(hints_ctx(&hints), Some(Keysym::Shift_L), false);
+        let outcome =
+            press_outcome_core(hints_ctx(&hints), Some(Keysym::Shift_L), Modifiers::empty());
         assert_eq!(outcome, CoreOutcome::HoldOpen);
 
-        let outcome = press_outcome_core(hints_ctx(&hints), None, false);
+        let outcome = press_outcome_core(hints_ctx(&hints), None, Modifiers::empty());
         assert_eq!(outcome, CoreOutcome::Dismiss);
     }
 
     #[test]
     fn press_outcome_core_routes_hint_letter_to_jump() {
         let hints = build_hints(fixture(&[10]).into_iter(), &visible(&[10]), HINT_KEYS);
-        let outcome = press_outcome_core(hints_ctx(&hints), Some(Keysym::from_char('a')), false);
+        let outcome = press_outcome_core(
+            hints_ctx(&hints),
+            Some(Keysym::from_char('a')),
+            Modifiers::empty(),
+        );
         assert_eq!(outcome, CoreOutcome::Jump(10));
 
         // In mode, a hint letter drawn from the mode alphabet (which never
@@ -2027,7 +2242,7 @@ mod tests {
         let outcome = press_outcome_core(
             mode_ctx(&mode_hints, &keymap),
             Some(mode_hints[0].keysym),
-            false,
+            Modifiers::empty(),
         );
         assert_eq!(outcome, CoreOutcome::Jump(10));
     }
@@ -2035,7 +2250,11 @@ mod tests {
     #[test]
     fn press_outcome_core_chorded_letter_dismisses() {
         let hints = build_hints(fixture(&[10]).into_iter(), &visible(&[10]), HINT_KEYS);
-        let outcome = press_outcome_core(hints_ctx(&hints), Some(Keysym::from_char('a')), true);
+        let outcome = press_outcome_core(
+            hints_ctx(&hints),
+            Some(Keysym::from_char('a')),
+            Modifiers::SHIFT,
+        );
         assert_eq!(outcome, CoreOutcome::Dismiss);
     }
 
@@ -2044,19 +2263,23 @@ mod tests {
         let hints: Vec<Hint<u64>> = Vec::new();
         let keymap = default_keymap();
         assert_eq!(
-            press_outcome_core(mode_ctx(&hints, &keymap), Some(Keysym::Escape), false),
+            press_outcome_core(
+                mode_ctx(&hints, &keymap),
+                Some(Keysym::Escape),
+                Modifiers::empty()
+            ),
             CoreOutcome::Dismiss
         );
         assert_eq!(
             press_outcome_core(
                 mode_ctx(&hints, &keymap),
                 Some(Keysym::from_char('z')),
-                false
+                Modifiers::empty()
             ),
             CoreOutcome::Dismiss
         );
         assert_eq!(
-            press_outcome_core(mode_ctx(&hints, &keymap), None, false),
+            press_outcome_core(mode_ctx(&hints, &keymap), None, Modifiers::empty()),
             CoreOutcome::Dismiss
         );
     }
@@ -2068,7 +2291,7 @@ mod tests {
         let outcome = press_outcome_core(
             mode_ctx(&hints, &keymap),
             Some(Keysym::from_char('a')),
-            false,
+            Modifiers::empty(),
         );
         assert_eq!(outcome, CoreOutcome::Command(ModeCommand::Add));
     }
@@ -2095,7 +2318,7 @@ mod tests {
             press_outcome_core(
                 mode_ctx(&hints, &keymap),
                 Some(Keysym::from_char('b')),
-                false
+                Modifiers::empty()
             ),
             CoreOutcome::Command(ModeCommand::Add)
         );
@@ -2103,7 +2326,7 @@ mod tests {
             press_outcome_core(
                 mode_ctx(&hints, &keymap),
                 Some(Keysym::from_char('a')),
-                false
+                Modifiers::empty()
             ),
             CoreOutcome::Dismiss
         );
@@ -2184,7 +2407,7 @@ mod tests {
         let outcome = press_outcome_core(
             search_ctx(&entries, ""),
             Some(Keysym::from_char('m')),
-            false,
+            Modifiers::empty(),
         );
         assert_eq!(outcome, CoreOutcome::Push('m'));
     }
@@ -2193,7 +2416,11 @@ mod tests {
     fn press_outcome_core_search_non_char_keysym_holds_open() {
         // A function key (no `key_char`) must not dismiss or corrupt the query.
         let entries = search_entries(&[(1, Some("Mail"), None)]);
-        let outcome = press_outcome_core(search_ctx(&entries, "ma"), Some(Keysym::F5), false);
+        let outcome = press_outcome_core(
+            search_ctx(&entries, "ma"),
+            Some(Keysym::F5),
+            Modifiers::empty(),
+        );
         assert_eq!(outcome, CoreOutcome::HoldOpen);
     }
 
@@ -2204,15 +2431,22 @@ mod tests {
         // `key_char().is_none()` branch above — a regression that dropped
         // the `is_control` check would wrongly `Push('\t')` into the query.
         let entries = search_entries(&[(1, Some("Mail"), None)]);
-        let outcome = press_outcome_core(search_ctx(&entries, "ma"), Some(Keysym::Tab), false);
+        let outcome = press_outcome_core(
+            search_ctx(&entries, "ma"),
+            Some(Keysym::Tab),
+            Modifiers::empty(),
+        );
         assert_eq!(outcome, CoreOutcome::HoldOpen);
     }
 
     #[test]
     fn press_outcome_core_search_backspace_pops() {
         let entries = search_entries(&[(1, Some("Mail"), None)]);
-        let outcome =
-            press_outcome_core(search_ctx(&entries, "ma"), Some(Keysym::BackSpace), false);
+        let outcome = press_outcome_core(
+            search_ctx(&entries, "ma"),
+            Some(Keysym::BackSpace),
+            Modifiers::empty(),
+        );
         assert_eq!(outcome, CoreOutcome::Pop);
     }
 
@@ -2221,13 +2455,21 @@ mod tests {
         let entries = search_entries(&[(7, Some("Mail"), None), (8, Some("Music"), None)]);
         // "m" matches both; Enter jumps to the first in list order.
         assert_eq!(
-            press_outcome_core(search_ctx(&entries, "m"), Some(Keysym::Return), false),
+            press_outcome_core(
+                search_ctx(&entries, "m"),
+                Some(Keysym::Return),
+                Modifiers::empty()
+            ),
             CoreOutcome::Jump(7)
         );
         // A query with no match holds open rather than dismissing — the user
         // can keep correcting.
         assert_eq!(
-            press_outcome_core(search_ctx(&entries, "zzz"), Some(Keysym::Return), false),
+            press_outcome_core(
+                search_ctx(&entries, "zzz"),
+                Some(Keysym::Return),
+                Modifiers::empty()
+            ),
             CoreOutcome::HoldOpen
         );
     }
@@ -2239,7 +2481,7 @@ mod tests {
         let outcome = press_outcome_core(
             search_ctx(&entries, "ma"),
             Some(Keysym::from_char('m')),
-            true,
+            Modifiers::SHIFT,
         );
         assert_eq!(outcome, CoreOutcome::HoldOpen);
     }
@@ -2247,7 +2489,11 @@ mod tests {
     #[test]
     fn press_outcome_core_search_escape_dismisses() {
         let entries = search_entries(&[(1, Some("Mail"), None)]);
-        let outcome = press_outcome_core(search_ctx(&entries, "ma"), Some(Keysym::Escape), false);
+        let outcome = press_outcome_core(
+            search_ctx(&entries, "ma"),
+            Some(Keysym::Escape),
+            Modifiers::empty(),
+        );
         assert_eq!(outcome, CoreOutcome::Dismiss);
     }
 
@@ -2354,5 +2600,160 @@ mod tests {
         // The two walk directions share the "walk" label and group together.
         assert!(markup.contains("j/k walk"), "in: {markup}");
         assert!(markup.contains("; search"), "in: {markup}");
+    }
+
+    // --- Interactive key capture ---
+
+    #[test]
+    fn press_outcome_core_capture_modifier_holds_open() {
+        assert_eq!(
+            press_outcome_core(capture_ctx(), Some(Keysym::Shift_L), Modifiers::empty()),
+            CoreOutcome::HoldOpen
+        );
+    }
+
+    #[test]
+    fn press_outcome_core_capture_none_holds_open() {
+        assert_eq!(
+            press_outcome_core(capture_ctx(), None, Modifiers::empty()),
+            CoreOutcome::HoldOpen
+        );
+    }
+
+    #[test]
+    fn press_outcome_core_capture_bare_escape_dismisses() {
+        assert_eq!(
+            press_outcome_core(capture_ctx(), Some(Keysym::Escape), Modifiers::empty()),
+            CoreOutcome::Dismiss
+        );
+    }
+
+    #[test]
+    fn press_outcome_core_capture_chorded_escape_is_a_candidate() {
+        // A chorded Escape is a legal assignable chord via the typed
+        // `AssignBookmarkKey` path today; only the *bare* Escape cancels.
+        assert_eq!(
+            press_outcome_core(capture_ctx(), Some(Keysym::Escape), Modifiers::SHIFT),
+            CoreOutcome::Candidate
+        );
+    }
+
+    #[test]
+    fn press_outcome_core_capture_does_not_prefilter_modifier_less_candidate() {
+        // Routing must not reject a modifier-less letter itself — that
+        // rejection is the shared validator's job, so there is exactly one
+        // policy source for what makes a key valid.
+        assert_eq!(
+            press_outcome_core(
+                capture_ctx(),
+                Some(Keysym::from_char('a')),
+                Modifiers::empty()
+            ),
+            CoreOutcome::Candidate
+        );
+    }
+
+    #[test]
+    fn press_outcome_core_capture_chord_is_a_candidate() {
+        assert_eq!(
+            press_outcome_core(
+                capture_ctx(),
+                Some(Keysym::from_char('a')),
+                Modifiers::SUPER
+            ),
+            CoreOutcome::Candidate
+        );
+    }
+
+    #[test]
+    fn open_capture_sets_state_with_composed_prompt() {
+        let mut switcher = BookmarkSwitcher::new();
+        assert!(switcher.open_capture(7, "Mail".to_owned()));
+
+        let State::CaptureKey {
+            bookmark_id,
+            label,
+            status,
+            ..
+        } = &switcher.state
+        else {
+            panic!("open_capture must set State::CaptureKey");
+        };
+        assert_eq!(*bookmark_id, 7);
+        assert_eq!(label, "Mail");
+        assert!(status.is_none());
+    }
+
+    #[test]
+    fn capture_rejected_keeps_state_open_and_swaps_status() {
+        let mut switcher = BookmarkSwitcher::new();
+        assert!(switcher.open_capture(7, "Mail".to_owned()));
+
+        switcher.capture_rejected("needs a modifier");
+
+        let State::CaptureKey { status, .. } = &switcher.state else {
+            panic!("capture_rejected must keep State::CaptureKey open");
+        };
+        assert_eq!(status.as_deref(), Some("needs a modifier"));
+    }
+
+    #[test]
+    fn press_outcome_capture_candidate_carries_exact_raw_and_modifiers() {
+        // Through the real `press_outcome` entry point (not
+        // `press_outcome_core` directly): `key.trigger`/`key.modifiers` must
+        // be exactly the `raw`/`modifiers` arguments passed in — the
+        // candidate-provenance guarantee `crate::input`'s interception
+        // relies on to never mismatch its own later dispatch.
+        let mut switcher = BookmarkSwitcher::new();
+        assert!(switcher.open_capture(7, "Mail".to_owned()));
+
+        let outcome = switcher.press_outcome(Some(Keysym::from_char('a')), Modifiers::empty());
+        assert_eq!(
+            outcome,
+            PressOutcome::KeyCandidate {
+                bookmark_id: 7,
+                key: Key {
+                    trigger: Trigger::Keysym(Keysym::from_char('a')),
+                    modifiers: Modifiers::empty(),
+                },
+            }
+        );
+
+        let outcome = switcher.press_outcome(Some(Keysym::from_char('m')), Modifiers::SUPER);
+        assert_eq!(
+            outcome,
+            PressOutcome::KeyCandidate {
+                bookmark_id: 7,
+                key: Key {
+                    trigger: Trigger::Keysym(Keysym::from_char('m')),
+                    modifiers: Modifiers::SUPER,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn capture_line_text_variants() {
+        assert_eq!(
+            capture_line_text("Mail", None),
+            "press a key for Mail — esc cancels"
+        );
+        assert_eq!(
+            capture_line_text("Mail", Some("needs a modifier")),
+            "press a key for Mail — needs a modifier — esc cancels"
+        );
+        assert_eq!(
+            capture_line_text("Mail", Some("already bound to a keybind")),
+            "press a key for Mail — already bound to a keybind — esc cancels"
+        );
+        assert_eq!(
+            capture_line_text("Mail", Some("already bound to another bookmark")),
+            "press a key for Mail — already bound to another bookmark — esc cancels"
+        );
+        // Long labels truncate the same way `search_line_text`'s top-label
+        // clause does.
+        let long: String = "x".repeat(60);
+        let text = capture_line_text(&long, None);
+        assert!(text.contains(&format!("{}…", "x".repeat(48))));
     }
 }

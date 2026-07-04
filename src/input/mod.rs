@@ -48,8 +48,10 @@ use self::resize_grab::ResizeGrab;
 use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
+use crate::ipc::server::role_title_to_tag_and_clean;
 use crate::layout::bookmarks::{
-    BookmarkJumpOutcome, BookmarkKey, BookmarkKeyError, BookmarkName, BookmarkRule, WalkDirection,
+    AnchorWire, BookmarkJumpOutcome, BookmarkKey, BookmarkKeyError, BookmarkName, BookmarkRule,
+    WalkDirection,
 };
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{
@@ -586,8 +588,7 @@ impl State {
                 // otherwise chorded letter to a dismiss rather than a
                 // jump/command.
                 if this.niri.bookmark_switcher.is_open() && pressed {
-                    let chorded = !modifiers.is_empty();
-                    match this.niri.bookmark_switcher.press_outcome(raw, chorded) {
+                    match this.niri.bookmark_switcher.press_outcome(raw, modifiers) {
                         PressOutcome::HoldOpen => {
                             // A pure modifier keeps the overlay open (you
                             // might be reaching for a chord, or just resting
@@ -677,6 +678,116 @@ impl State {
                                     // internally on that path.
                                 }
                             }
+                        }
+                        PressOutcome::KeyCandidate { bookmark_id, key } => {
+                            // Validate through the exact same policy the
+                            // typed `AssignBookmarkKey` path uses — see
+                            // `validate_bookmark_key_candidate`'s doc for why
+                            // this must be the only place either path checks
+                            // collisions. This arm's dispatch is as
+                            // input-seam-untestable as the `Command` arm
+                            // above (no headless harness for this input
+                            // path) — see that arm's comment.
+                            let mod_key = this.backend.mod_key(&this.niri.config.borrow());
+                            let candidate = {
+                                let config = this.niri.config.borrow();
+                                validate_bookmark_key_candidate(
+                                    key,
+                                    bookmark_id,
+                                    config
+                                        .binds
+                                        .0
+                                        .iter()
+                                        .chain(config.recent_windows.binds.iter()),
+                                    this.niri
+                                        .layout
+                                        .bookmarks()
+                                        .list()
+                                        .iter()
+                                        .filter_map(|b| b.key().map(|k| (b.id().get(), k.key()))),
+                                    mod_key,
+                                )
+                            };
+                            match candidate {
+                                Ok(bookmark_key) => match this
+                                    .niri
+                                    .layout
+                                    .assign_bookmark_key(bookmark_id, bookmark_key)
+                                {
+                                    Ok(()) => {
+                                        this.niri.bookmark_switcher.close();
+                                    }
+                                    Err(DoActionError::BookmarkNotFound { id }) => {
+                                        // The bookmark was pruned (its window
+                                        // closed) while the capture prompt was
+                                        // open; tolerated as a cancel rather
+                                        // than an error, the same discipline
+                                        // the confirm-dialog `RemoveBookmark`
+                                        // arm above applies.
+                                        debug!(
+                                            "capture-bookmark-key: bookmark {id} pruned while \
+                                             capturing, treating as cancel"
+                                        );
+                                        this.niri.bookmark_switcher.close();
+                                    }
+                                    Err(DoActionError::BookmarkKeyCollision { key }) => {
+                                        // The sibling-collision snapshot the
+                                        // validator just read could only go
+                                        // stale via reentrancy this
+                                        // single-threaded dispatch path
+                                        // doesn't have; handled explicitly
+                                        // rather than assumed unreachable.
+                                        debug!(
+                                            "capture-bookmark-key: commit reported collision on \
+                                             {key}, staying open"
+                                        );
+                                        this.niri
+                                            .bookmark_switcher
+                                            .capture_rejected("already bound to another bookmark");
+                                    }
+                                    Err(err) => unreachable!(
+                                        "assign_bookmark_key only returns BookmarkNotFound or \
+                                         BookmarkKeyCollision: {err:?}"
+                                    ),
+                                },
+                                // Matched exhaustively on the typed
+                                // `BookmarkKeyError` (rather than a wildcard)
+                                // so a future keysym-reachable variant fails
+                                // to compile here instead of silently falling
+                                // into the wrong prompt text.
+                                Err(BookmarkKeyRejection::Invalid(BookmarkKeyError::NoModifiers)) => {
+                                    this.niri
+                                        .bookmark_switcher
+                                        .capture_rejected("needs a modifier");
+                                }
+                                Err(BookmarkKeyRejection::Invalid(BookmarkKeyError::NotAKeysym)) => {
+                                    // The interactive capture surface always
+                                    // builds a keysym candidate from a live
+                                    // keyboard press; only the typed
+                                    // `AssignBookmarkKey` path can name a
+                                    // non-keysym trigger via a parsed string.
+                                    unreachable!(
+                                        "capture-bookmark-key candidate is always a keysym trigger"
+                                    )
+                                }
+                                Err(BookmarkKeyRejection::Collision {
+                                    with: BookmarkKeyCollidee::ConfigBind,
+                                    ..
+                                }) => {
+                                    this.niri
+                                        .bookmark_switcher
+                                        .capture_rejected("already bound to a keybind");
+                                }
+                                Err(BookmarkKeyRejection::Collision {
+                                    with: BookmarkKeyCollidee::SiblingBookmark,
+                                    ..
+                                }) => {
+                                    this.niri
+                                        .bookmark_switcher
+                                        .capture_rejected("already bound to another bookmark");
+                                }
+                            }
+                            this.niri.queue_redraw_all();
                         }
                         PressOutcome::Dismiss => {
                             this.niri.bookmark_switcher.close();
@@ -1937,6 +2048,58 @@ impl State {
                     debug!("unassign_bookmark_key: {err:?}, propagating");
                     return Err(err);
                 }
+            }
+            Action::CaptureBookmarkKey { id } => {
+                // Resolve the id first: an unknown id stays a loud
+                // `BookmarkNotFound` even when the modal-overlay gate below
+                // would otherwise refuse the open.
+                let Some(bookmark) = self.niri.layout.bookmarks().get_by_raw(id) else {
+                    return Err(DoActionError::BookmarkNotFound { id });
+                };
+
+                // The prompt label: the bookmark's display name if set, else
+                // (for an attached anchor) the clean tag-stripped window
+                // title, else a description of the dangling rule that will
+                // re-attach it — a dangling rule anchor is a legal capture
+                // target, keys follow the bookmark, not its current window.
+                let label = if let Some(name) = bookmark.name() {
+                    name.as_str().to_owned()
+                } else {
+                    match bookmark.anchor().wire() {
+                        AnchorWire::Attached { window, .. } => {
+                            let mapped = self
+                                .niri
+                                .layout
+                                .windows_all()
+                                .find(|(_, w)| LayoutElement::id(*w) == window)
+                                .map(|(_, w)| w)
+                                .expect(
+                                    "bookmark window must resolve via windows_all \
+                                     (prune-on-close guarantee)",
+                                );
+                            let clean_title = with_toplevel_role(mapped.toplevel(), |role| {
+                                role_title_to_tag_and_clean(&role.title).clean_title
+                            });
+                            clean_title
+                                .filter(|title| !title.is_empty())
+                                .unwrap_or_else(|| "(untitled)".to_owned())
+                        }
+                        AnchorWire::DanglingRule(rule) => bookmark_rule_capture_label(rule),
+                    }
+                };
+
+                // Same modal-overlay refusal gate as `OpenBookmarkSwitcher`/
+                // `EnterBookmarkMode`: only one modal overlay owns keyboard
+                // focus at a time.
+                if self.niri.modal_overlay_blocks_bookmark_overlay() {
+                    debug!("capture-bookmark-key: another overlay is open, ignoring");
+                } else if self.niri.bookmark_switcher.open_capture(id, label) {
+                    // The overlay does not self-redraw; opening needs an
+                    // explicit redraw.
+                    self.niri.queue_redraw_all();
+                }
+                // A `false` return from `open_capture` means the prompt
+                // failed to rasterise; it already warned internally.
             }
             Action::RenameBookmark { id, name: raw_name } => {
                 let name = match raw_name {
@@ -6315,6 +6478,18 @@ fn validate_bookmark_key_candidate<'a>(
     Ok(bookmark_key)
 }
 
+/// A human-readable capture-prompt label for a dangling rule-anchored
+/// bookmark, composed from whichever of `app_id`/`title` the rule
+/// constrains ([`BookmarkRule::new`] guarantees at least one).
+fn bookmark_rule_capture_label(rule: &BookmarkRule) -> String {
+    match (rule.app_id_source(), rule.title_source()) {
+        (Some(app_id), Some(title)) => format!("app_id~{app_id}, title~{title}"),
+        (Some(app_id), None) => format!("app_id~{app_id}"),
+        (None, Some(title)) => format!("title~{title}"),
+        (None, None) => unreachable!("BookmarkRule::new requires at least one of app_id/title"),
+    }
+}
+
 fn find_configured_switch_action(
     bindings: &SwitchBinds,
     switch: Switch,
@@ -7677,6 +7852,30 @@ mod tests {
                 ModKey::Super,
             ),
             Ok(BookmarkKey::new(key).expect("a chorded keysym is a valid bookmark key"))
+        );
+    }
+
+    #[test]
+    fn bookmark_rule_capture_label_covers_reachable_arms() {
+        let app_id_only =
+            BookmarkRule::new(Some("^firefox$".parse().unwrap()), None).expect("valid rule");
+        assert_eq!(
+            bookmark_rule_capture_label(&app_id_only),
+            "app_id~^firefox$"
+        );
+
+        let title_only =
+            BookmarkRule::new(None, Some("^Inbox$".parse().unwrap())).expect("valid rule");
+        assert_eq!(bookmark_rule_capture_label(&title_only), "title~^Inbox$");
+
+        let both = BookmarkRule::new(
+            Some("^firefox$".parse().unwrap()),
+            Some("^Inbox$".parse().unwrap()),
+        )
+        .expect("valid rule");
+        assert_eq!(
+            bookmark_rule_capture_label(&both),
+            "app_id~^firefox$, title~^Inbox$"
         );
     }
 }

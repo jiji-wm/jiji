@@ -475,6 +475,12 @@ pub enum Action {
     #[knuffel(skip)]
     UnassignBookmarkKey(u64),
     // IPC-only, same rationale as `AssignBookmarkKey`: runtime bookmark ids
+    // are not stable across restarts.
+    #[knuffel(skip)]
+    CaptureBookmarkKey {
+        id: u64,
+    },
+    // IPC-only, same rationale as `AssignBookmarkKey`: runtime bookmark ids
     // are not stable across restarts. Carries the raw `Option<String>`
     // rather than a parsed `BookmarkName` so `From<jiji_ipc::Action>` stays
     // infallible; validation happens at dispatch (`BookmarkName::new`).
@@ -888,6 +894,7 @@ impl From<jiji_ipc::Action> for Action {
             jiji_ipc::Action::MoveBookmark { id, pos } => Self::MoveBookmark { id, pos },
             jiji_ipc::Action::AssignBookmarkKey { id, key } => Self::AssignBookmarkKey { id, key },
             jiji_ipc::Action::UnassignBookmarkKey { id } => Self::UnassignBookmarkKey(id),
+            jiji_ipc::Action::CaptureBookmarkKey { id } => Self::CaptureBookmarkKey { id },
             jiji_ipc::Action::RenameBookmark { id, name } => Self::RenameBookmark { id, name },
             jiji_ipc::Action::OpenBookmarkSwitcher {} => Self::OpenBookmarkSwitcher,
             jiji_ipc::Action::EnterBookmarkMode {} => Self::EnterBookmarkMode,
