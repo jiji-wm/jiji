@@ -510,12 +510,11 @@ fn action_name(action: &Action) -> String {
         Action::Screenshot(_, _) => String::from("Take a Screenshot"),
         Action::Spawn(args) => format!(
             "Spawn <span face='monospace' bgcolor='#000000'>{}</span>",
-            args.first().unwrap_or(&String::new())
+            spawn_label(&args.join(" "))
         ),
         Action::SpawnSh(command) => format!(
             "Spawn <span face='monospace' bgcolor='#000000'>{}</span>",
-            // Fairly crude but should get the job done in most cases.
-            command.split_ascii_whitespace().next().unwrap_or("")
+            spawn_label(command)
         ),
         Action::AddBookmark => String::from("Add Bookmark"),
         Action::AddBookmarkRule { .. } => String::from("Add Bookmark Rule"),
@@ -533,6 +532,25 @@ fn action_name(action: &Action) -> String {
         Action::EnterBookmarkMode => String::from("Enter Bookmark Mode"),
         _ => String::from("FIXME: Unknown"),
     }
+}
+
+/// Renders `command` for embedding inside the `<span face='monospace' …>`
+/// wrapper in a spawn action's label.
+///
+/// Truncates to at most 50 characters (on a `char` boundary, appending `…`
+/// when truncated) *before* escaping for Pango markup. This order is
+/// load-bearing: escaping first could leave a multi-character entity (e.g.
+/// `&amp;`) split across the truncation point, re-breaking the markup we
+/// just escaped for.
+fn spawn_label(command: &str) -> String {
+    const MAX_CHARS: usize = 50;
+
+    let truncated = match command.char_indices().nth(MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &command[..cut]),
+        None => command.to_owned(),
+    };
+
+    pango::glib::markup_escape_text(&truncated).to_string()
 }
 
 fn key_name(screen_reader: bool, mod_key: ModKey, key: &Key) -> String {
@@ -840,5 +858,60 @@ mod tests {
 
         let (_, title) = format_bind(&config.binds.0, &Action::AddBookmark).unwrap();
         assert_eq!(title, "Bookmark It");
+    }
+
+    #[test]
+    fn spawn_label_renders_full_joined_argv() {
+        let action = Action::Spawn(vec!["foo".to_owned(), "--bar".to_owned(), "baz".to_owned()]);
+        assert_eq!(
+            action_name(&action),
+            "Spawn <span face='monospace' bgcolor='#000000'>foo --bar baz</span>"
+        );
+    }
+
+    #[test]
+    fn spawn_sh_label_renders_full_command() {
+        let action = Action::SpawnSh("foo --bar baz".to_owned());
+        assert_eq!(
+            action_name(&action),
+            "Spawn <span face='monospace' bgcolor='#000000'>foo --bar baz</span>"
+        );
+    }
+
+    #[test]
+    fn spawn_label_truncates_at_cap_on_char_boundary() {
+        // 60 3-byte chars: a naive byte-50 slice would land mid-character
+        // (50 isn't a multiple of 3) and panic, unlike the 2-byte "é" this
+        // test used to use, where byte-50 coincidentally falls on a
+        // boundary and would let a regression to naive slicing slip by.
+        let command = "€".repeat(60);
+        let label = spawn_label(&command);
+
+        let expected = format!("{}…", "€".repeat(50));
+        assert_eq!(label, expected);
+    }
+
+    #[test]
+    fn spawn_label_escapes_markup_after_truncating() {
+        let label = spawn_label("echo <b>a</b> & done");
+        assert_eq!(label, "echo &lt;b&gt;a&lt;/b&gt; &amp; done");
+
+        let markup = format!("Spawn <span face='monospace' bgcolor='#000000'>{label}</span>");
+        pango::parse_markup(&markup, '\0').unwrap();
+    }
+
+    #[test]
+    fn spawn_label_truncate_then_escape_keeps_markup_valid_at_cap() {
+        // The `&` lands exactly at the char-50 cut point. Escaping before
+        // truncating would slice the resulting `&amp;` entity in half,
+        // handing pango a broken markup string; truncating first keeps the
+        // whole `&` intact so escaping produces a well-formed entity.
+        let command = format!("{}&{}", "x".repeat(49), "y".repeat(10));
+        let label = spawn_label(&command);
+
+        assert_eq!(label, format!("{}&amp;…", "x".repeat(49)));
+
+        let markup = format!("Spawn <span face='monospace' bgcolor='#000000'>{label}</span>");
+        pango::parse_markup(&markup, '\0').unwrap();
     }
 }
