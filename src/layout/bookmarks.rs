@@ -398,6 +398,20 @@ impl WalkTarget {
     }
 }
 
+/// The base [`Bookmarks::walk_target`] steps from, per its four-tier
+/// precedence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkBase {
+    /// Step from this index in the walk direction.
+    StepFrom(usize),
+    /// Land directly on this index — no step. Only produced for an index
+    /// whose anchor is already attached (a live window).
+    LandOn(usize),
+    /// No base at all: land on the boundary entry (last for backward, first
+    /// for forward).
+    Boundary,
+}
+
 /// Direction of a bookmark walk. Forward steps toward the end of the list,
 /// backward toward the start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,6 +496,12 @@ pub struct Bookmarks<Id: PartialEq + Clone> {
     /// synthetic-bind mirror rebuilds whenever this differs from its cached
     /// value — see `State::refresh`.
     binds_epoch: u64,
+    /// The bookmark last landed on by any means — walk, jump (IPC/picker/hint),
+    /// key jump, return-bounce, or ordinary focus onto a bookmarked window.
+    /// Session-only. Resolved lazily at walk time (ids are never reused within
+    /// a session, so remove/prune need no eager clear); an id no longer in the
+    /// list, or one whose anchor is dangling, simply fails to resolve.
+    last_visited: Option<BookmarkId>,
 }
 
 // Manual impl: deriving `Default` would demand `Id: Default`, which the layout
@@ -495,6 +515,7 @@ impl<Id: PartialEq + Clone> Default for Bookmarks<Id> {
             next_id: 0,
             last_seen_focus: None,
             binds_epoch: 0,
+            last_visited: None,
         }
     }
 }
@@ -714,13 +735,18 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
     /// The index a step in `direction` would land on, or `None` at a boundary
     /// (with wrap disabled) or for an empty list. Pure — does not mutate.
     ///
-    /// If `walk_cursor` is a live continuation — `Some(i)`, `i` in bounds, and
-    /// `list[i]` anchors the currently-focused window — the step continues from
-    /// `i`. Otherwise the base is the focused window's own bookmark position (if
-    /// it has one); failing that there is no current position, and the first
-    /// step lands directly on the boundary entry (last for backward, first for
-    /// forward). This stale-cursor guard makes correctness independent of
-    /// refresh timing.
+    /// The base is chosen by a four-tier precedence, checked in order:
+    ///
+    /// 1. `walk_cursor` is a live continuation — `Some(i)`, `i` in bounds, and `list[i]` anchors
+    ///    the currently-focused window — the step continues from `i`. This stale-cursor guard makes
+    ///    correctness independent of refresh timing.
+    /// 2. Failing that, the focused window's own bookmark position, if it has one — the step
+    ///    continues from there.
+    /// 3. Failing that, the remembered last-visited bookmark (see [`Self::observe_focus`] and the
+    ///    `commit_*` methods), if it still resolves to a live (attached) entry — the walk lands
+    ///    directly *on* that entry, without stepping, in either direction.
+    /// 4. Failing all three, there is no current position, and the first step lands directly on the
+    ///    boundary entry (last for backward, first for forward).
     ///
     /// Dangling rule anchors (no live window) are transparent to the walk: the
     /// step continues past them in `direction`, honoring `wrap`, until it lands
@@ -737,14 +763,20 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
             return None;
         }
         let mut candidate = match self.walk_base(focused) {
-            Some(base) => step(base, direction, len, wrap)?,
-            None => match direction {
+            WalkBase::StepFrom(base) => step(base, direction, len, wrap)?,
+            WalkBase::LandOn(pos) => pos,
+            WalkBase::Boundary => match direction {
                 WalkDirection::Backward => len - 1,
                 WalkDirection::Forward => 0,
             },
         };
         // Advance past dangling entries. Bounded by `len` so an all-dangling
-        // list terminates rather than looping under wrap.
+        // list terminates rather than looping under wrap. This check is the
+        // one place that actually enforces "never land on a dangling entry"
+        // for every tier, including `LandOn` — `walk_base`'s tier-3 attachment
+        // check only decides which base to hand back, it doesn't itself
+        // guard the return value, so this loop is load-bearing here too, not
+        // a redundant re-check.
         for _ in 0..len {
             if self.list[candidate].anchor.window().is_some() {
                 return Some(WalkTarget(candidate));
@@ -754,21 +786,31 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
         None
     }
 
-    /// The base index a walk steps from, or `None` when there is no current
-    /// position (first step lands on a boundary).
-    fn walk_base(&self, focused: Option<&Id>) -> Option<usize> {
+    /// The base a walk steps from, per the four-tier precedence documented on
+    /// [`Self::walk_target`].
+    fn walk_base(&self, focused: Option<&Id>) -> WalkBase {
         if let Some(i) = self.walk_cursor {
             if i < self.list.len() && self.list[i].anchor.window() == focused {
-                return Some(i);
+                return WalkBase::StepFrom(i);
             }
         }
-        focused.and_then(|w| self.position_of_window(w))
+        if let Some(pos) = focused.and_then(|w| self.position_of_window(w)) {
+            return WalkBase::StepFrom(pos);
+        }
+        if let Some(id) = self.last_visited {
+            if let Some(pos) = self.list.iter().position(|b| b.id == id) {
+                if self.list[pos].anchor.window().is_some() {
+                    return WalkBase::LandOn(pos);
+                }
+            }
+        }
+        WalkBase::Boundary
     }
 
     /// Commit a walk onto `target`: park the cursor there, record the landed
-    /// window as the last-seen focus, and clear the return-to-previous target
+    /// window as the last-seen focus, clear the return-to-previous target
     /// (a walk is a focus change like any other, so any pending bounce is
-    /// invalidated).
+    /// invalidated), and record the landed bookmark as last-visited.
     ///
     /// Recording the focus synchronously is the walk-filter: the focus hook then
     /// sees no delta when this window becomes focused, so a walk never resets its
@@ -789,18 +831,27 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
         self.walk_cursor = Some(target);
         self.last_seen_focus = Some(window);
         self.return_target = None;
+        self.last_visited = Some(self.list[target].id);
     }
 
     /// Commit a jump onto `window`: clear the walk cursor, record the landed
-    /// window as the last-seen focus, clear the return-to-previous target, and
-    /// — under [`OrderMode::Mru`] — promote the bookmark to the front. A jump
-    /// *is* an activation; recording the focus synchronously keeps the focus
-    /// hook from double-promoting it (and, per `commit_walk`, from re-clearing
-    /// the return target it already cleared here).
+    /// window as the last-seen focus and as last-visited, clear the
+    /// return-to-previous target, and — under [`OrderMode::Mru`] — promote the
+    /// bookmark to the front. A jump *is* an activation; recording the focus
+    /// synchronously keeps the focus hook from double-promoting it (and, per
+    /// `commit_walk`, from re-clearing the return target it already cleared
+    /// here).
     pub fn commit_jump(&mut self, window: &Id, order: OrderMode) {
         self.walk_cursor = None;
         self.last_seen_focus = Some(window.clone());
         self.return_target = None;
+        self.last_visited = Some(
+            self.position_of_window(window)
+                .map(|pos| self.list[pos].id)
+                .expect(
+                    "commit_jump is only called with the window of an already-bookmarked entry",
+                ),
+        );
         if order == OrderMode::Mru {
             self.promote_to_front(window);
         }
@@ -811,12 +862,19 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
     /// bounce back to `left`.
     ///
     /// Otherwise identical to [`Self::commit_jump`]: clears the walk cursor,
-    /// records the landed window as the last-seen focus, and promotes under
-    /// [`OrderMode::Mru`].
+    /// records the landed window as the last-seen focus and as last-visited,
+    /// and promotes under [`OrderMode::Mru`].
     pub fn commit_key_jump(&mut self, window: &Id, left: Option<Id>, order: OrderMode) {
         self.walk_cursor = None;
         self.last_seen_focus = Some(window.clone());
         self.return_target = left;
+        self.last_visited = Some(
+            self.position_of_window(window)
+                .map(|pos| self.list[pos].id)
+                .expect(
+                    "commit_key_jump is only called with the window of an already-bookmarked entry",
+                ),
+        );
         if order == OrderMode::Mru {
             self.promote_to_front(window);
         }
@@ -826,9 +884,17 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
     /// return-target slot, record the landed window as the last-seen focus,
     /// and — under [`OrderMode::Mru`] — promote the bookmark to the front (a
     /// no-op if `window` is not itself bookmarked).
+    ///
+    /// Records `window` as last-visited only if it is itself bookmarked; the
+    /// bounce target is often an ordinary window, and in that case "the
+    /// bookmark you left is still the last one visited" — the memory is left
+    /// untouched rather than cleared.
     pub fn commit_return(&mut self, window: &Id, order: OrderMode) {
         self.return_target = None;
         self.last_seen_focus = Some(window.clone());
+        if let Some(pos) = self.position_of_window(window) {
+            self.last_visited = Some(self.list[pos].id);
+        }
         if order == OrderMode::Mru {
             self.promote_to_front(window);
         }
@@ -840,6 +906,11 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
     /// Otherwise it records the new focus, resets the walk cursor, clears the
     /// return target, and — under [`OrderMode::Mru`] — promotes the newly-focused
     /// window's bookmark to the front.
+    ///
+    /// Also records `current` as last-visited if it is bookmarked. An ordinary
+    /// focus change onto a *non*-bookmarked window leaves the memory
+    /// untouched — the main walk-back gesture is precisely "focus wandered off
+    /// the bookmarks", so clearing it here would defeat the feature.
     pub fn observe_focus(&mut self, current: Option<&Id>, order: OrderMode) -> bool {
         if current == self.last_seen_focus.as_ref() {
             return false;
@@ -847,6 +918,11 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
         self.last_seen_focus = current.cloned();
         self.walk_cursor = None;
         self.return_target = None;
+        if let Some(w) = current {
+            if let Some(pos) = self.position_of_window(w) {
+                self.last_visited = Some(self.list[pos].id);
+            }
+        }
         if order == OrderMode::Mru {
             if let Some(w) = current {
                 self.promote_to_front(w);
@@ -996,6 +1072,14 @@ impl<Id: PartialEq + Clone> Bookmarks<Id> {
     pub(crate) fn next_id(&self) -> u64 {
         self.next_id
     }
+
+    /// Read accessor for the last-visited memory. Only consumed by
+    /// `verify_invariants` (debug) and tests; gate to match so release builds
+    /// don't see it as dead.
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) fn last_visited(&self) -> Option<BookmarkId> {
+        self.last_visited
+    }
 }
 
 /// Step one index in `direction` within a list of length `len`, wrapping past a
@@ -1048,22 +1132,42 @@ mod tests {
     }
 
     /// Test-only setup helper: park the walk cursor on `idx` via a real
-    /// `walk_target` call (landing there in one step from the boundary or
-    /// from the adjacent entry) rather than casting a raw index — `WalkTarget`
-    /// is only ever minted by `walk_target`, and this helper keeps that true
-    /// for tests too.
+    /// `walk_target` call (stepping from a window-anchored neighbor) rather
+    /// than casting a raw index — `WalkTarget` is only ever minted by
+    /// `walk_target`, and this helper keeps that true for tests too.
+    ///
+    /// Anchors on the nearest window-anchored neighbor (tier 1/2) instead of
+    /// the `None`-focused boundary rule (tier 4): a bare `None` walk now falls
+    /// through to the tier-3 last-visited memory whenever a prior commit in
+    /// the same `Bookmarks` armed it, which could land somewhere other than
+    /// `idx`. Scanning past a dangling neighbor before anchoring mirrors
+    /// `walk_target`'s own dangling-skip loop. The only case with no
+    /// window-anchored neighbor on either side is `idx` being the sole
+    /// attached entry in the list; given a fresh or non-dangling `walk_cursor`,
+    /// every base — boundary or memory — converges on it anyway. (A stale
+    /// cursor left pointing at a now-dangling entry isn't produced by any
+    /// call site this helper serves; if it ever were, it would trip the
+    /// `assert_eq!` below rather than silently landing elsewhere.)
     fn commit_walk_at(bm: &mut Bookmarks<usize>, idx: usize) {
         let len = bm.list().len();
-        let target = if idx == 0 {
-            bm.walk_target(WalkDirection::Forward, None, false)
-        } else if idx == len - 1 {
-            bm.walk_target(WalkDirection::Backward, None, false)
-        } else {
-            let prev_window = *bm.list()[idx - 1]
+        let before = (0..idx)
+            .rev()
+            .find(|&i| bm.list()[i].anchor().window().is_some());
+        let after = (idx + 1..len).find(|&i| bm.list()[i].anchor().window().is_some());
+        let target = if let Some(i) = before {
+            let window = *bm.list()[i]
                 .anchor()
                 .window()
-                .expect("test helper only used with window-anchored bookmarks");
-            bm.walk_target(WalkDirection::Forward, Some(&prev_window), false)
+                .expect("just found by the scan above");
+            bm.walk_target(WalkDirection::Forward, Some(&window), false)
+        } else if let Some(i) = after {
+            let window = *bm.list()[i]
+                .anchor()
+                .window()
+                .expect("just found by the scan above");
+            bm.walk_target(WalkDirection::Backward, Some(&window), false)
+        } else {
+            bm.walk_target(WalkDirection::Forward, None, false)
         }
         .expect("idx must be in bounds");
         assert_eq!(target.index(), idx, "test helper miscomputed the target");
@@ -1322,6 +1426,251 @@ mod tests {
                 .map(WalkTarget::index),
             Some(1)
         );
+    }
+
+    #[test]
+    fn walk_tier1_live_cursor_beats_last_visited_memory() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2, 3] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        // Walk lands on window 1 (index 0), parking a live cursor there.
+        commit_walk_at(&mut bm, 0);
+        // A return-bounce onto window 3 updates the memory to a *different*
+        // bookmark without touching the walk cursor (commit_return never
+        // resets it), so the cursor and the memory now disagree.
+        bm.commit_return(&3, OrderMode::Manual);
+        assert_eq!(bm.last_visited(), bm.id_for_window(&3));
+        assert_eq!(bm.walk_cursor(), Some(0));
+        // Focused still on window 1 (the live cursor's own window): the
+        // cursor wins over the memory, stepping forward to index 1.
+        assert_eq!(
+            bm.walk_target(WalkDirection::Forward, Some(&1), false)
+                .map(WalkTarget::index),
+            Some(1),
+            "tier 1 (live cursor) takes precedence over tier 3 (last-visited memory)"
+        );
+    }
+
+    #[test]
+    fn walk_tier2_focused_bookmark_beats_last_visited_memory() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2, 3] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        // Arm the memory on window 3 (index 2) via an ordinary jump, which
+        // also clears the walk cursor.
+        bm.commit_jump(&3, OrderMode::Manual);
+        assert_eq!(bm.last_visited(), bm.id_for_window(&3));
+        assert_eq!(bm.walk_cursor(), None);
+        // Focused on window 1 (its own bookmark, index 0), with no live
+        // cursor: tier 2 wins over the tier-3 memory (index 2).
+        assert_eq!(
+            bm.walk_target(WalkDirection::Forward, Some(&1), false)
+                .map(WalkTarget::index),
+            Some(1),
+            "tier 2 (focused window's own bookmark) takes precedence over tier 3"
+        );
+    }
+
+    #[test]
+    fn walk_reentry_lands_on_remembered_bookmark_from_unbookmarked_focus() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2, 3] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        // Remember window 2 (index 1) via an ordinary jump, then focus
+        // wanders to an unrelated, non-bookmarked window.
+        bm.commit_jump(&2, OrderMode::Manual);
+        assert_eq!(bm.last_visited(), bm.id_for_window(&2));
+        // Re-entry lands directly on index 1 — no step — in both directions.
+        assert_eq!(
+            bm.walk_target(WalkDirection::Forward, Some(&99), false)
+                .map(WalkTarget::index),
+            Some(1),
+            "forward re-entry lands on the remembered bookmark, not past it"
+        );
+        assert_eq!(
+            bm.walk_target(WalkDirection::Backward, Some(&99), false)
+                .map(WalkTarget::index),
+            Some(1),
+            "backward re-entry lands on the remembered bookmark, not past it"
+        );
+    }
+
+    #[test]
+    fn walk_reentry_lands_on_remembered_bookmark_from_no_focus() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2, 3] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        bm.commit_jump(&2, OrderMode::Manual);
+        assert_eq!(
+            bm.walk_target(WalkDirection::Forward, None, false)
+                .map(WalkTarget::index),
+            Some(1),
+            "forward re-entry with no focused window lands on the remembered bookmark"
+        );
+        assert_eq!(
+            bm.walk_target(WalkDirection::Backward, None, false)
+                .map(WalkTarget::index),
+            Some(1),
+            "backward re-entry with no focused window lands on the remembered bookmark"
+        );
+    }
+
+    #[test]
+    fn walk_reentry_then_next_step_continues_from_landing() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2, 3] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        bm.commit_jump(&2, OrderMode::Manual);
+        let target = bm
+            .walk_target(WalkDirection::Forward, Some(&99), false)
+            .expect("memory resolves to index 1");
+        assert_eq!(
+            target.index(),
+            1,
+            "re-entry lands on the remembered bookmark"
+        );
+        bm.commit_walk(target);
+        // The next press is an ordinary tier-1 step from the now-live cursor,
+        // not another re-entry onto the memory.
+        assert_eq!(
+            bm.walk_target(WalkDirection::Forward, Some(&2), false)
+                .map(WalkTarget::index),
+            Some(2),
+            "subsequent step continues from the landing"
+        );
+    }
+
+    #[test]
+    fn walk_falls_back_to_boundary_when_remembered_bookmark_removed() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2, 3] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        bm.commit_jump(&2, OrderMode::Manual);
+        let remembered = bm.last_visited();
+        let id2 = bm.id_for_window(&2).unwrap();
+        bm.remove_by_id(id2);
+        assert_eq!(
+            bm.last_visited(),
+            remembered,
+            "removal does not eagerly clear the memory"
+        );
+        // List is now [1, 3]; the memory's id is gone, so the walk falls back
+        // to the boundary entry (index 0).
+        assert_eq!(
+            bm.walk_target(WalkDirection::Forward, Some(&99), false)
+                .map(WalkTarget::index),
+            Some(0),
+            "unresolvable memory falls through to the boundary"
+        );
+    }
+
+    #[test]
+    fn walk_falls_back_to_boundary_when_remembered_bookmark_dangles() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        let _ = bm.add_or_repress(1, a, RepressPolicy::MoveToFront);
+        let r = bm.add_rule(rule(Some("^app$"), None));
+        let _ = bm.add_or_repress(3, a, RepressPolicy::MoveToFront);
+        assert_eq!(bm.attach_first_matching(2, a, Some("app"), None), Some(r));
+        // Layout: [win 1, rule→2, win 3]. Remember the rule-attached
+        // bookmark (index 1).
+        bm.commit_jump(&2, OrderMode::Manual);
+        assert_eq!(bm.last_visited(), Some(r));
+        // Window 2 closes: the rule dangles in place at index 1, keeping its
+        // slot rather than being removed.
+        bm.prune_window(&2);
+        // The memory no longer resolves (its entry is unattached): the walk
+        // must fall through to the boundary (index 0, win 1). Landing on the
+        // dangling index-1 entry and then skipping past it would instead
+        // reach index 2 — a different, wrong result that this pins against.
+        assert_eq!(
+            bm.walk_target(WalkDirection::Forward, Some(&99), false)
+                .map(WalkTarget::index),
+            Some(0),
+            "unresolvable memory falls through to the boundary, not a land-then-skip"
+        );
+    }
+
+    #[test]
+    fn commit_return_onto_non_bookmarked_window_preserves_last_visited() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        // Key-jump onto window 2, leaving window 99 (not itself a bookmark).
+        bm.commit_key_jump(&2, Some(99), OrderMode::Manual);
+        assert_eq!(bm.last_visited(), bm.id_for_window(&2));
+        // Bounce back to the left window, which is not bookmarked.
+        bm.commit_return(&99, OrderMode::Manual);
+        assert_eq!(
+            bm.last_visited(),
+            bm.id_for_window(&2),
+            "bouncing onto a non-bookmarked window leaves the memory untouched"
+        );
+    }
+
+    #[test]
+    fn observe_focus_records_bookmarked_and_preserves_through_non_bookmarked() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        bm.observe_focus(Some(&2), OrderMode::Manual);
+        assert_eq!(bm.last_visited(), bm.id_for_window(&2));
+        // Focus wanders to a non-bookmarked window: the cursor resets
+        // (existing behavior) but the memory is left alone.
+        bm.observe_focus(Some(&99), OrderMode::Manual);
+        assert_eq!(
+            bm.last_visited(),
+            bm.id_for_window(&2),
+            "focusing away from bookmarks must not erase the memory"
+        );
+    }
+
+    #[test]
+    fn walk_filter_noop_focus_preserves_last_visited() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2, 3] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        commit_walk_at(&mut bm, 2);
+        assert_eq!(bm.last_visited(), bm.id_for_window(&3));
+        // The walk-filter: observing the landed window's own focus is a no-op.
+        let mutated = bm.observe_focus(Some(&3), OrderMode::Manual);
+        assert!(!mutated, "walk-driven focus is filtered, not observed");
+        assert_eq!(
+            bm.last_visited(),
+            bm.id_for_window(&3),
+            "the memory recorded synchronously by commit_walk survives the no-op"
+        );
+    }
+
+    #[test]
+    fn commit_jump_and_commit_key_jump_record_last_visited() {
+        let (a, _) = two_activities();
+        let mut bm = Bookmarks::<usize>::default();
+        for w in [1, 2, 3] {
+            let _ = bm.add_or_repress(w, a, RepressPolicy::MoveToFront);
+        }
+        bm.commit_jump(&2, OrderMode::Manual);
+        assert_eq!(bm.last_visited(), bm.id_for_window(&2));
+        bm.commit_key_jump(&3, Some(2), OrderMode::Manual);
+        assert_eq!(bm.last_visited(), bm.id_for_window(&3));
     }
 
     #[test]

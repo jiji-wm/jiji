@@ -8690,7 +8690,11 @@ impl<W: LayoutElement> Layout<W> {
         // (input dispatch, against config binds and sibling bookmarks) and on
         // every config reload (`revalidate_bookmark_keys`, same two checks) —
         // this generic-`Layout` code cannot itself re-check `ModKey`
-        // normalization.
+        // normalization. `last_visited`'s only standing invariant is
+        // monotonicity against `next_id`: it is resolved lazily at walk time,
+        // so a remembered id that has since been removed or whose entry has
+        // dangled is legal (an implication, not a biconditional) and
+        // deliberately not asserted here.
         {
             let list = self.bookmarks.list();
             if let Some(cursor) = self.bookmarks.walk_cursor() {
@@ -8698,6 +8702,14 @@ impl<W: LayoutElement> Layout<W> {
                     cursor < list.len(),
                     "bookmark walk cursor {cursor} out of bounds (len {})",
                     list.len(),
+                );
+            }
+            if let Some(last_visited) = self.bookmarks.last_visited() {
+                assert!(
+                    last_visited.get() < self.bookmarks.next_id(),
+                    "bookmark last_visited id {} not below next_id {}",
+                    last_visited.get(),
+                    self.bookmarks.next_id(),
                 );
             }
             let mut seen_ids = HashSet::new();
