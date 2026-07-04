@@ -268,6 +268,28 @@ fn collect_actions(config: &Config) -> Vec<&Action> {
         actions.push(&bind.action);
     }
 
+    // Bookmark actions are opt-in decoration: only show the ones actually bound.
+    for action in [
+        &Action::EnterBookmarkMode,
+        &Action::OpenBookmarkSwitcher,
+        &Action::AddBookmark,
+        &Action::WalkBookmarksBackward,
+        &Action::WalkBookmarksForward,
+    ] {
+        if binds.iter().any(|bind| bind.action == *action) {
+            actions.push(action);
+        }
+    }
+
+    // RemoveBookmark carries a skip-confirmation payload; push the bound bind's
+    // action rather than a default so format_bind matches on the actual value.
+    if let Some(bind) = binds
+        .iter()
+        .find(|bind| matches!(bind.action, Action::RemoveBookmark(_)))
+    {
+        actions.push(&bind.action);
+    }
+
     // Add actions with a custom hotkey-overlay-title.
     for bind in binds {
         if matches!(bind.hotkey_overlay_title, Some(Some(_))) {
@@ -730,5 +752,93 @@ mod tests {
             ),
             @" Super + P : Hello"
         );
+    }
+
+    #[test]
+    fn collect_actions_includes_bookmark_actions_when_bound() {
+        let config = Config::parse_mem(
+            r#"binds {
+                Mod+B { add-bookmark; }
+                Mod+X { remove-bookmark; }
+                Mod+Left { walk-bookmarks-backward; }
+                Mod+Right { walk-bookmarks-forward; }
+                Mod+O { open-bookmark-switcher; }
+                Mod+E { enter-bookmark-mode; }
+            }"#,
+        )
+        .unwrap();
+        let actions = collect_actions(&config);
+
+        assert!(actions.contains(&&Action::EnterBookmarkMode));
+        assert!(actions.contains(&&Action::OpenBookmarkSwitcher));
+        assert!(actions.contains(&&Action::AddBookmark));
+        assert!(actions.contains(&&Action::WalkBookmarksBackward));
+        assert!(actions.contains(&&Action::WalkBookmarksForward));
+        assert!(actions
+            .iter()
+            .any(|action| matches!(action, Action::RemoveBookmark(_))));
+    }
+
+    #[test]
+    fn collect_actions_excludes_bookmark_actions_when_unbound() {
+        let config = Config::parse_mem("").unwrap();
+        let actions = collect_actions(&config);
+
+        assert!(!actions.contains(&&Action::EnterBookmarkMode));
+        assert!(!actions.contains(&&Action::OpenBookmarkSwitcher));
+        assert!(!actions.contains(&&Action::AddBookmark));
+        assert!(!actions.contains(&&Action::WalkBookmarksBackward));
+        assert!(!actions.contains(&&Action::WalkBookmarksForward));
+        assert!(!actions
+            .iter()
+            .any(|action| matches!(action, Action::RemoveBookmark(_))));
+    }
+
+    #[test]
+    fn collect_actions_remove_bookmark_carries_bound_payload() {
+        let config = Config::parse_mem(
+            r#"binds {
+                Mod+X { remove-bookmark skip-confirmation=true; }
+            }"#,
+        )
+        .unwrap();
+        let actions = collect_actions(&config);
+
+        assert!(actions.contains(&&Action::RemoveBookmark(true)));
+        assert!(!actions.contains(&&Action::RemoveBookmark(false)));
+    }
+
+    #[test]
+    fn collect_actions_remove_bookmark_defaults_to_unskipped_payload() {
+        let config = Config::parse_mem(
+            r#"binds {
+                Mod+X { remove-bookmark; }
+            }"#,
+        )
+        .unwrap();
+        let actions = collect_actions(&config);
+
+        assert!(actions.contains(&&Action::RemoveBookmark(false)));
+        assert!(!actions.contains(&&Action::RemoveBookmark(true)));
+    }
+
+    #[test]
+    fn collect_actions_bookmark_bind_with_custom_title_is_not_duplicated() {
+        let config = Config::parse_mem(
+            r#"binds {
+                Mod+B hotkey-overlay-title="Bookmark It" { add-bookmark; }
+            }"#,
+        )
+        .unwrap();
+        let actions = collect_actions(&config);
+
+        let count = actions
+            .iter()
+            .filter(|a| matches!(a, Action::AddBookmark))
+            .count();
+        assert_eq!(count, 1);
+
+        let (_, title) = format_bind(&config.binds.0, &Action::AddBookmark).unwrap();
+        assert_eq!(title, "Bookmark It");
     }
 }
