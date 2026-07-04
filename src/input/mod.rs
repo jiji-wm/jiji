@@ -49,7 +49,7 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::bookmarks::{
-    BookmarkJumpOutcome, BookmarkKey, BookmarkName, BookmarkRule, WalkDirection,
+    BookmarkJumpOutcome, BookmarkKey, BookmarkKeyError, BookmarkName, BookmarkRule, WalkDirection,
 };
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{
@@ -1881,21 +1881,12 @@ impl State {
                         });
                     }
                 };
-                let bookmark_key = match BookmarkKey::new(parsed) {
-                    Ok(k) => k,
-                    Err(err) => {
-                        return Err(DoActionError::BookmarkKeyInvalid {
-                            key: raw_key,
-                            reason: err.to_string(),
-                        });
-                    }
-                };
 
-                // Reject collision against the static config binds, the
-                // recent-windows binds, and every other bookmark's key before
-                // touching layout state. MRU-open-only binds
-                // (`opened_bindings`) are deliberately not checked: bookmark
-                // binds are suppressed while the MRU is open (see
+                // The shared validator rejects collision against the static
+                // config binds, the recent-windows binds, and every other
+                // bookmark's key before touching layout state. MRU-open-only
+                // binds (`opened_bindings`) are deliberately not checked:
+                // bookmark binds are suppressed while the MRU is open (see
                 // `make_binds_iter`), so they can never be live at the same
                 // time. The sibling-bookmark check reads the layout list
                 // directly (not the `Niri::bookmark_binds` synthetic mirror,
@@ -1904,30 +1895,37 @@ impl State {
                 // dispatched in the same iteration can't both see a stale,
                 // pre-assign view and double-accept a collision.
                 let mod_key = self.backend.mod_key(&self.niri.config.borrow());
-                let collides = {
+                let candidate = {
                     let config = self.niri.config.borrow();
-                    config
-                        .binds
-                        .0
-                        .iter()
-                        .chain(config.recent_windows.binds.iter())
-                        .any(|bind| keys_conflict(bind.key, parsed, mod_key))
-                } || bookmark_key_collides_with_siblings(
-                    self.niri
-                        .layout
-                        .bookmarks()
-                        .list()
-                        .iter()
-                        .filter_map(|b| b.key().map(|k| (b.id().get(), k.key()))),
-                    id,
-                    parsed,
-                    mod_key,
-                );
-                if collides {
-                    return Err(DoActionError::BookmarkKeyCollision {
-                        key: key_to_wire_string(parsed),
-                    });
-                }
+                    validate_bookmark_key_candidate(
+                        parsed,
+                        id,
+                        config
+                            .binds
+                            .0
+                            .iter()
+                            .chain(config.recent_windows.binds.iter()),
+                        self.niri
+                            .layout
+                            .bookmarks()
+                            .list()
+                            .iter()
+                            .filter_map(|b| b.key().map(|k| (b.id().get(), k.key()))),
+                        mod_key,
+                    )
+                };
+                let bookmark_key = match candidate {
+                    Ok(bookmark_key) => bookmark_key,
+                    Err(BookmarkKeyRejection::Invalid(err)) => {
+                        return Err(DoActionError::BookmarkKeyInvalid {
+                            key: raw_key,
+                            reason: err.to_string(),
+                        });
+                    }
+                    Err(BookmarkKeyRejection::Collision { key, .. }) => {
+                        return Err(DoActionError::BookmarkKeyCollision { key });
+                    }
+                };
 
                 if let Err(err) = self.niri.layout.assign_bookmark_key(id, bookmark_key) {
                     debug!("assign_bookmark_key: {err:?}, propagating");
@@ -6245,6 +6243,78 @@ fn bookmark_key_collides_with_siblings(
         .any(|(_, key)| keys_conflict(key, candidate, mod_key))
 }
 
+/// Why [`validate_bookmark_key_candidate`] rejected a candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BookmarkKeyRejection {
+    /// Failed [`BookmarkKey::new`] validation: no modifiers, or a non-keysym
+    /// trigger (the latter cannot arise from a live keyboard press — the
+    /// interactive capture surface always builds a keysym candidate — but
+    /// the typed `AssignBookmarkKey` path can still name one via a parsed
+    /// string). Carries the typed [`BookmarkKeyError`] rather than its
+    /// flattened `Display` string, so each consumer can match on the actual
+    /// variant instead of trusting a comment about which one is reachable.
+    Invalid(BookmarkKeyError),
+    /// Matches an existing key. `key` is the canonical formatted key string;
+    /// `with` names which side of the collision matched.
+    Collision {
+        key: String,
+        with: BookmarkKeyCollidee,
+    },
+}
+
+/// Which existing binding a rejected [`BookmarkKeyRejection::Collision`]
+/// matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BookmarkKeyCollidee {
+    /// A static config bind or a recent-windows bind — checked as one
+    /// chained set, as today.
+    ConfigBind,
+    /// Another bookmark's assigned key.
+    SiblingBookmark,
+}
+
+/// Validates `candidate` as the new dynamic keybind for the bookmark
+/// `excluding_id`.
+///
+/// The single policy shared by the typed `Action::AssignBookmarkKey`
+/// dispatch arm and the interactive `Action::CaptureBookmarkKey` capture
+/// surface, so the two paths cannot drift apart. Checks, in order:
+/// [`BookmarkKey::new`] (keysym trigger, at least one modifier), collision
+/// against `config_binds` under [`keys_conflict`] normalization, then
+/// collision against `keyed_bookmarks` via
+/// [`bookmark_key_collides_with_siblings`] (excluding `excluding_id`, so
+/// re-capturing a bookmark's own current key stays idempotent).
+///
+/// # Errors
+///
+/// Returns [`BookmarkKeyRejection::Invalid`] or
+/// [`BookmarkKeyRejection::Collision`] on the first check that fails.
+fn validate_bookmark_key_candidate<'a>(
+    candidate: Key,
+    excluding_id: u64,
+    mut config_binds: impl Iterator<Item = &'a Bind>,
+    keyed_bookmarks: impl Iterator<Item = (u64, Key)>,
+    mod_key: ModKey,
+) -> Result<BookmarkKey, BookmarkKeyRejection> {
+    let bookmark_key = BookmarkKey::new(candidate).map_err(BookmarkKeyRejection::Invalid)?;
+
+    if config_binds.any(|bind| keys_conflict(bind.key, candidate, mod_key)) {
+        return Err(BookmarkKeyRejection::Collision {
+            key: key_to_wire_string(candidate),
+            with: BookmarkKeyCollidee::ConfigBind,
+        });
+    }
+
+    if bookmark_key_collides_with_siblings(keyed_bookmarks, excluding_id, candidate, mod_key) {
+        return Err(BookmarkKeyRejection::Collision {
+            key: key_to_wire_string(candidate),
+            with: BookmarkKeyCollidee::SiblingBookmark,
+        });
+    }
+
+    Ok(bookmark_key)
+}
+
 fn find_configured_switch_action(
     bindings: &SwitchBinds,
     switch: Switch,
@@ -6919,6 +6989,7 @@ mod tests {
 
     use super::*;
     use crate::animation::Clock;
+    use crate::layout::bookmarks::BookmarkKeyError;
 
     #[test]
     fn bindings_suppress_keys() {
@@ -7427,6 +7498,185 @@ mod tests {
                 ModKey::Super
             ),
             "a same-cycle sibling assign must see the just-assigned key immediately",
+        );
+    }
+
+    #[test]
+    fn validate_bookmark_key_candidate_rejects_modifier_less_key() {
+        let bare = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::empty(),
+        };
+
+        let result = validate_bookmark_key_candidate(
+            bare,
+            1,
+            std::iter::empty(),
+            std::iter::empty(),
+            ModKey::Super,
+        );
+
+        assert_eq!(
+            result,
+            Err(BookmarkKeyRejection::Invalid(BookmarkKeyError::NoModifiers))
+        );
+    }
+
+    #[test]
+    fn validate_bookmark_key_candidate_rejects_static_bind_collision_both_directions() {
+        // A `Super`-held candidate must collide with a `COMPOSITOR`-held
+        // static bind on the same trigger, and vice versa — the same
+        // bidirectional `ModKey` normalization `keys_conflict` provides.
+        let compositor_bind = Bind {
+            key: Key {
+                trigger: Trigger::Keysym(Keysym::m),
+                modifiers: Modifiers::COMPOSITOR,
+            },
+            action: Action::CloseWindow,
+            repeat: true,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        };
+        let super_candidate = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::SUPER,
+        };
+        assert_eq!(
+            validate_bookmark_key_candidate(
+                super_candidate,
+                1,
+                std::iter::once(&compositor_bind),
+                std::iter::empty(),
+                ModKey::Super,
+            ),
+            Err(BookmarkKeyRejection::Collision {
+                key: key_to_wire_string(super_candidate),
+                with: BookmarkKeyCollidee::ConfigBind,
+            })
+        );
+
+        let super_bind = Bind {
+            key: Key {
+                trigger: Trigger::Keysym(Keysym::m),
+                modifiers: Modifiers::SUPER,
+            },
+            action: Action::CloseWindow,
+            repeat: true,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        };
+        let compositor_candidate = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::COMPOSITOR,
+        };
+        assert_eq!(
+            validate_bookmark_key_candidate(
+                compositor_candidate,
+                1,
+                std::iter::once(&super_bind),
+                std::iter::empty(),
+                ModKey::Super,
+            ),
+            Err(BookmarkKeyRejection::Collision {
+                key: key_to_wire_string(compositor_candidate),
+                with: BookmarkKeyCollidee::ConfigBind,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_bookmark_key_candidate_rejects_config_bind_collision_from_any_source() {
+        // The validator treats `config_binds` as one opaque chained set — the
+        // static/recent-windows split happens at the call site (both dispatch
+        // arms chain `config.binds.0` with `config.recent_windows.binds`), so
+        // a recent-windows-only bind collides exactly like a static one.
+        let recent_windows_bind = Bind {
+            key: Key {
+                trigger: Trigger::Keysym(Keysym::n),
+                modifiers: Modifiers::COMPOSITOR,
+            },
+            action: Action::FocusColumnLeft,
+            repeat: true,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        };
+        let candidate = Key {
+            trigger: Trigger::Keysym(Keysym::n),
+            modifiers: Modifiers::COMPOSITOR,
+        };
+
+        assert_eq!(
+            validate_bookmark_key_candidate(
+                candidate,
+                1,
+                std::iter::once(&recent_windows_bind),
+                std::iter::empty(),
+                ModKey::Super,
+            ),
+            Err(BookmarkKeyRejection::Collision {
+                key: key_to_wire_string(candidate),
+                with: BookmarkKeyCollidee::ConfigBind,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_bookmark_key_candidate_rejects_sibling_but_not_own_id() {
+        let key = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::COMPOSITOR,
+        };
+        let keyed = vec![(1, key)];
+
+        // Bookmark 2 cannot take bookmark 1's key.
+        assert_eq!(
+            validate_bookmark_key_candidate(
+                key,
+                2,
+                std::iter::empty(),
+                keyed.clone().into_iter(),
+                ModKey::Super,
+            ),
+            Err(BookmarkKeyRejection::Collision {
+                key: key_to_wire_string(key),
+                with: BookmarkKeyCollidee::SiblingBookmark,
+            })
+        );
+
+        // Bookmark 1 re-capturing its own current key is idempotent, not a
+        // collision.
+        assert!(validate_bookmark_key_candidate(
+            key,
+            1,
+            std::iter::empty(),
+            keyed.into_iter(),
+            ModKey::Super,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_bookmark_key_candidate_accepts_valid_chord() {
+        let key = Key {
+            trigger: Trigger::Keysym(Keysym::m),
+            modifiers: Modifiers::COMPOSITOR,
+        };
+
+        assert_eq!(
+            validate_bookmark_key_candidate(
+                key,
+                1,
+                std::iter::empty(),
+                std::iter::empty(),
+                ModKey::Super,
+            ),
+            Ok(BookmarkKey::new(key).expect("a chorded keysym is a valid bookmark key"))
         );
     }
 }
