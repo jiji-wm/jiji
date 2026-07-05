@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HOOK_DIR=$(dirname "$(readlink -f "$0")")
+exec "$HOOK_DIR/check-no-dd-refs.sh" --message "$1"

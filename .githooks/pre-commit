@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HOOK_DIR=$(dirname "$(readlink -f "$0")")
+
+# 1) rustfmt check.
+if ! cargo +nightly fmt --all -- --check; then
+    cat >&2 <<'MSG'
+
+✖ rustfmt check failed.
+  Run:  cargo +nightly fmt --all
+  Then re-stage and re-commit.
+  (Plain `cargo fmt` is not enough — the rustfmt.toml here uses
+  nightly-only options that stable rustfmt silently ignores.)
+
+MSG
+    exit 1
+fi
+
+# 2) Internal-reference check on staged code.
+"$HOOK_DIR/check-no-dd-refs.sh" --staged
