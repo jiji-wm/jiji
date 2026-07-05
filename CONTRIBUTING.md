@@ -1,12 +1,10 @@
 # Contributing to jiji
 
-jiji is a personal fork of [niri](https://github.com/niri-wm/niri). For general compositor improvements — bug fixes, new protocols, performance — please send PRs to upstream niri. Those changes benefit everyone and will reach jiji through periodic rebases.
+Issues and PRs are welcome on the project's GitHub repos under the [`jiji-wm`](https://github.com/jiji-wm) organization.
 
-## jiji-specific contributions
+One ask, in the spirit of being a good downstream: if your fix applies equally to [niri](https://github.com/niri-wm/niri) (a bug in the shared tiling core, a new protocol, a performance win), consider sending it upstream as well — it benefits both projects, and jiji picks it up through periodic rebases.
 
-The Activities feature and anything else that is jiji-only will not go upstream. Issues and PRs for jiji-specific work are welcome on the project's GitHub repos under the [`jiji-wm`](https://github.com/jiji-wm) organization.
-
-Before opening a PR, skim the architecture notes under `docs/activities/` to understand the current model and what is already planned or explicitly out of scope. Opening an issue first to discuss the approach is appreciated.
+Before opening a PR for feature work, skim the feature overview in the [README](README.md) to understand the current model. Opening an issue first to discuss the approach is appreciated.
 
 ## Coding conventions
 

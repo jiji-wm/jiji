@@ -1,7 +1,0 @@
-contact_links:
-  - name: Upstream niri (underlying compositor features)
-    url: https://github.com/niri-wm/niri
-    about: jiji is a fork of niri; questions and requests about the underlying scrollable-tiling features belong upstream.
-  - name: Upstream niri Matrix room
-    url: https://matrix.to/#/#niri:matrix.org
-    about: Chat about the underlying niri features with the upstream community.

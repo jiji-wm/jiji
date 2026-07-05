@@ -1,4 +1,4 @@
-> **Note (jiji fork):** everything under `docs/wiki/` is a vendored, unmodified snapshot of **upstream niri's** wiki, kept for local reference during rebases. Binary names, config paths, and env vars here describe niri (`niri`, `~/.config/niri/`, `$NIRI_SOCKET`), not jiji (`jiji`, `~/.config/jiji/`, `$JIJI_SOCKET`). For jiji-specific behavior see the top-level [README](../../README.md).
+> **Note:** this is jiji's reference documentation, inherited from the pre-fork codebase and still being adapted. Where a page says `niri`, `~/.config/niri/`, or `$NIRI_SOCKET`, read `jiji`, `~/.config/jiji/`, and `$JIJI_SOCKET`; links to niri community channels describe the upstream project, not jiji. For jiji-specific features and where to report issues, see the top-level [README](../../README.md).
 
 Welcome to the niri documentation!
 

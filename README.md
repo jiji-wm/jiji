@@ -1,19 +1,18 @@
-# jiji — A scrollable-tiling Wayland compositor (hard fork of niri)
+# jiji — a scrollable-tiling Wayland compositor with Activities
 
 ## About
 
-jiji is a hard fork of [niri](https://github.com/niri-wm/niri), periodically rebased against upstream.
-It exists primarily as the author's daily-driver compositor and as the vehicle for the Activities feature described below.
+jiji is a scrollable-tiling Wayland compositor built around **Activities** — named, switchable desktop contexts that each own their own ordered set of workspaces and windows. It ships as the `jiji` binary, uses `$JIJI_SOCKET`, reads config from `~/.config/jiji/`, and provides the `jiji-ipc` crate.
 
-jiji is identity-distinct from upstream niri at every surface it controls: it ships as the `jiji` binary, uses `$JIJI_SOCKET`, reads config from `~/.config/jiji/`, and provides the `jiji-ipc` crate rather than `niri-ipc`. Third-party tools written against upstream niri's socket and binary name will not work with jiji without porting.
+jiji is an independent project. It began as a fork of the excellent [niri](https://github.com/niri-wm/niri) compositor and periodically rebases on it to inherit upstream improvements — see [Credits](#credits) — but it has its own identity, IPC surface, tooling ecosystem, and release cadence, and is not a drop-in niri replacement: tools written against niri's socket and binary name need porting.
 
-The fork does not make compatibility promises and is not intended as a general-purpose niri replacement.
+It is primarily the author's daily-driver compositor; expect a personal project's pace and priorities.
 
-## What jiji adds
+## Features
 
 ### Activities
 
-jiji implements KDE-style Activities — named, switchable contexts that each own their own ordered set of workspaces and windows. Switching an activity swaps the entire visible workspace set on every connected output, so completely separate workflows (e.g. "Work", "Personal", "Gaming") never bleed into each other.
+KDE-style Activities — named, switchable contexts that each own their own ordered set of workspaces and windows. Switching an activity swaps the entire visible workspace set on every connected output, so completely separate workflows (e.g. "Work", "Personal", "Gaming") never bleed into each other.
 
 The workspace-as-atom model means workspaces can belong to multiple activities; windows inherit visibility from their workspace. Every activity keeps at least one empty workspace per output, `focus-workspace` can be scoped to an activity, and activity switches have their own configurable animation.
 
@@ -35,24 +34,30 @@ Windows and workspaces can be bookmarked and recalled by key. The subsystem cove
 
 `add-workspace-up` / `add-workspace-down` insert a fresh workspace adjacent to the focused one, and `move-window-to-new-workspace-up` / `-down` carry the focused window into it — no round-trip through the workspace list's tail.
 
-### IPC additions
+### IPC
 
-The `jiji-ipc` crate carries the surface backing all of the above (activities, bookmarks, view paging, workspace insertion) plus quality-of-life changes: explicit no-op/error responses where upstream silently ignores unreachable targets (e.g. focusing an unknown workspace name or moving a window to a workspace in another activity), `id:N` workspace references, per-window application tags, and an activity-aware event stream for bars and external tools.
+The `jiji-ipc` crate carries the surface backing all of the above (activities, bookmarks, view paging, workspace insertion) plus quality-of-life changes: explicit no-op/error responses where a target is unreachable (e.g. focusing an unknown workspace name or moving a window to a workspace in another activity), `id:N` workspace references, per-window application tags, and an activity-aware event stream for bars and external tools.
 
-## Everything else
+### Scrollable tiling
 
-For documentation on the underlying scrollable-tiling features, configuration, and Wayland protocol support, see [upstream niri's wiki](https://niri-wm.github.io/niri/Getting-Started.html). All of upstream niri's behavior applies unless jiji has explicitly diverged (binary name, socket env var, config directory, and the features above are the current divergences). A vendored snapshot of the upstream wiki is kept under [`docs/wiki/`](docs/wiki/) for rebase reference — it documents upstream niri, not jiji.
+Underneath the jiji-specific features sits the full scrollable-tiling model jiji inherited and keeps rebasing on: windows arranged in columns on an infinite horizontal strip per workspace, dynamic workspaces per monitor, built-in screenshot UI, overview, monitor hot-plug handling, fractional scaling, and wide Wayland protocol support.
+
+## Documentation
+
+Reference documentation lives under [`docs/wiki/`](docs/wiki/) in this repo. It is inherited from the pre-fork codebase and is being adapted; where a page still says `niri`, `~/.config/niri/`, or `$NIRI_SOCKET`, read `jiji`, `~/.config/jiji/`, and `$JIJI_SOCKET`. The default config with inline documentation is [`resources/default-config.kdl`](resources/default-config.kdl).
 
 ## Building
-
-Same toolchain and system dependencies as upstream niri (see the [upstream build docs](https://github.com/niri-wm/niri/wiki/Getting-Started)):
 
 ```
 cargo build --release
 cargo test --all --exclude jiji-visual-tests
 ```
 
-The binary is `target/release/jiji`; session files (`jiji.desktop`, `jiji.service`, `jiji-portals.conf`, `jiji-session`) live in `resources/`. Nix and RPM packaging from upstream are not maintained in this fork.
+The binary is `target/release/jiji`; session files (`jiji.desktop`, `jiji.service`, `jiji-portals.conf`, `jiji-session`) live in `resources/`. Build dependencies match what [`.github/workflows/ci.yml`](.github/workflows/ci.yml) installs. Nix and RPM packaging are not maintained.
+
+## Bugs and questions
+
+jiji issues — including issues in the inherited tiling behavior as it behaves *in jiji* — belong on this repo's [issue tracker](https://github.com/jiji-wm/jiji/issues) or the other repos under the [`jiji-wm`](https://github.com/jiji-wm) organization. Please don't take jiji problems to the niri project; they rightly won't support a fork.
 
 ## Companion projects
 
@@ -64,16 +69,9 @@ The jiji ecosystem lives in sibling repos under the [`jiji-wm`](https://github.c
 - [`jiji-firefox-workspaces`](https://github.com/jiji-wm/jiji-firefox-workspaces) — restores Firefox windows to their workspaces across sessions (WebExtension + native-messaging host).
 - [`jiji-hamster`](https://github.com/jiji-wm/jiji-hamster) / [`jiji-hamster-bridge`](https://github.com/jiji-wm/jiji-hamster-bridge) — Hamster time-tracker fork and a daemon that pauses/resumes tracking based on jiji activity focus.
 
-## Status
+## Credits
 
-jiji is the author's daily-driver compositor. It is a personal project — not a community fork, not an upstream-replacement. There is no Matrix channel or community Discord for jiji specifically.
-
-For questions about the underlying niri features, upstream's channels are the right place:
-
-- Matrix: https://matrix.to/#/#niri:matrix.org
-- Upstream repo: https://github.com/niri-wm/niri
-
-jiji-specific issues belong on the project's GitHub repos under the [`jiji-wm`](https://github.com/jiji-wm) organization.
+jiji stands on the shoulders of [niri](https://github.com/niri-wm/niri) by Ivan Molodetskikh ([@YaLTeR](https://github.com/YaLTeR)) and its contributors. The scrollable-tiling core, the Smithay-based architecture, and much of what makes jiji pleasant to use every day is their work — thank you. jiji periodically rebases on niri so upstream fixes and features keep flowing in; if you want the original, actively supported compositor with a real community, use niri.
 
 ## Contributing
 
