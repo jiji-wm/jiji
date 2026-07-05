@@ -8,7 +8,7 @@ Before opening a PR for feature work, skim the feature overview in the [README](
 
 ## Coding conventions
 
-Fork-specific conventions — error discipline, invariant enforcement, borrow-order rules, commit hygiene — are documented in [CLAUDE.md](CLAUDE.md). The pre-commit hooks enforce the most mechanical rules; the rest are checked in review.
+Fork-specific conventions — error discipline, invariant enforcement, borrow-order rules, commit hygiene — are documented in [CLAUDE.md](CLAUDE.md). The most mechanical rules (rustfmt, no internal design-doc references) are enforced by versioned git hooks in [`.githooks/`](.githooks/) — run `./scripts/setup-hooks.sh` once to enable them (optional: CI and review enforce the same rules); the rest are checked in review.
 
 The short version:
 
@@ -21,7 +21,7 @@ The quality bar is the existing code. Match the conventions and rigor of the cod
 
 ## AI-assisted contributions
 
-AI-assisted PRs are welcome. jiji itself is developed with heavy AI assistance under a structured plan → implement → review → fix loop, so this project will not reject your contribution for how it was written — only for whether it holds up.
+AI-assisted PRs are welcome. jiji itself is developed with heavy AI assistance under a structured plan → implement → review → fix loop — the tooling and process docs live in the [jiji-workspace repo](https://github.com/jiji-wm/jiji-workspace), and you are welcome to use them yourself — so this project will not reject your contribution for how it was written, only for whether it holds up.
 
 What we ask:
 

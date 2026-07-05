@@ -69,6 +69,8 @@ The jiji ecosystem lives in sibling repos under the [`jiji-wm`](https://github.c
 - [`jiji-firefox-workspaces`](https://github.com/jiji-wm/jiji-firefox-workspaces) — restores Firefox windows to their workspaces across sessions (WebExtension + native-messaging host).
 - [`jiji-hamster`](https://github.com/jiji-wm/jiji-hamster) / [`jiji-hamster-bridge`](https://github.com/jiji-wm/jiji-hamster-bridge) — Hamster time-tracker fork and a daemon that pauses/resumes tracking based on jiji activity focus.
 
+The whole ecosystem — cross-repo docs, build/install scripts, and the multi-agent development loop — is coordinated from the [jiji-workspace repo](https://github.com/jiji-wm/jiji-workspace).
+
 ## Credits
 
 jiji stands on the shoulders of [niri](https://github.com/niri-wm/niri) by Ivan Molodetskikh ([@YaLTeR](https://github.com/YaLTeR)) and its contributors. The scrollable-tiling core, the Smithay-based architecture, and much of what makes jiji pleasant to use every day is their work — thank you. jiji periodically rebases on niri so upstream fixes and features keep flowing in; if you want the original, actively supported compositor with a real community, use niri.
