@@ -1,0 +1,3 @@
+# The base image already contains systemd, gawk and util-linux.
+FROM archlinux:base
+CMD ["/usr/lib/systemd/systemd"]

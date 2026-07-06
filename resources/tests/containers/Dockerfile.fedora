@@ -1,0 +1,4 @@
+FROM fedora:latest
+RUN dnf -y install systemd gawk util-linux shadow-utils dbus-tools dbus-broker && \
+    dnf clean all
+CMD ["/usr/sbin/init"]
