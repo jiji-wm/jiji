@@ -16,6 +16,15 @@ This file covers **fork-specific coding conventions** that are enforced in revie
 - `cargo build --release` — sanity-check release profile after any `#[cfg(debug_assertions)]` edit.
 - `cargo +nightly fmt --all` — only when explicitly asked; never as a drive-by (it pollutes diffs).
 
+### jiji-session (shell) tests
+
+`resources/jiji-session` has its own suite under `resources/tests/` — **mandatory whenever `resources/jiji-session` changes** (cargo never runs it; it is not part of any build):
+
+- `sh resources/tests/jiji-session-env-test.sh` — hermetic (~40 ms, shim binaries, no systemd). Run this at minimum, under system sh.
+- `sh resources/tests/run-all.sh [distro...]` — full suite: hermetic under every installed shell (sh/dash/bash/busybox), then real-systemd containers (debian/fedora/arch; podman or docker). Run before committing any change to the environment-import logic. On hosts with broken docker bridge DNS the container builds self-heal via a `--network=host` retry (slow first build; `BUILD_ARGS=--network=host` skips the wait).
+
+See `resources/tests/README.md` for what each layer covers.
+
 ### Implementer discipline (read by jiji-rust-implementer)
 
 - **Report the test-bucket arithmetic.** `cargo test --all --exclude jiji-visual-tests` runs four buckets; report the count as `<unit> + <config> + <ipc> + <doc>` (e.g. `565 + 45 + 21 + 1`) and explain any delta vs. the spec's baseline. An unexplained delta is a stop-and-report condition.
