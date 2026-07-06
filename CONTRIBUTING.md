@@ -8,7 +8,7 @@ Before opening a PR for feature work, skim the feature overview in the [README](
 
 ## Coding conventions
 
-Fork-specific conventions — error discipline, invariant enforcement, borrow-order rules, commit hygiene — are documented in [CLAUDE.md](CLAUDE.md). The most mechanical rules (rustfmt, no internal design-doc references) are enforced by versioned git hooks in [`.githooks/`](.githooks/) — run `./scripts/setup-hooks.sh` once to enable them (optional: CI and review enforce the same rules); the rest are checked in review.
+Fork-specific conventions — error discipline, invariant enforcement, borrow-order rules, commit hygiene — are documented in [CLAUDE.md](CLAUDE.md). The most mechanical rules (rustfmt, no internal design-doc references) are enforced by versioned git hooks that live in the [jiji-workspace](https://github.com/jiji-wm/jiji-workspace) repo's shared `.githooks/` and are wired in automatically by that repo's `scripts/clone.sh` (optional: CI and review enforce the same rules). If you're working from a standalone clone of this repo rather than the full workspace, those local hooks aren't available — CI and review still catch the same issues; the rest is checked in review.
 
 The short version:
 
