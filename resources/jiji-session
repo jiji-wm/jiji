@@ -21,6 +21,22 @@ if [ -n "$SHELL" ] &&
   fi
 fi
 
+# Drop repeated colon-list segments, keeping the first occurrence.
+dedup_colons() {
+    out='' seen=:
+    set -f
+    IFS=:
+    for seg in $1; do
+        case "$seen" in
+            *":$seg:"*) ;;
+            *) seen=$seen$seg: out=$out$seg: ;;
+        esac
+    done
+    unset IFS
+    set +f
+    printf '%s' "${out%:}"
+}
+
 # Re-apply environment.d(5) on top of the login environment, so that the
 # later import cannot overwrite what the user manager already carries
 # from environment.d (notably PATH). Plain assignments win outright;
@@ -39,12 +55,27 @@ merge_environment_d() {
     unset IFS
 
     if [ -n "$envgen" ]; then
+        # A generator run against an empty environment identifies
+        # self-referencing entries: a login environment that descends from
+        # a previous manager state (GDM seeds sessions that way) already
+        # contains one application of environment.d, so those entries must
+        # be deduplicated or they would grow by one copy per login.
+        # (Ideally the generator itself would deduplicate — it knows which
+        # entries self-reference. Doing it here can in principle collapse
+        # a meaningful duplicate segment in a composed value.)
+        baseline=$(env -i HOME="$HOME" \
+            XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}" "$envgen")
         # Loose prefix check; export itself rejects invalid names.
         # shellcheck disable=SC2163 # exporting a NAME=value held in a var
         while IFS= read -r assignment; do
             case "$assignment" in
-                [A-Za-z_]*=*) export "$assignment" 2>/dev/null || : ;;
+                [A-Za-z_]*=*) ;;
+                *) continue ;;
             esac
+            if ! printf '%s\n' "$baseline" | grep -qxF "$assignment"; then
+                assignment=${assignment%%=*}=$(dedup_colons "${assignment#*=}")
+            fi
+            export "$assignment" 2>/dev/null || :
         done <<EOF
 $("$envgen")
 EOF

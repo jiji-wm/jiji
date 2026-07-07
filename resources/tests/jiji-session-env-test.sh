@@ -91,6 +91,8 @@ cat > "$gendir/30-systemd-environment-d-generator" <<'GEN'
 printf 'PATH=/envd/bin:%s\n' "$PATH"
 printf 'LANG=cs_CZ.UTF-8\n'
 printf 'NO_AT_BRIDGE=1\n'
+printf 'GTK_MODULES=%s\n' "${GTK_MODULES:+$GTK_MODULES:}gail:atk-bridge"
+printf 'PLAIN_DUP=x:y:x\n'
 GEN
 chmod +x "$gendir/30-systemd-environment-d-generator"
 
@@ -109,11 +111,15 @@ mkdir -p "$gendir_missing"
 
 LOGIN_PATH=$shims:/usr/bin:/bin
 
-# run_case <name> <generator-dir> <manager-env-file-or-empty>
+# run_case <name> <generator-dir> <manager-env-file-or-empty> [VAR=value...]
+# Trailing assignments are added to (or override) the login environment.
 run_case() {
     case_name=$1
     rec=$tmp/rec-$1
     mkdir -p "$rec"
+    gendir_arg=$2
+    manager_arg=$3
+    shift 3
 
     env -i \
         PATH="$LOGIN_PATH" \
@@ -143,8 +149,9 @@ run_case() {
         CREDENTIALS_DIRECTORY=/fake/creds \
         AWKPATH=/fake/awkpath \
         JIJI_TEST_RECORD="$rec" \
-        JIJI_TEST_GENDIR="$2" \
-        JIJI_TEST_MANAGER_ENV="$3" \
+        JIJI_TEST_GENDIR="$gendir_arg" \
+        JIJI_TEST_MANAGER_ENV="$manager_arg" \
+        "$@" \
         $TEST_SH "$SESSION_SCRIPT" -l \
         || fail "jiji-session exited with status $?"
 }
@@ -184,6 +191,8 @@ run_case generator "$gendir" ""
 assert_env "PATH=/envd/bin:$LOGIN_PATH"
 assert_env "LANG=cs_CZ.UTF-8"
 assert_env "NO_AT_BRIDGE=1"
+assert_env "GTK_MODULES=gail:atk-bridge"
+assert_env "PLAIN_DUP=x:y:x"
 
 # Session, profile, and ordinary shell variables are imported (the skip
 # list is protocol-scoped only — shell trivia like SHLVL/TERM passes
@@ -300,6 +309,24 @@ if env -i \
 fi
 [ ! -f "$rec/import-args" ] ||
     fail "must not import the environment when a session is already running"
+
+# --- case 7: login environment descends from a previous manager state ----
+# GDM seeds sessions with the user manager's environment, which already
+# contains one application of environment.d. The merge must be idempotent:
+# self-referencing entries must not gain another copy per login, while
+# values whose duplicate segments don't come from the merge stay untouched.
+
+run_case fossil "$gendir" "" \
+    "PATH=/envd/bin:$LOGIN_PATH" \
+    GTK_MODULES=gail:atk-bridge \
+    DUP_LOGIN=a:b:a
+
+assert_env "PATH=/envd/bin:$LOGIN_PATH"
+assert_env "GTK_MODULES=gail:atk-bridge"
+assert_env "PLAIN_DUP=x:y:x"
+assert_env "DUP_LOGIN=a:b:a"
+assert_imported GTK_MODULES
+assert_dbus_matches_import
 
 # --- result --------------------------------------------------------------
 
