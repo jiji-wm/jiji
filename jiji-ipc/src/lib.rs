@@ -325,6 +325,94 @@ pub struct WorkspacePlacement {
     pub output: Option<String>,
 }
 
+/// A wire-level appearance override payload for a named layer, as accepted by
+/// [`Action::SetAppearanceOverride`].
+///
+/// Layers are composed by the compositor in ascending lexical order of their
+/// name (the `layer` argument on [`Action::SetAppearanceOverride`] /
+/// [`Action::ClearAppearanceOverride`]), with a later layer winning only the
+/// fields it actually sets. Every field on every nested type is optional so a
+/// caller can send a sparse patch; omitted fields decode to `None` or an
+/// empty collection rather than failing.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct AppearanceOverride {
+    /// Overrides applied unconditionally, regardless of which window rules
+    /// match.
+    #[serde(default)]
+    pub global: GlobalAppearanceOverride,
+    /// Per-window-rule overrides. Stored and validated but not yet composed
+    /// into the render-facing appearance — evaluation lands separately.
+    #[serde(default)]
+    pub rules: Vec<AppearanceRuleOverride>,
+}
+
+/// Global (rule-independent) appearance fields an [`AppearanceOverride`] can
+/// set.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct GlobalAppearanceOverride {
+    /// Focus ring overrides.
+    #[serde(default)]
+    pub focus_ring: FocusRingOverride,
+    /// Background color, as a CSS color string (e.g. `"#1e1e2e"`). `None`
+    /// leaves the background color untouched.
+    pub background_color: Option<String>,
+}
+
+/// Partial focus-ring override: every field is optional, and an absent field
+/// leaves the corresponding base-config value untouched.
+///
+/// Colors are plain strings on the wire — this crate stays free of color and
+/// regex parsing, which happens on the resolving side.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct FocusRingOverride {
+    /// Active window's focus ring color, as a CSS color string.
+    pub active_color: Option<String>,
+    /// Inactive window's focus ring color, as a CSS color string.
+    pub inactive_color: Option<String>,
+    /// Urgent window's focus ring color, as a CSS color string.
+    pub urgent_color: Option<String>,
+    /// Focus ring width, in logical pixels.
+    pub width: Option<f64>,
+}
+
+/// A single per-window-rule appearance override.
+///
+/// Stored and validated by an [`AppearanceOverride`] payload, but matching
+/// and composition against static window rules is not yet implemented.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct AppearanceRuleOverride {
+    /// Window matchers for this rule. The rule applies to a window that
+    /// matches every entry (AND-ed).
+    #[serde(rename = "match")]
+    pub matches: Vec<AppearanceMatch>,
+    /// Focus ring overrides to apply when this rule matches.
+    #[serde(default)]
+    pub focus_ring: FocusRingOverride,
+}
+
+/// A window matcher for an [`AppearanceRuleOverride`].
+///
+/// Both fields are regex source strings, in the same syntax as static window
+/// rules. `v1` matcher surface is title and app-id only; widening the
+/// matcher is additive on the wire.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct AppearanceMatch {
+    /// Title regex source.
+    pub title: Option<String>,
+    /// App-id regex source.
+    pub app_id: Option<String>,
+}
+
 /// Actions that jiji can perform.
 // Variants in this enum should match the spelling of the ones in jiji-config. Most, but not all,
 // variants from jiji-config should be present here.
@@ -1123,6 +1211,31 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(long))]
         id: u64,
     },
+    /// Set (replace) a named layer's appearance override.
+    ///
+    /// `layer` is an opaque caller-chosen name; layers are composed in
+    /// ascending lexical order, with a later layer winning only the fields it
+    /// actually sets. Re-setting an existing layer name replaces it wholesale
+    /// (not a merge with the previous payload). Returns
+    /// `Err("appearance override invalid: <reason>")` (terminal, no state
+    /// mutation) when `--json` fails to parse as an [`AppearanceOverride`] or
+    /// any of its color/regex fields fail to compile.
+    SetAppearanceOverride {
+        /// Name of the layer to set.
+        #[cfg_attr(feature = "clap", arg(long))]
+        layer: String,
+        /// The override payload, as JSON matching [`AppearanceOverride`].
+        #[cfg_attr(feature = "clap", arg(long = "json", value_parser = parse_appearance_override_json))]
+        r#override: AppearanceOverride,
+    },
+    /// Clear a named layer's appearance override.
+    ///
+    /// A silent no-op when `layer` names no currently-set layer.
+    ClearAppearanceOverride {
+        /// Name of the layer to clear.
+        #[cfg_attr(feature = "clap", arg(long))]
+        layer: String,
+    },
     /// Reload the config file.
     ///
     /// Can be useful for scripts changing the config file, to avoid waiting the small duration for
@@ -1593,6 +1706,15 @@ pub enum Action {
 // Used by #[serde(default)] on SwitchActivityPrevious.
 fn default_switch_activity_previous_depth() -> u32 {
     1
+}
+
+/// `clap` value parser for `--json` on [`Action::SetAppearanceOverride`].
+///
+/// Malformed JSON fails at argument-parsing time with a clap error, rather
+/// than reaching the compositor as an opaque string.
+#[cfg(feature = "clap")]
+fn parse_appearance_override_json(s: &str) -> Result<AppearanceOverride, serde_json::Error> {
+    serde_json::from_str(s)
 }
 
 /// Change in window or column size.
@@ -3909,5 +4031,82 @@ mod tests {
                 Ok(_) => panic!("expected Reply::Err variant"),
             }
         }
+    }
+
+    #[test]
+    fn appearance_override_full_payload_round_trips() {
+        let json = r##"{
+            "global": {
+                "focus_ring": {
+                    "active_color": "#7fc8ff",
+                    "inactive_color": "#505050",
+                    "urgent_color": "#ff0000",
+                    "width": 4.0
+                },
+                "background_color": "#1e1e2e"
+            },
+            "rules": [
+                {
+                    "match": [{"app_id": "firefox"}],
+                    "focus_ring": {"active_color": "#00ff00"}
+                }
+            ]
+        }"##;
+        let parsed: AppearanceOverride =
+            serde_json::from_str(json).expect("full payload must deserialize");
+
+        let expected = AppearanceOverride {
+            global: GlobalAppearanceOverride {
+                focus_ring: FocusRingOverride {
+                    active_color: Some("#7fc8ff".to_string()),
+                    inactive_color: Some("#505050".to_string()),
+                    urgent_color: Some("#ff0000".to_string()),
+                    width: Some(4.0),
+                },
+                background_color: Some("#1e1e2e".to_string()),
+            },
+            rules: vec![AppearanceRuleOverride {
+                matches: vec![AppearanceMatch {
+                    title: None,
+                    app_id: Some("firefox".to_string()),
+                }],
+                focus_ring: FocusRingOverride {
+                    active_color: Some("#00ff00".to_string()),
+                    ..Default::default()
+                },
+            }],
+        };
+        assert_eq!(parsed, expected);
+
+        let round_tripped: AppearanceOverride = serde_json::from_str(
+            &serde_json::to_string(&parsed).expect("serialize AppearanceOverride"),
+        )
+        .expect("re-parse serialized AppearanceOverride");
+        assert_eq!(round_tripped, expected);
+    }
+
+    #[test]
+    fn appearance_override_global_only_payload_round_trips() {
+        let json = r##"{"global": {"background_color": "#1e1e2e"}}"##;
+        let parsed: AppearanceOverride =
+            serde_json::from_str(json).expect("global-only payload must deserialize");
+
+        assert_eq!(
+            parsed,
+            AppearanceOverride {
+                global: GlobalAppearanceOverride {
+                    focus_ring: FocusRingOverride::default(),
+                    background_color: Some("#1e1e2e".to_string()),
+                },
+                rules: Vec::new(),
+            },
+        );
+    }
+
+    #[test]
+    fn appearance_override_absent_fields_default() {
+        let parsed: AppearanceOverride =
+            serde_json::from_str("{}").expect("empty payload must deserialize to defaults");
+        assert_eq!(parsed, AppearanceOverride::default());
     }
 }

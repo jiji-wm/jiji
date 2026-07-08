@@ -31,6 +31,7 @@ pub mod macros;
 pub mod activity;
 pub mod animations;
 pub mod appearance;
+pub mod appearance_override;
 pub mod binds;
 pub mod bookmarks;
 pub mod debug;
@@ -49,6 +50,10 @@ pub mod workspace;
 pub use crate::activity::{ActivityDecl, ActivityName};
 pub use crate::animations::{Animation, Animations};
 pub use crate::appearance::*;
+pub use crate::appearance_override::{
+    flatten, FlattenedAppearance, LayerId, ResolvedAppearanceOverride, ResolvedAppearanceRule,
+    ResolvedGlobalAppearance,
+};
 pub use crate::binds::*;
 pub use crate::bookmarks::{
     BookmarksConfig, HintAlphabet, ModeKeysConfig, OrderMode, RepressPolicy,
