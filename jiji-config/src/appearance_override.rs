@@ -27,9 +27,9 @@ pub struct LayerId(pub String);
 pub struct ResolvedAppearanceOverride {
     /// Global (rule-independent) overrides.
     pub global: ResolvedGlobalAppearance,
-    /// Per-window-rule overrides. Stored and validated, but not yet composed
-    /// by [`flatten`] — evaluation against static window rules lands
-    /// separately.
+    /// Per-window-rule overrides. Composed per-window at window-rule
+    /// resolution (`ResolvedWindowRules::compute`), not by [`flatten`], which
+    /// stays global-only by design.
     pub rules: Vec<ResolvedAppearanceRule>,
 }
 
@@ -48,7 +48,10 @@ pub struct ResolvedGlobalAppearance {
 /// Resolved [`AppearanceRuleOverride`].
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ResolvedAppearanceRule {
-    /// Window matchers this rule applies under (AND-ed).
+    /// Window matchers this rule applies under. The rule applies to a window
+    /// matching any one entry (OR-ed); the fields within a single entry are
+    /// AND-ed. Always non-empty and every entry has at least one field set —
+    /// enforced by [`TryFrom<&AppearanceOverride>`](ResolvedAppearanceOverride).
     pub matches: Vec<Match>,
     /// Focus ring overrides to apply when this rule matches.
     pub focus_ring: BorderRule,
@@ -127,6 +130,10 @@ fn resolve_rule(
     index: usize,
     wire: &AppearanceRuleOverride,
 ) -> Result<ResolvedAppearanceRule, String> {
+    if wire.matches.is_empty() {
+        return Err(format!("rules[{index}]: rule has no matchers"));
+    }
+
     let matches = wire
         .matches
         .iter()
@@ -145,6 +152,13 @@ fn resolve_match(
     match_index: usize,
     wire: &AppearanceMatch,
 ) -> Result<Match, String> {
+    if wire.title.is_none() && wire.app_id.is_none() {
+        return Err(format!(
+            "rules[{rule_index}].match[{match_index}]: matcher is empty; use `global` for \
+             all-window overrides"
+        ));
+    }
+
     let mut resolved = Match::default();
     if let Some(raw) = &wire.title {
         let field = format!("rules[{rule_index}].match[{match_index}].title");
@@ -226,6 +240,25 @@ mod tests {
     }
 
     #[test]
+    fn try_from_rejects_empty_match_list() {
+        let mut wire = full_example();
+        wire.rules[0].matches = vec![];
+        let err = ResolvedAppearanceOverride::try_from(&wire)
+            .expect_err("a rule with no matchers must be rejected");
+        assert!(err.contains("rules[0]"), "{err}");
+    }
+
+    #[test]
+    fn try_from_rejects_empty_matcher() {
+        let mut wire = full_example();
+        wire.rules[0].matches[0] = AppearanceMatch::default();
+        let err = ResolvedAppearanceOverride::try_from(&wire)
+            .expect_err("a matcher with no fields set must be rejected");
+        assert!(err.contains("rules[0].match[0]"), "{err}");
+        assert!(err.contains("global"), "{err}");
+    }
+
+    #[test]
     fn flatten_lexical_tiebreak_on_same_field() {
         let mut layers = BTreeMap::new();
         let mut a = ResolvedAppearanceOverride::default();
@@ -246,10 +279,8 @@ mod tests {
     #[test]
     fn flatten_ignores_rules() {
         // `rules` is stored and validated (see `try_from_accepts_full_example`)
-        // but intentionally not composed by `flatten` yet — rule evaluation
-        // lands in a later unit. This test must be revisited (and the
-        // `background_color`/`focus_ring` assertions below extended to cover
-        // rule-derived fields) once that composition exists.
+        // but composed per-window at window-rule resolution, not by
+        // `flatten`, which stays global-only by design.
         let mut layers = BTreeMap::new();
         let mut with_rules = ResolvedAppearanceOverride::default();
         with_rules.rules.push(ResolvedAppearanceRule {
