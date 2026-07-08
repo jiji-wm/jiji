@@ -39,8 +39,8 @@ use std::{fmt, mem};
 
 use jiji_config::utils::MergeWith as _;
 use jiji_config::{
-    key_to_wire_string, Bind, Config, CornerRadius, LayoutPart, ModKey, PresetSize,
-    Workspace as WorkspaceConfig, WorkspaceReference,
+    key_to_wire_string, Bind, Config, CornerRadius, FlattenedAppearance, LayoutPart, ModKey,
+    PresetSize, Workspace as WorkspaceConfig, WorkspaceReference,
 };
 use jiji_ipc::{ActivityReferenceArg, ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 use monitor::{InsertHint, InsertPosition, InsertWorkspace, MonitorAddWindowTarget};
@@ -696,6 +696,11 @@ pub(crate) enum DoActionError {
     /// compile (a bad regex) or names no fields at all. Terminal error — no
     /// state mutation. `reason` describes the failure.
     BookmarkRuleInvalid { reason: String },
+    /// `Action::SetAppearanceOverride` was dispatched with a payload that
+    /// fails to resolve: a color or regex field failed to compile. Terminal
+    /// error — no state mutation. `reason` names the offending field and
+    /// value.
+    AppearanceOverrideInvalid { reason: String },
 }
 
 impl From<ActivitySwitchBlock> for DoActionError {
@@ -796,6 +801,9 @@ impl fmt::Display for DoActionError {
             }
             Self::BookmarkDangling { id } => write!(f, "bookmark has no attached window: id={id}"),
             Self::BookmarkRuleInvalid { reason } => write!(f, "invalid bookmark rule: {reason}"),
+            Self::AppearanceOverrideInvalid { reason } => {
+                write!(f, "appearance override invalid: {reason}")
+            }
         }
     }
 }
@@ -10270,7 +10278,7 @@ impl<W: LayoutElement> Layout<W> {
         self.insert_workspace_onto_monitor(mon_idx, id, 0, false);
     }
 
-    pub fn update_config(&mut self, config: &Config) {
+    pub fn update_config(&mut self, config: &Config, overrides: &FlattenedAppearance) {
         // Update workspace-specific config for all named workspaces.
         for ws in self.workspaces_mut() {
             let Some(name) = ws.name() else { continue };
@@ -10279,7 +10287,19 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        self.update_options(Options::from_config(config));
+        let mut options = Options::from_config(config);
+        options.layout.focus_ring.merge_with(&overrides.focus_ring);
+        if let Some(color) = overrides.background_color {
+            options.layout.background_color = color;
+        }
+        self.update_options(options);
+    }
+
+    /// Read-only access to the composed [`Options`] the layout is currently
+    /// rendering with, for headless render-model assertions.
+    #[cfg(test)]
+    pub(crate) fn options(&self) -> &Options {
+        &self.options
     }
 
     fn update_options(&mut self, options: Options) {

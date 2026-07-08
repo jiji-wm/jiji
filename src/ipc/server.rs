@@ -496,7 +496,8 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
             | Err(err @ DoActionError::BookmarkKeyCollision { .. })
             | Err(err @ DoActionError::BookmarkNameInvalid { .. })
             | Err(err @ DoActionError::BookmarkDangling { .. })
-            | Err(err @ DoActionError::BookmarkRuleInvalid { .. }) => {
+            | Err(err @ DoActionError::BookmarkRuleInvalid { .. })
+            | Err(err @ DoActionError::AppearanceOverrideInvalid { .. }) => {
                 // Terminal errors. Same shape as `WindowNotFound`:
                 // forward and advance the walk — do not re-block.
                 let _ = waiter.tx.send_blocking(Err(err));
@@ -873,7 +874,8 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                     | Err(err @ DoActionError::BookmarkKeyCollision { .. })
                     | Err(err @ DoActionError::BookmarkNameInvalid { .. })
                     | Err(err @ DoActionError::BookmarkDangling { .. })
-                    | Err(err @ DoActionError::BookmarkRuleInvalid { .. }) => {
+                    | Err(err @ DoActionError::BookmarkRuleInvalid { .. })
+                    | Err(err @ DoActionError::AppearanceOverrideInvalid { .. }) => {
                         let _ = tx.send_blocking(Err(err));
                     }
                 }

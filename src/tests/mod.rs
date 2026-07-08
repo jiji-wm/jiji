@@ -6,6 +6,7 @@ mod server;
 
 mod add_workspace;
 mod animations;
+mod appearance_override;
 mod close_window_cross_activity;
 mod config_reload_cross_activity;
 mod event_stream_replay_cross_activity;

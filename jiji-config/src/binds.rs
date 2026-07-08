@@ -381,6 +381,15 @@ pub enum Action {
     #[knuffel(skip)]
     UnsetWindowUrgent(u64),
     #[knuffel(skip)]
+    SetAppearanceOverride {
+        layer: String,
+        r#override: jiji_ipc::AppearanceOverride,
+    },
+    #[knuffel(skip)]
+    ClearAppearanceOverride {
+        layer: String,
+    },
+    #[knuffel(skip)]
     LoadConfigFile(#[knuffel(argument)] Option<String>),
     #[knuffel(skip)]
     MruAdvance {
@@ -823,6 +832,12 @@ impl From<jiji_ipc::Action> for Action {
             jiji_ipc::Action::ToggleWindowUrgent { id } => Self::ToggleWindowUrgent(id),
             jiji_ipc::Action::SetWindowUrgent { id } => Self::SetWindowUrgent(id),
             jiji_ipc::Action::UnsetWindowUrgent { id } => Self::UnsetWindowUrgent(id),
+            jiji_ipc::Action::SetAppearanceOverride { layer, r#override } => {
+                Self::SetAppearanceOverride { layer, r#override }
+            }
+            jiji_ipc::Action::ClearAppearanceOverride { layer } => {
+                Self::ClearAppearanceOverride { layer }
+            }
             jiji_ipc::Action::LoadConfigFile { path } => Self::LoadConfigFile(path),
             jiji_ipc::Action::CreateActivity { name } => Self::CreateActivity(name),
             jiji_ipc::Action::RemoveActivity { activity } => Self::RemoveActivity(activity.into()),

@@ -2729,7 +2729,7 @@ fn config_change_updates_cached_sizes() {
     .apply(&mut layout);
 
     config.layout.border.width = 4.;
-    layout.update_config(&config);
+    layout.update_config(&config, &FlattenedAppearance::default());
 
     layout.verify_invariants();
     verify_output_bindings(&layout);
@@ -2761,7 +2761,7 @@ fn preset_height_change_removes_preset() {
     // Leave only one.
     config.layout.preset_window_heights = vec![PresetSize::Fixed(1)];
 
-    layout.update_config(&config);
+    layout.update_config(&config, &FlattenedAppearance::default());
 
     layout.verify_invariants();
     verify_output_bindings(&layout);

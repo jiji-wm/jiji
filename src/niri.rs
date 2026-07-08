@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -15,8 +15,8 @@ use anyhow::{bail, ensure, Context};
 use calloop::futures::Scheduler;
 use jiji_config::debug::PreviewRender;
 use jiji_config::{
-    Action, Bind, Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout,
-    WarpMouseToFocusMode, WorkspaceReference, Xkb,
+    Action, Bind, Config, FloatOrInt, Key, LayerId, Modifiers, OutputName,
+    ResolvedAppearanceOverride, TrackLayout, WarpMouseToFocusMode, WorkspaceReference, Xkb,
 };
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::Keycode;
@@ -456,6 +456,15 @@ pub struct Niri {
 
     pub ipc_server: Option<IpcServer>,
     pub ipc_outputs_changed: bool,
+
+    /// Live appearance-override layers set via [`jiji_ipc::Action::SetAppearanceOverride`],
+    /// keyed by caller-chosen layer name.
+    ///
+    /// This is runtime state, not config: it deliberately survives config
+    /// reload (unlike everything read from [`Niri::config`]), and is folded
+    /// into the active [`crate::layout::Options`] by
+    /// `Layout::update_config`.
+    pub appearance_override: BTreeMap<LayerId, ResolvedAppearanceOverride>,
 
     pub satellite: Option<Satellite>,
 
@@ -1617,7 +1626,8 @@ impl State {
         self.niri
             .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
 
-        self.niri.layout.update_config(&config);
+        let overrides = jiji_config::flatten(&self.niri.appearance_override);
+        self.niri.layout.update_config(&config, &overrides);
         for mapped in self.niri.mapped_layer_surfaces.values_mut() {
             mapped.update_config(&config);
         }
@@ -2817,6 +2827,8 @@ impl Niri {
 
             ipc_server,
             ipc_outputs_changed: false,
+
+            appearance_override: BTreeMap::new(),
 
             satellite: None,
 

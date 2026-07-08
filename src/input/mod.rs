@@ -7,8 +7,8 @@ use calloop::timer::{TimeoutAction, Timer};
 use input::event::gesture::GestureEventCoordinates as _;
 use jiji_config::utils::RegexEq;
 use jiji_config::{
-    key_to_wire_string, Action, Bind, Binds, Config, Key, ModKey, Modifiers, MruDirection,
-    SwitchBinds, Trigger, WorkspaceReference,
+    flatten, key_to_wire_string, Action, Bind, Binds, Config, Key, LayerId, ModKey, Modifiers,
+    MruDirection, ResolvedAppearanceOverride, SwitchBinds, Trigger, WorkspaceReference,
 };
 use jiji_ipc::{ActivityReferenceArg, LayoutSwitchTarget, NoOpReason};
 use smithay::backend::input::{
@@ -3989,6 +3989,38 @@ impl State {
                 if let Some(window) = window {
                     window.set_urgent(false);
                 }
+                self.niri.queue_redraw_all();
+            }
+            Action::SetAppearanceOverride { layer, r#override } => {
+                let resolved = match ResolvedAppearanceOverride::try_from(&r#override) {
+                    Ok(resolved) => resolved,
+                    Err(reason) => {
+                        warn!("SetAppearanceOverride: {reason}");
+                        return Err(DoActionError::AppearanceOverrideInvalid { reason });
+                    }
+                };
+                if !resolved.rules.is_empty() {
+                    warn!(
+                        "SetAppearanceOverride: {} rule override(s) accepted but not yet applied \
+                         (rule composition is not implemented yet)",
+                        resolved.rules.len()
+                    );
+                }
+                self.niri
+                    .appearance_override
+                    .insert(LayerId(layer), resolved);
+
+                let config = self.niri.config.clone();
+                let overrides = flatten(&self.niri.appearance_override);
+                self.niri.layout.update_config(&config.borrow(), &overrides);
+                self.niri.queue_redraw_all();
+            }
+            Action::ClearAppearanceOverride { layer } => {
+                self.niri.appearance_override.remove(&LayerId(layer));
+
+                let config = self.niri.config.clone();
+                let overrides = flatten(&self.niri.appearance_override);
+                self.niri.layout.update_config(&config.borrow(), &overrides);
                 self.niri.queue_redraw_all();
             }
             Action::LoadConfigFile(path) => {
