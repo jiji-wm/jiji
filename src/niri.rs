@@ -4286,11 +4286,21 @@ impl Niri {
 
         let config = self.config.borrow();
         let window_rules = &config.window_rules;
+        // Direct field access — see the comment in `recompute_window_rules`.
+        let appearance_rules: Vec<&jiji_config::ResolvedAppearanceRule> = self
+            .appearance_override
+            .values()
+            .flat_map(|layer| layer.rules.iter())
+            .collect();
 
         let mut windows = vec![];
         let mut outputs = HashSet::new();
         self.layout.with_windows_mut(|mapped, output| {
-            if mapped.recompute_window_rules_if_needed(window_rules, self.is_at_startup) {
+            if mapped.recompute_window_rules_if_needed(
+                window_rules,
+                &appearance_rules,
+                self.is_at_startup,
+            ) {
                 windows.push(mapped.window.clone());
 
                 if let Some(output) = output {
@@ -6758,10 +6768,25 @@ impl Niri {
 
         let changed = {
             let window_rules = &self.config.borrow().window_rules;
+            // Every call site below builds this `Vec` by direct field access
+            // (`self.appearance_override.values().flat_map(...)`) rather than
+            // through a shared helper method, so the borrow checker sees it
+            // as disjoint from the `unmapped_windows` / `layout` mutable
+            // borrows that follow, rather than a whole-`self` borrow behind
+            // a method call. See `ResolvedWindowRules::compute`'s
+            // appearance-rules loop for the cross-layer ordering contract
+            // this `Vec` must preserve (ascending `LayerId`, ties resolve to
+            // the lexically-greatest layer).
+            let appearance_rules: Vec<&jiji_config::ResolvedAppearanceRule> = self
+                .appearance_override
+                .values()
+                .flat_map(|layer| layer.rules.iter())
+                .collect();
 
             for unmapped in self.unmapped_windows.values_mut() {
                 let new_rules = ResolvedWindowRules::compute(
                     window_rules,
+                    &appearance_rules,
                     WindowRef::Unmapped(unmapped),
                     self.is_at_startup,
                 );
@@ -6772,7 +6797,11 @@ impl Niri {
 
             let mut windows = vec![];
             self.layout.with_windows_mut(|mapped, _| {
-                if mapped.recompute_window_rules(window_rules, self.is_at_startup) {
+                if mapped.recompute_window_rules(
+                    window_rules,
+                    &appearance_rules,
+                    self.is_at_startup,
+                ) {
                     windows.push(mapped.window.clone());
                 }
             });

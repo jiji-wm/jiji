@@ -1150,8 +1150,18 @@ impl State {
         };
 
         let config = self.niri.config.borrow();
+        // Direct field access keeps the borrow of
+        // `self.niri.appearance_override` disjoint from the `unmapped`
+        // borrow of `self.niri.unmapped_windows` above.
+        let appearance_rules: Vec<&jiji_config::ResolvedAppearanceRule> = self
+            .niri
+            .appearance_override
+            .values()
+            .flat_map(|layer| layer.rules.iter())
+            .collect();
         let rules = ResolvedWindowRules::compute(
             &config.window_rules,
+            &appearance_rules,
             WindowRef::Unmapped(unmapped),
             self.niri.is_at_startup,
         );
@@ -1625,10 +1635,21 @@ impl State {
     pub fn update_window_rules(&mut self, toplevel: &ToplevelSurface) {
         let config = self.niri.config.borrow();
         let window_rules = &config.window_rules;
+        // Direct field access keeps the borrow of
+        // `self.niri.appearance_override` disjoint from the
+        // `self.niri.unmapped_windows` / `self.niri.layout` mutable borrows
+        // below.
+        let appearance_rules: Vec<&jiji_config::ResolvedAppearanceRule> = self
+            .niri
+            .appearance_override
+            .values()
+            .flat_map(|layer| layer.rules.iter())
+            .collect();
 
         if let Some(unmapped) = self.niri.unmapped_windows.get_mut(toplevel.wl_surface()) {
             let new_rules = ResolvedWindowRules::compute(
                 window_rules,
+                &appearance_rules,
                 WindowRef::Unmapped(unmapped),
                 self.niri.is_at_startup,
             );
@@ -1640,7 +1661,11 @@ impl State {
             .layout
             .find_window_and_output_mut(toplevel.wl_surface())
         {
-            if mapped.recompute_window_rules(window_rules, self.niri.is_at_startup) {
+            if mapped.recompute_window_rules(
+                window_rules,
+                &appearance_rules,
+                self.niri.is_at_startup,
+            ) {
                 drop(config);
                 let output = output.cloned();
                 let window = mapped.window.clone();

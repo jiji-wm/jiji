@@ -300,7 +300,7 @@ mod tests {
             flattened,
             FlattenedAppearance::default(),
             "a layer with only rules (no global fields) must flatten to the default; \
-             rules are not yet composed",
+             rules are composed per-window, not by flatten",
         );
     }
 

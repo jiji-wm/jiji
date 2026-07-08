@@ -373,8 +373,9 @@ pub struct AppearanceOverride {
     /// match.
     #[serde(default)]
     pub global: GlobalAppearanceOverride,
-    /// Per-window-rule overrides. Stored and validated but not yet composed
-    /// into the render-facing appearance — evaluation lands separately.
+    /// Per-window-rule overrides, evaluated against each window at
+    /// window-rule resolution time. See [`AppearanceRuleOverride`] for the
+    /// matching and composition contract.
     #[serde(default)]
     pub rules: Vec<AppearanceRuleOverride>,
 }
@@ -416,15 +417,19 @@ pub struct FocusRingOverride {
 
 /// A single per-window-rule appearance override.
 ///
-/// Stored and validated by an [`AppearanceOverride`] payload, but matching
-/// and composition against static window rules is not yet implemented.
+/// Evaluated per-window at window-rule resolution time and merged after
+/// static window-rules, per-field — an appearance rule's field wins over the
+/// same field set by a static window-rule. `matches` and every entry within
+/// it must be non-empty: an empty `match` list, or an entry with neither
+/// `title` nor `app_id` set, is rejected at apply time (use the
+/// [`AppearanceOverride::global`] layer for all-window overrides instead).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 #[serde(deny_unknown_fields)]
 pub struct AppearanceRuleOverride {
-    /// Window matchers for this rule. The rule applies to a window that
-    /// matches every entry (AND-ed).
+    /// Window matchers for this rule. The rule applies to a window matching
+    /// any one entry (OR-ed); the fields within a single entry are AND-ed.
     #[serde(rename = "match")]
     pub matches: Vec<AppearanceMatch>,
     /// Focus ring overrides to apply when this rule matches.

@@ -3999,13 +3999,6 @@ impl State {
                         return Err(DoActionError::AppearanceOverrideInvalid { reason });
                     }
                 };
-                if !resolved.rules.is_empty() {
-                    warn!(
-                        "SetAppearanceOverride: {} rule override(s) accepted but not yet applied \
-                         (rule composition is not implemented yet)",
-                        resolved.rules.len()
-                    );
-                }
                 self.niri
                     .appearance_override
                     .insert(LayerId(layer), resolved);
@@ -4013,6 +4006,7 @@ impl State {
                 let config = self.niri.config.clone();
                 let overrides = flatten(&self.niri.appearance_override);
                 self.niri.layout.update_config(&config.borrow(), &overrides);
+                self.niri.recompute_window_rules();
                 self.niri.queue_redraw_all();
             }
             Action::ClearAppearanceOverride { layer } => {
@@ -4021,6 +4015,7 @@ impl State {
                 let config = self.niri.config.clone();
                 let overrides = flatten(&self.niri.appearance_override);
                 self.niri.layout.update_config(&config.borrow(), &overrides);
+                self.niri.recompute_window_rules();
                 self.niri.queue_redraw_all();
             }
             Action::LoadConfigFile(path) => {

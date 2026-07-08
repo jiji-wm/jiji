@@ -189,7 +189,12 @@ impl<'a> WindowRef<'a> {
 }
 
 impl ResolvedWindowRules {
-    pub fn compute(rules: &[WindowRule], window: WindowRef, is_at_startup: bool) -> Self {
+    pub fn compute(
+        rules: &[WindowRule],
+        appearance_rules: &[&jiji_config::ResolvedAppearanceRule],
+        window: WindowRef,
+        is_at_startup: bool,
+    ) -> Self {
         let _span = tracy_client::span!("ResolvedWindowRules::compute");
 
         let mut resolved = ResolvedWindowRules::default();
@@ -322,6 +327,23 @@ impl ResolvedWindowRules {
                     .merge_with(&rule.background_effect);
 
                 resolved.popups.merge_with(&rule.popups);
+            }
+
+            // Appearance rules are evaluated after the static window-rule
+            // loop so they win per-field ties: OR across entries (any()),
+            // AND within an entry's fields (window_matches). Validation
+            // guarantees every stored rule has at least one non-empty
+            // matcher, so unlike the static loop above this has no
+            // matches.is_empty() match-all branch.
+            //
+            // Callers build `appearance_rules` by flattening all override
+            // layers in ascending `LayerId` order; same-field ties resolve
+            // to the lexically-greatest layer, per `jiji_config::flatten`'s
+            // tiebreak.
+            for rule in appearance_rules {
+                if rule.matches.iter().any(|m| window_matches(window, role, m)) {
+                    resolved.focus_ring.merge_with(&rule.focus_ring);
+                }
             }
 
             resolved.open_on_output = open_on_output.map(|x| x.to_owned());
