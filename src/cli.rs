@@ -144,3 +144,49 @@ impl TryFrom<CompletionShell> for Shell {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use super::Cli;
+
+    /// Pins the full `jiji msg action set-appearance-override --json ...`
+    /// argv: an unknown field must fail at argument-parsing time (before any
+    /// socket connect) with a message naming the offending field.
+    ///
+    /// Runs on a dedicated thread with a larger stack: building the full
+    /// `Cli` command tree (every `Action` variant nested under `msg action`)
+    /// to render a clap error is deep enough to overflow the default test
+    /// thread stack.
+    #[test]
+    fn msg_action_set_appearance_override_rejects_unknown_field() {
+        let rendered = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let result = Cli::try_parse_from([
+                    "jiji",
+                    "msg",
+                    "action",
+                    "set-appearance-override",
+                    "--layer",
+                    "t",
+                    "--json",
+                    "{\"global\":{\"focus_ring\":{\"active_colour\":\"#ff0000\"}}}",
+                ]);
+                let Err(err) = result else {
+                    panic!("misspelled field must fail clap parsing");
+                };
+                err.to_string()
+            })
+            .expect("spawn thread")
+            .join()
+            .expect("thread must not panic");
+
+        assert!(rendered.contains("active_colour"), "{rendered}");
+        assert!(
+            rendered.contains("invalid appearance override payload"),
+            "{rendered}",
+        );
+    }
+}

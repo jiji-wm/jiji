@@ -334,9 +334,40 @@ pub struct WorkspacePlacement {
 /// fields it actually sets. Every field on every nested type is optional so a
 /// caller can send a sparse patch; omitted fields decode to `None` or an
 /// empty collection rather than failing.
+///
+/// A complete payload (global focus-ring colors and width, a background
+/// color, and one title-matched rule):
+///
+/// ```json
+/// {
+///   "global": {
+///     "focus_ring": {
+///       "active_color": "#7fc8ff",
+///       "inactive_color": "#505050",
+///       "urgent_color": "#ff0000",
+///       "width": 4.0
+///     },
+///     "background_color": "#1e1e2e"
+///   },
+///   "rules": [
+///     {
+///       "match": [{ "title": "^Firefox" }],
+///       "focus_ring": { "active_color": "#00ff00" }
+///     }
+///   ]
+/// }
+/// ```
+///
+/// Parsing is strict: an unknown field anywhere in the payload (at this
+/// level or in any nested type) fails parsing rather than being silently
+/// ignored. This is a frozen wire schema, not a versioned/negotiated one —
+/// new fields are additive, but because parsing stays strict, a payload
+/// using a new field requires a compositor build that already knows it
+/// (upgrade the compositor first).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]
+#[serde(deny_unknown_fields)]
 pub struct AppearanceOverride {
     /// Overrides applied unconditionally, regardless of which window rules
     /// match.
@@ -353,6 +384,7 @@ pub struct AppearanceOverride {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]
+#[serde(deny_unknown_fields)]
 pub struct GlobalAppearanceOverride {
     /// Focus ring overrides.
     #[serde(default)]
@@ -370,6 +402,7 @@ pub struct GlobalAppearanceOverride {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]
+#[serde(deny_unknown_fields)]
 pub struct FocusRingOverride {
     /// Active window's focus ring color, as a CSS color string.
     pub active_color: Option<String>,
@@ -388,6 +421,7 @@ pub struct FocusRingOverride {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]
+#[serde(deny_unknown_fields)]
 pub struct AppearanceRuleOverride {
     /// Window matchers for this rule. The rule applies to a window that
     /// matches every entry (AND-ed).
@@ -406,6 +440,7 @@ pub struct AppearanceRuleOverride {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]
+#[serde(deny_unknown_fields)]
 pub struct AppearanceMatch {
     /// Title regex source.
     pub title: Option<String>,
@@ -1216,10 +1251,13 @@ pub enum Action {
     /// `layer` is an opaque caller-chosen name; layers are composed in
     /// ascending lexical order, with a later layer winning only the fields it
     /// actually sets. Re-setting an existing layer name replaces it wholesale
-    /// (not a merge with the previous payload). Returns
-    /// `Err("appearance override invalid: <reason>")` (terminal, no state
-    /// mutation) when `--json` fails to parse as an [`AppearanceOverride`] or
-    /// any of its color/regex fields fail to compile.
+    /// — fields absent from the new payload are not retained from the
+    /// previous one, it is not a merge. `--json` must match
+    /// [`AppearanceOverride`]'s schema exactly: an unknown field anywhere in
+    /// the payload is rejected at argument-parsing time, before any request
+    /// reaches the compositor. Returns `Err("appearance override invalid:
+    /// <reason>")` (terminal, no state mutation) when a color or regex field
+    /// that did parse fails to compile.
     SetAppearanceOverride {
         /// Name of the layer to set.
         #[cfg_attr(feature = "clap", arg(long))]
@@ -1710,11 +1748,13 @@ fn default_switch_activity_previous_depth() -> u32 {
 
 /// `clap` value parser for `--json` on [`Action::SetAppearanceOverride`].
 ///
-/// Malformed JSON fails at argument-parsing time with a clap error, rather
-/// than reaching the compositor as an opaque string.
+/// Malformed JSON, and any unknown field at any nesting level (rejected by
+/// [`AppearanceOverride`]'s `deny_unknown_fields`), fails at argument-parsing
+/// time with a clap error naming the offending field, rather than reaching
+/// the compositor as an opaque string.
 #[cfg(feature = "clap")]
-fn parse_appearance_override_json(s: &str) -> Result<AppearanceOverride, serde_json::Error> {
-    serde_json::from_str(s)
+fn parse_appearance_override_json(s: &str) -> Result<AppearanceOverride, String> {
+    serde_json::from_str(s).map_err(|err| format!("invalid appearance override payload: {err}"))
 }
 
 /// Change in window or column size.
@@ -4108,5 +4148,44 @@ mod tests {
         let parsed: AppearanceOverride =
             serde_json::from_str("{}").expect("empty payload must deserialize to defaults");
         assert_eq!(parsed, AppearanceOverride::default());
+    }
+
+    #[test]
+    fn appearance_override_rejects_unknown_field_at_top_level() {
+        let err = serde_json::from_str::<AppearanceOverride>(r#"{"bogus": true}"#)
+            .expect_err("unknown top-level field must be rejected");
+        assert!(err.to_string().contains("bogus"), "{err}");
+    }
+
+    #[test]
+    fn appearance_override_rejects_unknown_field_in_global_focus_ring() {
+        let json = r##"{"global": {"focus_ring": {"active_colour": "#ff0000"}}}"##;
+        let err = serde_json::from_str::<AppearanceOverride>(json)
+            .expect_err("unknown nested field must be rejected");
+        assert!(err.to_string().contains("active_colour"), "{err}");
+    }
+
+    #[test]
+    fn appearance_override_rejects_unknown_field_in_rule_match() {
+        let json = r#"{"rules": [{"match": [{"titel": "firefox"}]}]}"#;
+        let err = serde_json::from_str::<AppearanceOverride>(json)
+            .expect_err("unknown field inside a rules[].match entry must be rejected");
+        assert!(err.to_string().contains("titel"), "{err}");
+    }
+
+    #[test]
+    fn appearance_override_rejects_unknown_field_in_global() {
+        let json = r#"{"global": {"bogus": true}}"#;
+        let err = serde_json::from_str::<AppearanceOverride>(json)
+            .expect_err("unknown field on GlobalAppearanceOverride must be rejected");
+        assert!(err.to_string().contains("bogus"), "{err}");
+    }
+
+    #[test]
+    fn appearance_override_rejects_unknown_field_in_rule() {
+        let json = r#"{"rules": [{"match": [], "bogus": true}]}"#;
+        let err = serde_json::from_str::<AppearanceOverride>(json)
+            .expect_err("unknown field on AppearanceRuleOverride must be rejected");
+        assert!(err.to_string().contains("bogus"), "{err}");
     }
 }
