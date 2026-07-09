@@ -16,7 +16,7 @@ use super::activity::ActivityId;
 use super::bookmarks::{
     BookmarkJumpOutcome, BookmarkKey, BookmarkRestorePlan, BookmarkRule, WalkDirection,
 };
-use super::monitor::ActivityStrip;
+use super::monitor::StripCtx;
 use super::*;
 
 mod animations;
@@ -22201,7 +22201,7 @@ fn first_outgoing_x(layout: &Layout<TestWindow>) -> f64 {
         .views()
         .get(&mon.output_id())
         .expect("outgoing view must exist for this output");
-    mon.workspaces_render_geo_for_strip(view, ActivityStrip::Outgoing)
+    mon.workspaces_render_geo_for(StripCtx::outgoing(LayoutCtx::new(&layout.workspaces, view)))
         .next()
         .expect("at least one workspace rect")
         .loc
@@ -22218,7 +22218,7 @@ fn activity_switch_idle_geo_has_no_x_offset() {
     let view = layout.active_view(&mon.output_id());
     let incoming = mon.workspaces_render_geo(view).next().unwrap().loc.x;
     let bare = mon
-        .workspaces_render_geo_for_strip(view, ActivityStrip::Incoming)
+        .workspaces_render_geo_for(StripCtx::incoming(LayoutCtx::new(&layout.workspaces, view)))
         .next()
         .unwrap()
         .loc
@@ -22419,7 +22419,7 @@ fn outgoing_ctx_for_resolves_in_flight_only() {
             .ids()
             .to_vec();
         assert_eq!(
-            ctx.view().ids(),
+            ctx.lctx().view().ids(),
             expected_ids.as_slice(),
             "outgoing ctx must carry the from-activity's view for this output",
         );

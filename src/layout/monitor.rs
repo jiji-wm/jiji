@@ -112,9 +112,56 @@ pub enum SlideDirection {
 /// view, sliding away). They are horizontally offset by opposite amounts so they never
 /// overlap. When no switch is in flight only `Incoming` is meaningful and its offset is 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActivityStrip {
+pub(super) enum ActivityStrip {
     Incoming,
     Outgoing,
+}
+
+/// A [`LayoutCtx`] tagged with which activity strip it belongs to.
+///
+/// The Outgoing tag is unforgeable outside `crate::layout` — its view is always the
+/// switch's `from`-activity view because [`StripCtx::outgoing`] is `pub(super)` and the
+/// only outside caller is [`Layout::outgoing_ctx_for`](super::Layout::outgoing_ctx_for),
+/// which resolves it from `mon.activity_switch`. The Incoming tag carries no such
+/// structural guarantee: [`StripCtx::incoming`] is `pub` and accepts any `LayoutCtx`;
+/// callers are expected to pass the monitor's active view (typically via
+/// [`Layout::ctx_for`](super::Layout::ctx_for)).
+#[derive(Debug)]
+pub struct StripCtx<'a, W: LayoutElement> {
+    lctx: LayoutCtx<'a, W>,
+    strip: ActivityStrip,
+}
+
+// Manual `Copy`/`Clone` — see the identical rationale on `LayoutCtx`'s impls above.
+impl<W: LayoutElement> Copy for StripCtx<'_, W> {}
+impl<W: LayoutElement> Clone for StripCtx<'_, W> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, W: LayoutElement> StripCtx<'a, W> {
+    /// Wrap `lctx` as the Incoming strip.
+    pub fn incoming(lctx: LayoutCtx<'a, W>) -> Self {
+        Self {
+            lctx,
+            strip: ActivityStrip::Incoming,
+        }
+    }
+
+    /// Wrap `lctx` as the Outgoing strip. Only reachable from within `crate::layout`, where
+    /// callers are expected to have resolved `lctx` from `mon.activity_switch.from`'s view.
+    pub(super) fn outgoing(lctx: LayoutCtx<'a, W>) -> Self {
+        Self {
+            lctx,
+            strip: ActivityStrip::Outgoing,
+        }
+    }
+
+    /// The wrapped [`LayoutCtx`], with the strip tag stripped off.
+    pub fn lctx(&self) -> LayoutCtx<'a, W> {
+        self.lctx
+    }
 }
 
 /// In-progress switch between activities on one monitor.
@@ -1171,38 +1218,38 @@ impl<W: LayoutElement> Monitor<W> {
         &self,
         view: &WorkspaceView,
     ) -> impl Iterator<Item = Rectangle<f64, Logical>> {
-        self.workspaces_render_geo_for_strip(view, ActivityStrip::Incoming)
+        self.workspaces_render_geo_offset(
+            view,
+            self.activity_switch_x_offset(ActivityStrip::Incoming),
+        )
     }
 
     /// Strip-aware core of [`workspaces_render_geo`](Self::workspaces_render_geo).
     ///
     /// Yields the same vertical layout as the public method but adds the activity-switch
-    /// horizontal offset for `strip` to every rect's `loc`. The offset is applied here, before
-    /// any culling downstream, so the cull filters see the post-offset positions.
-    pub(super) fn workspaces_render_geo_for_strip(
+    /// horizontal offset for `sctx`'s strip to every rect's `loc`. The offset is applied here,
+    /// before any culling downstream, so the cull filters see the post-offset positions.
+    pub(super) fn workspaces_render_geo_for(
+        &self,
+        sctx: StripCtx<'_, W>,
+    ) -> impl Iterator<Item = Rectangle<f64, Logical>> {
+        self.workspaces_render_geo_offset(
+            sctx.lctx.view(),
+            self.activity_switch_x_offset(sctx.strip),
+        )
+    }
+
+    fn workspaces_render_geo_offset(
         &self,
         view: &WorkspaceView,
-        strip: ActivityStrip,
+        x_offset: f64,
     ) -> impl Iterator<Item = Rectangle<f64, Logical>> {
-        // Partial I3 guard: the Outgoing strip is only meaningful while a switch is in flight.
-        // The full invariant (that `view` is the correct strip's view) is not checked here because
-        // this layer does not have access to both the active and `switch.from` views
-        // simultaneously. A structural fix (fold `strip` into the view-resolution so the
-        // illegal pairing is unrepresentable) is the correct long-term resolution; see the
-        // architectural escalation.
-        debug_assert!(
-            strip == ActivityStrip::Incoming || self.activity_switch.is_some(),
-            "Outgoing strip requested with no activity switch in flight",
-        );
-
         let scale = self.scale.fractional_scale();
         let zoom = self.overview_zoom();
 
         let ws_size = self.workspace_size(zoom);
         let gap = self.workspace_gap(zoom);
         let ws_height_with_gap = ws_size.h + gap;
-
-        let x_offset = self.activity_switch_x_offset(strip);
 
         let static_offset = (self.view_size.to_point() - ws_size.to_point()).downscale(2.);
         let static_offset = static_offset
@@ -1231,24 +1278,20 @@ impl<W: LayoutElement> Monitor<W> {
         &'a self,
         ctx: LayoutCtx<'a, W>,
     ) -> impl Iterator<Item = (&'a Workspace<W>, Rectangle<f64, Logical>)> + 'a {
-        let output_geo = Rectangle::from_size(self.view_size);
-
-        let geo = self.workspaces_render_geo(ctx.view());
-        zip(ctx.view().ids().iter().copied(), geo)
-            .map(move |(id, geo)| (ctx.workspace(id), geo))
-            // Cull out workspaces outside the output.
-            .filter(move |(_ws, geo)| geo.intersection(output_geo).is_some())
+        self.workspaces_with_render_geo_for(StripCtx::incoming(ctx))
     }
 
-    /// Same as [`workspaces_with_render_geo`](Self::workspaces_with_render_geo) but for the
-    /// outgoing activity strip during a switch. `ctx` must bundle the outgoing activity's view.
-    pub fn workspaces_with_render_geo_outgoing<'a>(
+    /// Same as [`workspaces_with_render_geo`](Self::workspaces_with_render_geo) but strip-aware.
+    /// `sctx` bundles the pool with the strip's view (the active view for Incoming, the
+    /// outgoing activity's view for Outgoing).
+    pub fn workspaces_with_render_geo_for<'a>(
         &'a self,
-        ctx: LayoutCtx<'a, W>,
+        sctx: StripCtx<'a, W>,
     ) -> impl Iterator<Item = (&'a Workspace<W>, Rectangle<f64, Logical>)> + 'a {
         let output_geo = Rectangle::from_size(self.view_size);
+        let ctx = sctx.lctx;
 
-        let geo = self.workspaces_render_geo_for_strip(ctx.view(), ActivityStrip::Outgoing);
+        let geo = self.workspaces_render_geo_for(sctx);
         zip(ctx.view().ids().iter().copied(), geo)
             .map(move |(id, geo)| (ctx.workspace(id), geo))
             // Cull out workspaces outside the output.
@@ -1433,10 +1476,9 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn render_workspaces<R: NiriRenderer>(
         &self,
-        lctx: LayoutCtx<'_, W>,
+        sctx: StripCtx<'_, W>,
         mut ctx: RenderCtx<R>,
         focus_ring: bool,
-        strip: ActivityStrip,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
         let _span = tracy_client::span!("Monitor::render_workspaces");
@@ -1488,8 +1530,6 @@ impl<W: LayoutElement> Monitor<W> {
             )
         };
 
-        // The two strip iterators have distinct opaque types; dispatching via a macro avoids
-        // a Vec collect on the idle/Incoming path (zero allocation when no switch is in flight).
         // Macro instead of closure because ws and insert hint have different elem types.
         macro_rules! push_for_geo {
             ($geo:expr) => {{
@@ -1538,17 +1578,8 @@ impl<W: LayoutElement> Monitor<W> {
             }};
         }
 
-        match strip {
-            ActivityStrip::Incoming => {
-                for (ws, geo) in self.workspaces_with_render_geo(lctx) {
-                    render_ws!(ws, geo);
-                }
-            }
-            ActivityStrip::Outgoing => {
-                for (ws, geo) in self.workspaces_with_render_geo_outgoing(lctx) {
-                    render_ws!(ws, geo);
-                }
-            }
+        for (ws, geo) in self.workspaces_with_render_geo_for(sctx) {
+            render_ws!(ws, geo);
         }
     }
 

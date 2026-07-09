@@ -278,10 +278,9 @@ impl TestCase for Layout {
             xray: None,
         };
         mon.render_workspaces(
-            lctx,
+            jiji::layout::monitor::StripCtx::incoming(lctx),
             ctx,
             true,
-            jiji::layout::monitor::ActivityStrip::Incoming,
             &mut |elem| rv.push(Box::new(elem) as _),
         );
         rv

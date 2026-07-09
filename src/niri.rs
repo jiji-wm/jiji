@@ -138,7 +138,7 @@ use crate::input::{
 use crate::ipc::server::IpcServer;
 use crate::layer::mapped::LayerSurfaceRenderElement;
 use crate::layer::MappedLayer;
-use crate::layout::monitor::ActivityStrip;
+use crate::layout::monitor::StripCtx;
 use crate::layout::tile::TileRenderElement;
 use crate::layout::workspace::Workspace;
 use crate::layout::{
@@ -4573,7 +4573,7 @@ impl Niri {
         // Get monitor elements.
         let mon = self.layout.monitor_for_output(output).unwrap();
         let lctx = self.layout.ctx_for(mon);
-        let out_lctx = self.layout.outgoing_ctx_for(mon);
+        let out_sctx = self.layout.outgoing_ctx_for(mon);
         let zoom = mon.overview_zoom();
 
         // Get layer-shell elements.
@@ -4646,13 +4646,9 @@ impl Niri {
 
             mon.render_insert_hint_between_workspaces(ctx.renderer, &mut |elem| push(elem.into()));
 
-            mon.render_workspaces(
-                lctx,
-                ctx.r(),
-                focus_ring,
-                ActivityStrip::Incoming,
-                &mut |elem| push(elem.into()),
-            );
+            mon.render_workspaces(StripCtx::incoming(lctx), ctx.r(), focus_ring, &mut |elem| {
+                push(elem.into())
+            });
 
             push_popups_from_layer!(Layer::Top);
             push_normal_from_layer!(Layer::Top);
@@ -4703,8 +4699,8 @@ impl Niri {
             // damage-tracker behavior for framebuffer-effect elements is a latent open question
             // — sticky workspaces are uncommon and the window during a switch is short, but this
             // should be confirmed before the activity-switch feature ships.
-            if let Some(out_lctx) = out_lctx {
-                for (ws, geo) in mon.workspaces_with_render_geo_outgoing(out_lctx) {
+            if let Some(out_sctx) = out_sctx {
+                for (ws, geo) in mon.workspaces_with_render_geo_for(out_sctx) {
                     let ns = Some(ws.id().get() as usize);
                     let xray_pos = XrayPos::new(geo.loc, zoom);
                     push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
@@ -4712,22 +4708,12 @@ impl Niri {
                 }
             }
 
-            mon.render_workspaces(
-                lctx,
-                ctx.r(),
-                focus_ring,
-                ActivityStrip::Incoming,
-                &mut |elem| push(elem.into()),
-            );
+            mon.render_workspaces(StripCtx::incoming(lctx), ctx.r(), focus_ring, &mut |elem| {
+                push(elem.into())
+            });
 
-            if let Some(out_lctx) = out_lctx {
-                mon.render_workspaces(
-                    out_lctx,
-                    ctx.r(),
-                    false,
-                    ActivityStrip::Outgoing,
-                    &mut |elem| push(elem.into()),
-                );
+            if let Some(out_sctx) = out_sctx {
+                mon.render_workspaces(out_sctx, ctx.r(), false, &mut |elem| push(elem.into()));
             }
 
             for (ws, geo) in mon.workspaces_with_render_geo(lctx) {
@@ -4747,10 +4733,10 @@ impl Niri {
                 process!(geo)(ws.render_background());
             }
 
-            if let Some(out_lctx) = out_lctx {
+            if let Some(out_sctx) = out_sctx {
                 // Same sticky-workspace ns-collision caveat applies here as for the popups
                 // pass above.
-                for (ws, geo) in mon.workspaces_with_render_geo_outgoing(out_lctx) {
+                for (ws, geo) in mon.workspaces_with_render_geo_for(out_sctx) {
                     let ns = Some(ws.id().get() as usize);
                     let xray_pos = XrayPos::new(geo.loc, zoom);
                     push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));

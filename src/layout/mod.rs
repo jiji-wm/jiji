@@ -63,7 +63,7 @@ pub use self::activity::{
 };
 use self::bookmarks::Bookmarks;
 pub use self::monitor::MonitorRenderElement;
-use self::monitor::{ActivitySwitch, Monitor, SlideDirection, WorkspaceSwitch};
+use self::monitor::{ActivitySwitch, Monitor, SlideDirection, StripCtx, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
@@ -5119,7 +5119,7 @@ impl<W: LayoutElement> Layout<W> {
         LayoutCtx::new(&self.workspaces, self.active_view(&mon.output_id()))
     }
 
-    /// Build the shared-borrow context for `mon`'s outgoing activity strip during a switch.
+    /// Build the Outgoing-tagged strip context for `mon`'s activity switch, if one is in flight.
     ///
     /// Returns `None` when no activity-switch transition is in flight on `mon`. While one is,
     /// the outgoing activity (`activity_switch.from`) is resolved from the live pool — that the
@@ -5128,7 +5128,10 @@ impl<W: LayoutElement> Layout<W> {
     /// dormant single-entry view mid-flight without immediate re-materialization. The view is
     /// keyed by `mon.output_id()` (never a workspace's own `output_id`, which is deliberately
     /// stale post-partial-disconnect).
-    pub fn outgoing_ctx_for<'a>(&'a self, mon: &Monitor<W>) -> Option<LayoutCtx<'a, W>> {
+    ///
+    /// This is the only place that mints an Outgoing [`StripCtx`] — the tag is unforgeable
+    /// outside `crate::layout`.
+    pub fn outgoing_ctx_for<'a>(&'a self, mon: &Monitor<W>) -> Option<StripCtx<'a, W>> {
         let switch = mon.activity_switch.as_ref()?;
         let view = self
             .activities
@@ -5136,7 +5139,7 @@ impl<W: LayoutElement> Layout<W> {
             .expect("in-flight activity switch outgoing id must be a live activity")
             .views()
             .get(&mon.output_id())?;
-        Some(LayoutCtx::new(&self.workspaces, view))
+        Some(StripCtx::outgoing(LayoutCtx::new(&self.workspaces, view)))
     }
 
     pub fn monitor_for_workspace(&self, workspace_name: &str) -> Option<&Monitor<W>> {
