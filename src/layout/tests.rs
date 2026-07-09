@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use jiji_config::utils::{Flag, MergeWith as _};
 use jiji_config::workspace::WorkspaceName;
 use jiji_config::{
-    CenterFocusedColumn, FloatOrInt, OutputName, Struts, TabIndicatorLength, TabIndicatorPosition,
-    WorkspaceReference,
+    Bind, CenterFocusedColumn, FloatOrInt, ModKey, OutputName, Struts, TabIndicatorLength,
+    TabIndicatorPosition, WorkspaceReference,
 };
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
@@ -13,7 +13,9 @@ use smithay::output::{Mode, PhysicalProperties, Subpixel};
 use smithay::utils::Rectangle;
 
 use super::activity::ActivityId;
-use super::bookmarks::{BookmarkJumpOutcome, BookmarkKey, BookmarkRule, WalkDirection};
+use super::bookmarks::{
+    BookmarkJumpOutcome, BookmarkKey, BookmarkRestorePlan, BookmarkRule, WalkDirection,
+};
 use super::monitor::ActivityStrip;
 use super::*;
 
