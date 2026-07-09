@@ -29,7 +29,8 @@ pub struct ResolvedAppearanceOverride {
     pub global: ResolvedGlobalAppearance,
     /// Per-window-rule overrides. Composed per-window at window-rule
     /// resolution (`ResolvedWindowRules::compute`), not by [`flatten`], which
-    /// stays global-only by design.
+    /// stays global-only by design. Collected across layers by
+    /// [`appearance_rules`].
     pub rules: Vec<ResolvedAppearanceRule>,
 }
 
@@ -107,6 +108,26 @@ pub fn flatten(layers: &BTreeMap<LayerId, ResolvedAppearanceOverride>) -> Flatte
         }
     }
     result
+}
+
+/// Collect every layer's per-window rules in ascending [`LayerId`] order.
+///
+/// This is the `rules`-side counterpart to [`flatten`], which folds only the
+/// *global* fields; per-window rules are composed per-window instead, at
+/// window-rule resolution (`ResolvedWindowRules::compute`), since which rules
+/// apply depends on the window being matched. `BTreeMap` iteration guarantees
+/// ascending `LayerId` order, so a consumer that folds matched rules
+/// per-field in iteration order — as the appearance loop in
+/// `ResolvedWindowRules::compute` does — resolves same-field ties to the
+/// lexically-greatest layer, mirroring [`flatten`]'s own tiebreak for global
+/// fields.
+pub fn appearance_rules(
+    layers: &BTreeMap<LayerId, ResolvedAppearanceOverride>,
+) -> Vec<&ResolvedAppearanceRule> {
+    layers
+        .values()
+        .flat_map(|layer| layer.rules.iter())
+        .collect()
 }
 
 fn resolve_focus_ring(field: &str, wire: &FocusRingOverride) -> Result<BorderRule, String> {

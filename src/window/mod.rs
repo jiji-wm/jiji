@@ -336,10 +336,10 @@ impl ResolvedWindowRules {
             // matcher, so unlike the static loop above this has no
             // matches.is_empty() match-all branch.
             //
-            // Callers build `appearance_rules` by flattening all override
-            // layers in ascending `LayerId` order; same-field ties resolve
-            // to the lexically-greatest layer, per `jiji_config::flatten`'s
-            // tiebreak.
+            // Callers collect `appearance_rules` via
+            // `jiji_config::appearance_rules`, which guarantees ascending
+            // `LayerId` order, so the per-field merge below resolves
+            // same-field ties to the lexically-greatest layer.
             for rule in appearance_rules {
                 if rule.matches.iter().any(|m| window_matches(window, role, m)) {
                     resolved.focus_ring.merge_with(&rule.focus_ring);

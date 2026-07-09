@@ -4286,12 +4286,7 @@ impl Niri {
 
         let config = self.config.borrow();
         let window_rules = &config.window_rules;
-        // Direct field access — see the comment in `recompute_window_rules`.
-        let appearance_rules: Vec<&jiji_config::ResolvedAppearanceRule> = self
-            .appearance_override
-            .values()
-            .flat_map(|layer| layer.rules.iter())
-            .collect();
+        let appearance_rules = jiji_config::appearance_rules(&self.appearance_override);
 
         let mut windows = vec![];
         let mut outputs = HashSet::new();
@@ -6768,20 +6763,7 @@ impl Niri {
 
         let changed = {
             let window_rules = &self.config.borrow().window_rules;
-            // Every call site below builds this `Vec` by direct field access
-            // (`self.appearance_override.values().flat_map(...)`) rather than
-            // through a shared helper method, so the borrow checker sees it
-            // as disjoint from the `unmapped_windows` / `layout` mutable
-            // borrows that follow, rather than a whole-`self` borrow behind
-            // a method call. See `ResolvedWindowRules::compute`'s
-            // appearance-rules loop for the cross-layer ordering contract
-            // this `Vec` must preserve (ascending `LayerId`, ties resolve to
-            // the lexically-greatest layer).
-            let appearance_rules: Vec<&jiji_config::ResolvedAppearanceRule> = self
-                .appearance_override
-                .values()
-                .flat_map(|layer| layer.rules.iter())
-                .collect();
+            let appearance_rules = jiji_config::appearance_rules(&self.appearance_override);
 
             for unmapped in self.unmapped_windows.values_mut() {
                 let new_rules = ResolvedWindowRules::compute(

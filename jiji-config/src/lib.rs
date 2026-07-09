@@ -51,8 +51,8 @@ pub use crate::activity::{ActivityDecl, ActivityName};
 pub use crate::animations::{Animation, Animations};
 pub use crate::appearance::*;
 pub use crate::appearance_override::{
-    flatten, FlattenedAppearance, LayerId, ResolvedAppearanceOverride, ResolvedAppearanceRule,
-    ResolvedGlobalAppearance,
+    appearance_rules, flatten, FlattenedAppearance, LayerId, ResolvedAppearanceOverride,
+    ResolvedAppearanceRule, ResolvedGlobalAppearance,
 };
 pub use crate::binds::*;
 pub use crate::bookmarks::{

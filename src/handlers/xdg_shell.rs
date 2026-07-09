@@ -1150,15 +1150,7 @@ impl State {
         };
 
         let config = self.niri.config.borrow();
-        // Direct field access keeps the borrow of
-        // `self.niri.appearance_override` disjoint from the `unmapped`
-        // borrow of `self.niri.unmapped_windows` above.
-        let appearance_rules: Vec<&jiji_config::ResolvedAppearanceRule> = self
-            .niri
-            .appearance_override
-            .values()
-            .flat_map(|layer| layer.rules.iter())
-            .collect();
+        let appearance_rules = jiji_config::appearance_rules(&self.niri.appearance_override);
         let rules = ResolvedWindowRules::compute(
             &config.window_rules,
             &appearance_rules,
@@ -1635,16 +1627,7 @@ impl State {
     pub fn update_window_rules(&mut self, toplevel: &ToplevelSurface) {
         let config = self.niri.config.borrow();
         let window_rules = &config.window_rules;
-        // Direct field access keeps the borrow of
-        // `self.niri.appearance_override` disjoint from the
-        // `self.niri.unmapped_windows` / `self.niri.layout` mutable borrows
-        // below.
-        let appearance_rules: Vec<&jiji_config::ResolvedAppearanceRule> = self
-            .niri
-            .appearance_override
-            .values()
-            .flat_map(|layer| layer.rules.iter())
-            .collect();
+        let appearance_rules = jiji_config::appearance_rules(&self.niri.appearance_override);
 
         if let Some(unmapped) = self.niri.unmapped_windows.get_mut(toplevel.wl_surface()) {
             let new_rules = ResolvedWindowRules::compute(
