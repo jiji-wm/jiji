@@ -1086,6 +1086,25 @@ pub enum HitType {
     },
 }
 
+/// Outcome of [`Layout::resolve_insert_target`]: where a workspace-insertion
+/// call should land.
+///
+/// Not to be confused with [`InsertWorkspace`] (a pointer-position
+/// drop-target request) or [`InsertPosition`] (where in a column a tile
+/// lands). This enum is purely the *bookend-reuse resolution outcome* for the
+/// four `*_workspace_*_on` insertion helpers and the `interactive_move_end`
+/// `NewAt` arm — it carries no rendering or pointer information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BookendResolution {
+    /// Reuse the top empty workspace (index 0); the caller performs no insert.
+    ReuseTop,
+    /// Reuse the trailing bookend workspace (`view_len - 1`); the caller
+    /// performs no insert.
+    ReuseTrailing,
+    /// No bookend applies; insert a fresh workspace at this index.
+    InsertAt(usize),
+}
+
 #[derive(Debug)]
 enum OverviewProgress {
     Animation(Animation),
@@ -4453,21 +4472,52 @@ impl<W: LayoutElement> Layout<W> {
         );
     }
 
+    /// Resolve which of the two bookend slots (if any) a workspace-insertion
+    /// call should reuse instead of inserting a fresh workspace at
+    /// `insert_idx`.
+    ///
+    /// This is the canonical statement of the bookend-reuse rules shared by
+    /// `move_to_new_workspace_up_on`, `move_to_new_workspace_down_on`,
+    /// `add_workspace_up_on`, `add_workspace_down_on`, and the `NewAt` arm of
+    /// `interactive_move_end`'s insertion-target resolution.
+    ///
+    /// Check order is a contract, not an accident: the EWAF-top check fires
+    /// **before** the trailing-reuse check. The two conditions only overlap
+    /// when `view_len == 1` (both resolve to slot 0 today), so the order is
+    /// observationally moot at present, but a future edit must not swap it.
+    ///
+    /// # Panics
+    ///
+    /// Debug-underflow-panics if `view_len == 0`. Callers must guarantee
+    /// `view_len >= 1`, which the trailing-bookend invariant provides for any
+    /// connected monitor's view; `view_len - 1` deliberately keeps this loud
+    /// failure rather than silently clamping on invariant breach.
+    fn resolve_insert_target(ewaf: bool, insert_idx: usize, view_len: usize) -> BookendResolution {
+        if ewaf && insert_idx == 0 {
+            BookendResolution::ReuseTop
+        } else if view_len - 1 <= insert_idx {
+            BookendResolution::ReuseTrailing
+        } else {
+            BookendResolution::InsertAt(insert_idx)
+        }
+    }
+
     /// Remove the active tile from its workspace and place it on a freshly
     /// inserted workspace above the current position.
     ///
     /// The insertion index is `view.active_position()`, so the new workspace
     /// lands above the source; the source shifts down by one after insertion.
-    /// At the edges the bookend-reuse rules from `interactive_move_end` apply:
+    /// At the edges, [`Self::resolve_insert_target`] may reuse a bookend slot
+    /// instead of inserting:
     ///
-    /// - If `empty_workspace_above_first` is set and the target index is 0, the existing top empty
-    ///   workspace is reused (no insert).  This arm is structurally unreachable here: `insert_idx
-    ///   == 0` requires the source at slot 0, which under ewaf is the forced-empty slot, so
-    ///   `remove_active_tile` bails first.  The arm is kept for structural symmetry with
-    ///   `interactive_move_end`.
-    /// - If the target index reaches or exceeds the trailing bookend slot, the trailing bookend is
-    ///   reused (no insert).  This arm is kept for structural symmetry with the down variant; it is
-    ///   unreachable for the up direction because the trailing empty is never the focused source.
+    /// - Top-bookend reuse is structurally unreachable here: `insert_idx == 0` requires the source
+    ///   at slot 0, which under ewaf is the forced-empty slot, so `remove_active_tile` bails first.
+    ///   Kept for structural symmetry with the other insertion sites.
+    /// - Trailing-bookend reuse is unreachable for the up direction because the trailing empty is
+    ///   never the focused source.
+    ///
+    /// If either reuse arm fires on invariant breach with target == source,
+    /// the tile re-lands on the source workspace as a new column.
     ///
     /// `focus` controls whether the view follows the window:
     /// `true` → `ActivateWindow::Yes`; `false` → `ActivateWindow::Smart`.
@@ -4490,26 +4540,17 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
 
-        // (2) Resolve the target workspace id, applying bookend-reuse rules in
-        //     the same order as `interactive_move_end`.
-        let target_id =
-            if monitors[mon_idx].options.layout.empty_workspace_above_first && insert_idx == 0 {
-                // Reuse the top empty workspace; no insert needed.
-                // Unreachable under intact bookend invariants (see rustdoc).
-                // If fired on invariant breach with target == source, the tile
-                // re-lands on the source workspace as a new column.
-                view.ids()[0]
-            } else if view.len() - 1 <= insert_idx {
-                // Reuse the trailing bookend; no insert needed.
-                // Unreachable for the up direction under intact bookend invariants
-                // (see rustdoc).  If fired on invariant breach with target ==
-                // source, the tile re-lands on the source workspace as a new column.
-                view.ids()[view.len() - 1]
-            } else {
-                // Insert a fresh workspace at insert_idx and capture its id.
-                Self::add_workspace_at_on(monitors, pool, view, mon_idx, insert_idx, seed_activity);
-                view.ids()[insert_idx]
-            };
+        // (2) Resolve the target workspace id. Both reuse arms are unreachable
+        //     under intact bookend invariants for the up direction (see rustdoc).
+        let ewaf = monitors[mon_idx].options.layout.empty_workspace_above_first;
+        let target_id = match Self::resolve_insert_target(ewaf, insert_idx, view.len()) {
+            BookendResolution::ReuseTop => view.ids()[0],
+            BookendResolution::ReuseTrailing => view.ids()[view.len() - 1],
+            BookendResolution::InsertAt(idx) => {
+                Self::add_workspace_at_on(monitors, pool, view, mon_idx, idx, seed_activity);
+                view.ids()[idx]
+            }
+        };
 
         // (3) Place the tile on the target workspace using an id-based target so
         //     the up-direction index shift (source is now at insert_idx + 1)
@@ -4543,15 +4584,17 @@ impl<W: LayoutElement> Layout<W> {
     /// inserted workspace below the current position.
     ///
     /// The insertion index is `view.active_position() + 1`, so the new
-    /// workspace lands directly below the source.  At the edges the
-    /// bookend-reuse rules from `interactive_move_end` apply:
+    /// workspace lands directly below the source. At the edges,
+    /// [`Self::resolve_insert_target`] may reuse a bookend slot instead of
+    /// inserting:
     ///
-    /// - If `empty_workspace_above_first` is set and the target index is 0, the top empty workspace
-    ///   is reused.  This arm is kept for structural symmetry with `interactive_move_end`; it is
-    ///   unreachable for the down direction because `insert_idx = source_idx + 1 >= 1` always.
-    /// - If the target index reaches or exceeds the trailing bookend slot, the trailing bookend is
-    ///   reused (no insert) — the window lands on the existing trailing empty workspace at the
-    ///   bottom edge.
+    /// - Top-bookend reuse is unreachable for the down direction because `insert_idx = source_idx +
+    ///   1 >= 1` always. Kept for structural symmetry with the other insertion sites.
+    /// - Trailing-bookend reuse is live: the window lands on the existing trailing empty workspace
+    ///   at the bottom edge.
+    ///
+    /// If either reuse arm fires on invariant breach with target == source,
+    /// the tile re-lands on the source workspace as a new column.
     ///
     /// `focus` controls whether the view follows the window:
     /// `true` → `ActivateWindow::Yes`; `false` → `ActivateWindow::Smart`.
@@ -4574,26 +4617,17 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
 
-        // (2) Resolve the target workspace id, applying bookend-reuse rules in
-        //     the same order as `interactive_move_end`.
-        let target_id =
-            if monitors[mon_idx].options.layout.empty_workspace_above_first && insert_idx == 0 {
-                // Reuse the top empty workspace; no insert needed.
-                // Unreachable for the down direction under intact bookend invariants
-                // (see rustdoc).  If fired on invariant breach with target ==
-                // source, the tile re-lands on the source workspace as a new column.
-                view.ids()[0]
-            } else if view.len() - 1 <= insert_idx {
-                // Reuse the trailing bookend; no insert needed.
-                // If fired on invariant breach with target == source, the tile
-                // re-lands on the source workspace as a new column.
-                view.ids()[view.len() - 1]
-            } else {
-                // Insert a fresh workspace at insert_idx and capture its id
-                // before any index shifts.
-                Self::add_workspace_at_on(monitors, pool, view, mon_idx, insert_idx, seed_activity);
-                view.ids()[insert_idx]
-            };
+        // (2) Resolve the target workspace id. Top-bookend reuse is unreachable
+        //     for the down direction; trailing-bookend reuse is live (see rustdoc).
+        let ewaf = monitors[mon_idx].options.layout.empty_workspace_above_first;
+        let target_id = match Self::resolve_insert_target(ewaf, insert_idx, view.len()) {
+            BookendResolution::ReuseTop => view.ids()[0],
+            BookendResolution::ReuseTrailing => view.ids()[view.len() - 1],
+            BookendResolution::InsertAt(idx) => {
+                Self::add_workspace_at_on(monitors, pool, view, mon_idx, idx, seed_activity);
+                view.ids()[idx]
+            }
+        };
 
         // (3) Place the tile on the target workspace.
         let activate = if focus {
@@ -4624,17 +4658,16 @@ impl<W: LayoutElement> Layout<W> {
     /// Insert a fresh empty workspace directly above the active workspace and
     /// focus it.
     ///
-    /// The insertion index is `view.active_position()`.  At the edges the
-    /// bookend-reuse rules from `interactive_move_end` apply:
+    /// The insertion index is `view.active_position()`. At the edges,
+    /// [`Self::resolve_insert_target`] may reuse a bookend slot instead of
+    /// inserting:
     ///
-    /// - If `empty_workspace_above_first` is set and the target index is 0, the existing top empty
-    ///   workspace is reused (no insert).  This arm is live: from the forced-empty slot 0 there is
-    ///   nothing to bail on, so the call reaches here with `insert_idx == 0`, reuses the EWAF slot,
-    ///   and focuses it (a no-op because it is already active).
-    /// - If the target index reaches or exceeds the trailing bookend slot, the trailing bookend is
-    ///   reused (no insert).  This arm is live: focusing the trailing bookend itself produces
-    ///   `insert_idx == view.len() - 1`, which collapses to a reuse with an immediate focus of the
-    ///   trailing slot.
+    /// - Top-bookend reuse is live: from the forced-empty slot 0 there is nothing to bail on, so
+    ///   the call reaches here with `insert_idx == 0`, reuses the EWAF slot, and focuses it (a
+    ///   no-op because it is already active).
+    /// - Trailing-bookend reuse is live: focusing the trailing bookend itself produces `insert_idx
+    ///   == view.len() - 1`, which collapses to a reuse with an immediate focus of the trailing
+    ///   slot.
     /// - Otherwise a fresh workspace is inserted at `insert_idx` and focused.
     fn add_workspace_up_on(
         monitors: &mut [Monitor<W>],
@@ -4645,21 +4678,16 @@ impl<W: LayoutElement> Layout<W> {
     ) {
         let insert_idx = view.active_position();
 
-        let target_idx =
-            if monitors[mon_idx].options.layout.empty_workspace_above_first && insert_idx == 0 {
-                // Reuse the top empty workspace; no insert needed.
-                // This arm is live: when the cursor is already on the forced-empty
-                // slot 0, insert_idx == 0 and no new workspace is inserted.
-                0
-            } else if view.len() - 1 <= insert_idx {
-                // Reuse the trailing bookend; no insert needed.
-                // This arm is live: from the trailing bookend itself insert_idx
-                // equals view.len() - 1, so the condition fires.
-                view.len() - 1
-            } else {
-                Self::add_workspace_at_on(monitors, pool, view, mon_idx, insert_idx, seed_activity);
-                insert_idx
-            };
+        // Both reuse arms are live for the up direction (see rustdoc).
+        let ewaf = monitors[mon_idx].options.layout.empty_workspace_above_first;
+        let target_idx = match Self::resolve_insert_target(ewaf, insert_idx, view.len()) {
+            BookendResolution::ReuseTop => 0,
+            BookendResolution::ReuseTrailing => view.len() - 1,
+            BookendResolution::InsertAt(idx) => {
+                Self::add_workspace_at_on(monitors, pool, view, mon_idx, idx, seed_activity);
+                idx
+            }
+        };
 
         monitors[mon_idx].activate_workspace(view, target_idx);
     }
@@ -4667,16 +4695,14 @@ impl<W: LayoutElement> Layout<W> {
     /// Insert a fresh empty workspace directly below the active workspace and
     /// focus it.
     ///
-    /// The insertion index is `view.active_position() + 1`.  At the edges the
-    /// bookend-reuse rules from `interactive_move_end` apply:
+    /// The insertion index is `view.active_position() + 1`. At the edges,
+    /// [`Self::resolve_insert_target`] may reuse a bookend slot instead of
+    /// inserting:
     ///
-    /// - If `empty_workspace_above_first` is set and the target index is 0, the existing top empty
-    ///   workspace is reused (no insert).  This arm is kept for structural symmetry with the up
-    ///   variant; it is unreachable for the down direction because `insert_idx = active_position()
-    ///   + 1 >= 1` always.
-    /// - If the target index reaches or exceeds the trailing bookend slot, the trailing bookend is
-    ///   reused (no insert).  This arm is live in two scenarios: (a) from the last content
-    ///   workspace the insert would land on the trailing slot, which collapses to a reuse (same as
+    /// - Top-bookend reuse is unreachable for the down direction because `insert_idx =
+    ///   active_position() + 1 >= 1` always. Kept for structural symmetry with the up variant.
+    /// - Trailing-bookend reuse is live in two scenarios: (a) from the last content workspace the
+    ///   insert would land on the trailing slot, which collapses to a reuse (same as
     ///   `FocusWorkspaceDown` at the bottom edge); (b) from the trailing bookend itself `insert_idx
     ///   == view.len()-1` and focus stays in place.
     /// - Otherwise a fresh workspace is inserted at `insert_idx` and focused.
@@ -4689,25 +4715,17 @@ impl<W: LayoutElement> Layout<W> {
     ) {
         let insert_idx = view.active_position() + 1;
 
-        let target_idx =
-            if monitors[mon_idx].options.layout.empty_workspace_above_first && insert_idx == 0 {
-                // Reuse the top empty workspace; no insert needed.
-                // Unreachable for the down direction because insert_idx >= 1 always;
-                // kept for structural symmetry with the up variant.
-                0
-            } else if view.len() - 1 <= insert_idx {
-                // Reuse the trailing bookend; no insert needed.
-                // This arm is live in two scenarios:
-                // (a) from the last content workspace: insert_idx == view.len()-1
-                //     (the trailing slot), same collapse as FocusWorkspaceDown at
-                //     the bottom edge;
-                // (b) from the trailing bookend itself: insert_idx == view.len()-1
-                //     (active_position() == view.len()-1), focus stays in place.
-                view.len() - 1
-            } else {
-                Self::add_workspace_at_on(monitors, pool, view, mon_idx, insert_idx, seed_activity);
-                insert_idx
-            };
+        // Top-bookend reuse is unreachable for the down direction; trailing-bookend
+        // reuse is live (see rustdoc).
+        let ewaf = monitors[mon_idx].options.layout.empty_workspace_above_first;
+        let target_idx = match Self::resolve_insert_target(ewaf, insert_idx, view.len()) {
+            BookendResolution::ReuseTop => 0,
+            BookendResolution::ReuseTrailing => view.len() - 1,
+            BookendResolution::InsertAt(idx) => {
+                Self::add_workspace_at_on(monitors, pool, view, mon_idx, idx, seed_activity);
+                idx
+            }
+        };
 
         monitors[mon_idx].activate_workspace(view, target_idx);
     }
@@ -11348,16 +11366,21 @@ impl<W: LayoutElement> Layout<W> {
         let ws_idx = match insert_ws {
             InsertWorkspace::Existing(ws_id) => view.position_of(ws_id).unwrap(),
             InsertWorkspace::NewAt(ws_idx) => {
-                let mon = &monitors[mon_idx];
-                if mon.options.layout.empty_workspace_above_first && ws_idx == 0 {
-                    // Reuse the top empty workspace.
-                    0
-                } else if view.len() - 1 <= ws_idx {
-                    // Reuse the bottom empty workspace.
-                    view.len() - 1
-                } else {
-                    Self::add_workspace_at_on(monitors, pool, view, mon_idx, ws_idx, seed_activity);
-                    ws_idx
+                let ewaf = monitors[mon_idx].options.layout.empty_workspace_above_first;
+                match Self::resolve_insert_target(ewaf, ws_idx, view.len()) {
+                    BookendResolution::ReuseTop => 0,
+                    BookendResolution::ReuseTrailing => view.len() - 1,
+                    BookendResolution::InsertAt(idx) => {
+                        Self::add_workspace_at_on(
+                            monitors,
+                            pool,
+                            view,
+                            mon_idx,
+                            idx,
+                            seed_activity,
+                        );
+                        idx
+                    }
                 }
             }
         };

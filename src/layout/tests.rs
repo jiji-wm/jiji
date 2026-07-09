@@ -24696,3 +24696,38 @@ fn revalidate_bookmark_keys_drops_bookmark_vs_bookmark_collision_keeping_lower_i
 
     layout.verify_invariants();
 }
+
+#[test]
+// Pins the EWAF-before-trailing check-order contract of
+// `Layout::resolve_insert_target`: the top-bookend check must fire before the
+// trailing-bookend check, since the two overlap only when `view_len == 1`.
+fn resolve_insert_target_check_order_and_boundaries() {
+    // `view_len == 1`: both checks apply to slot 0. EWAF-top must win.
+    assert_eq!(
+        Layout::<TestWindow>::resolve_insert_target(true, 0, 1),
+        BookendResolution::ReuseTop,
+    );
+    // Same overlap, but without EWAF: falls through to trailing-bookend reuse.
+    assert_eq!(
+        Layout::<TestWindow>::resolve_insert_target(false, 0, 1),
+        BookendResolution::ReuseTrailing,
+    );
+
+    // `insert_idx == view_len` folds to trailing reuse via `view_len - 1 <= insert_idx`.
+    assert_eq!(
+        Layout::<TestWindow>::resolve_insert_target(false, 3, 3),
+        BookendResolution::ReuseTrailing,
+    );
+
+    // In-range insert: strictly below `view_len - 1`, so a fresh slot is used.
+    assert_eq!(
+        Layout::<TestWindow>::resolve_insert_target(false, 1, 4),
+        BookendResolution::InsertAt(1),
+    );
+
+    // ReuseTop requires both `ewaf` and `insert_idx == 0`; ewaf alone is not enough.
+    assert_eq!(
+        Layout::<TestWindow>::resolve_insert_target(true, 2, 5),
+        BookendResolution::InsertAt(2),
+    );
+}
