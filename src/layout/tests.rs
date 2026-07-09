@@ -8727,8 +8727,7 @@ fn do_action_error_display_matches_wire_contract() {
     use super::{
         AddWorkspaceToActivityError, CreateActivityError, MoveWorkspaceToActivityError,
         RemoveActivityError, RemoveWorkspaceFromActivityError, RenameActivityError,
-        SetWorkspaceActivitiesError, SetWorkspaceStickyError, SwitchActivityError,
-        ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
+        SetWorkspaceActivitiesError, SwitchActivityError, WorkspaceStickyError,
     };
     assert_eq!(
         format!(
@@ -8910,27 +8909,28 @@ fn do_action_error_display_matches_wire_contract() {
         ),
         "activity not found",
     );
-    // Sticky cohort tokens. Each enum has a single `WorkspaceNotFound`
-    // variant; the dispatch arm now surfaces it instead of silently
-    // returning `Ok(())`.
+    // Sticky cohort tokens. All three outer variants wrap the shared
+    // `WorkspaceStickyError`'s single `WorkspaceNotFound` variant; the
+    // dispatch arm now surfaces it instead of silently returning `Ok(())`.
+    // Each row pins a distinct outer variant's delegation.
     assert_eq!(
         format!(
             "{}",
-            DoActionError::ToggleWorkspaceSticky(ToggleWorkspaceStickyError::WorkspaceNotFound)
+            DoActionError::ToggleWorkspaceSticky(WorkspaceStickyError::WorkspaceNotFound)
         ),
         "workspace not found",
     );
     assert_eq!(
         format!(
             "{}",
-            DoActionError::SetWorkspaceSticky(SetWorkspaceStickyError::WorkspaceNotFound)
+            DoActionError::SetWorkspaceSticky(WorkspaceStickyError::WorkspaceNotFound)
         ),
         "workspace not found",
     );
     assert_eq!(
         format!(
             "{}",
-            DoActionError::UnsetWorkspaceSticky(UnsetWorkspaceStickyError::WorkspaceNotFound)
+            DoActionError::UnsetWorkspaceSticky(WorkspaceStickyError::WorkspaceNotFound)
         ),
         "workspace not found",
     );
@@ -9058,8 +9058,8 @@ fn do_action_error_envelope_matches_wire_contract() {
         format_do_action_error, ActivitySwitchBlock, AddWorkspaceToActivityError,
         CreateActivityError, DoActionError, FocusWorkspaceInActivityError,
         MoveWorkspaceToActivityError, RemoveActivityError, RemoveWorkspaceFromActivityError,
-        RenameActivityError, SetWorkspaceActivitiesError, SetWorkspaceStickyError,
-        SwitchActivityError, ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
+        RenameActivityError, SetWorkspaceActivitiesError, SwitchActivityError,
+        WorkspaceStickyError,
     };
     for (err, expected) in [
         (
@@ -9205,15 +9205,15 @@ fn do_action_error_envelope_matches_wire_contract() {
         ),
         // Sticky cohort rows.
         (
-            DoActionError::ToggleWorkspaceSticky(ToggleWorkspaceStickyError::WorkspaceNotFound),
+            DoActionError::ToggleWorkspaceSticky(WorkspaceStickyError::WorkspaceNotFound),
             "workspace not found",
         ),
         (
-            DoActionError::SetWorkspaceSticky(SetWorkspaceStickyError::WorkspaceNotFound),
+            DoActionError::SetWorkspaceSticky(WorkspaceStickyError::WorkspaceNotFound),
             "workspace not found",
         ),
         (
-            DoActionError::UnsetWorkspaceSticky(UnsetWorkspaceStickyError::WorkspaceNotFound),
+            DoActionError::UnsetWorkspaceSticky(WorkspaceStickyError::WorkspaceNotFound),
             "workspace not found",
         ),
         // Activity-scoped workspace resolution rows.
@@ -17838,7 +17838,7 @@ fn set_workspace_sticky_no_op_when_workspace_not_found() {
     let err = layout
         .set_workspace_sticky(Some(WorkspaceReference::Id(u64::MAX)))
         .expect_err("unknown workspace must err at the Layout surface");
-    assert_eq!(err, SetWorkspaceStickyError::WorkspaceNotFound);
+    assert_eq!(err, WorkspaceStickyError::WorkspaceNotFound);
 }
 
 #[test]
@@ -18106,7 +18106,7 @@ fn unset_workspace_sticky_no_op_when_workspace_not_found() {
     let err = layout
         .unset_workspace_sticky(Some(WorkspaceReference::Id(u64::MAX)))
         .expect_err("unknown workspace must err at the Layout surface");
-    assert_eq!(err, UnsetWorkspaceStickyError::WorkspaceNotFound);
+    assert_eq!(err, WorkspaceStickyError::WorkspaceNotFound);
 }
 
 #[test]
@@ -18205,7 +18205,7 @@ fn toggle_workspace_sticky_no_op_when_workspace_not_found() {
     let err = layout
         .toggle_workspace_sticky(Some(WorkspaceReference::Id(u64::MAX)))
         .expect_err("unknown workspace must err at the Layout surface");
-    assert_eq!(err, ToggleWorkspaceStickyError::WorkspaceNotFound);
+    assert_eq!(err, WorkspaceStickyError::WorkspaceNotFound);
 }
 
 // ---- `open-on-activity` cross-activity helpers ----

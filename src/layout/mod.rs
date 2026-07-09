@@ -59,8 +59,7 @@ use self::activity::{Activities, Activity, ActivityId, WorkspaceView};
 pub use self::activity::{
     AddWorkspaceToActivityError, CreateActivityError, MoveWorkspaceToActivityError,
     RemoveActivityError, RemoveWorkspaceFromActivityError, RenameActivityError,
-    SetWorkspaceActivitiesError, SetWorkspaceStickyError, SwitchActivityError,
-    ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
+    SetWorkspaceActivitiesError, SwitchActivityError, WorkspaceStickyError,
 };
 use self::bookmarks::{
     AddOutcome, AssignKeyError, BookmarkId, BookmarkJumpOutcome, BookmarkKey, BookmarkName,
@@ -643,14 +642,20 @@ pub(crate) enum DoActionError {
     /// the layout-side [`MoveWorkspaceToActivityError`]. Terminal error.
     MoveWorkspaceToActivity(MoveWorkspaceToActivityError),
     /// `Action::ToggleWorkspaceSticky` failed. Wraps the layout-side
-    /// [`ToggleWorkspaceStickyError`]. Terminal error.
-    ToggleWorkspaceSticky(ToggleWorkspaceStickyError),
+    /// [`WorkspaceStickyError`], shared with `SetWorkspaceSticky` and
+    /// `UnsetWorkspaceSticky` — this outer variant, not the payload,
+    /// identifies which verb failed. Terminal error.
+    ToggleWorkspaceSticky(WorkspaceStickyError),
     /// `Action::SetWorkspaceSticky` failed. Wraps the layout-side
-    /// [`SetWorkspaceStickyError`]. Terminal error.
-    SetWorkspaceSticky(SetWorkspaceStickyError),
+    /// [`WorkspaceStickyError`], shared with `ToggleWorkspaceSticky` and
+    /// `UnsetWorkspaceSticky` — this outer variant, not the payload,
+    /// identifies which verb failed. Terminal error.
+    SetWorkspaceSticky(WorkspaceStickyError),
     /// `Action::UnsetWorkspaceSticky` failed. Wraps the layout-side
-    /// [`UnsetWorkspaceStickyError`]. Terminal error.
-    UnsetWorkspaceSticky(UnsetWorkspaceStickyError),
+    /// [`WorkspaceStickyError`], shared with `ToggleWorkspaceSticky` and
+    /// `SetWorkspaceSticky` — this outer variant, not the payload,
+    /// identifies which verb failed. Terminal error.
+    UnsetWorkspaceSticky(WorkspaceStickyError),
     /// `Action::FocusWorkspace { activity: Some(_), .. }` resolved to a
     /// workspace that is not in the requested activity, or the caller used a
     /// positional index (unsupported in activity-scoped lookup). Terminal
@@ -8241,7 +8246,7 @@ impl<W: LayoutElement> Layout<W> {
     ///
     /// Resolution order:
     /// 1. `workspace` → `WorkspaceNotFound`. Wire-surfaced via
-    ///    `DoActionError::SetWorkspaceSticky(SetWorkspaceStickyError::WorkspaceNotFound)`.
+    ///    `DoActionError::SetWorkspaceSticky(WorkspaceStickyError::WorkspaceNotFound)`.
     ///
     /// No-op cases (return `Ok((ws_id, false))` without mutating):
     /// - `ws.is_sticky() == true` AND `ws.activities() == all_live_ids` — the typical state for an
@@ -8262,12 +8267,12 @@ impl<W: LayoutElement> Layout<W> {
     pub(crate) fn set_workspace_sticky(
         &mut self,
         workspace: Option<WorkspaceReference>,
-    ) -> Result<(WorkspaceId, bool), SetWorkspaceStickyError> {
+    ) -> Result<(WorkspaceId, bool), WorkspaceStickyError> {
         let ws_id = match workspace {
             Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
             None => self.active_workspace_mut().map(|ws| ws.id()),
         }
-        .ok_or(SetWorkspaceStickyError::WorkspaceNotFound)?;
+        .ok_or(WorkspaceStickyError::WorkspaceNotFound)?;
 
         // Two views of the full live id set: a `HashSet<ActivityId>` for the
         // no-op equality check, and a `Vec<ActivityReferenceArg>` for the
@@ -8326,7 +8331,7 @@ impl<W: LayoutElement> Layout<W> {
     ///
     /// Resolution order:
     /// 1. `workspace` → `WorkspaceNotFound`. Wire-surfaced via
-    ///    `DoActionError::UnsetWorkspaceSticky(UnsetWorkspaceStickyError::WorkspaceNotFound)`.
+    ///    `DoActionError::UnsetWorkspaceSticky(WorkspaceStickyError::WorkspaceNotFound)`.
     ///
     /// No-op cases (return `Ok(ws_id)` without mutating):
     /// - `ws.is_sticky() == false` — already not sticky.
@@ -8339,12 +8344,12 @@ impl<W: LayoutElement> Layout<W> {
     pub(crate) fn unset_workspace_sticky(
         &mut self,
         workspace: Option<WorkspaceReference>,
-    ) -> Result<WorkspaceId, UnsetWorkspaceStickyError> {
+    ) -> Result<WorkspaceId, WorkspaceStickyError> {
         let ws_id = match workspace {
             Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
             None => self.active_workspace_mut().map(|ws| ws.id()),
         }
-        .ok_or(UnsetWorkspaceStickyError::WorkspaceNotFound)?;
+        .ok_or(WorkspaceStickyError::WorkspaceNotFound)?;
 
         let ws = self
             .workspaces
@@ -8366,7 +8371,7 @@ impl<W: LayoutElement> Layout<W> {
     ///
     /// Resolution order:
     /// 1. `workspace` → `WorkspaceNotFound`. Wire-surfaced via
-    ///    `DoActionError::ToggleWorkspaceSticky(ToggleWorkspaceStickyError::WorkspaceNotFound)`.
+    ///    `DoActionError::ToggleWorkspaceSticky(WorkspaceStickyError::WorkspaceNotFound)`.
     ///
     /// Dispatches on `is_sticky` alone. The non-empty `activities`
     /// invariant makes the `sticky == true ∧ activities == ∅` state
@@ -8375,12 +8380,12 @@ impl<W: LayoutElement> Layout<W> {
     pub(crate) fn toggle_workspace_sticky(
         &mut self,
         workspace: Option<WorkspaceReference>,
-    ) -> Result<ToggleWorkspaceStickyOutcome, ToggleWorkspaceStickyError> {
+    ) -> Result<ToggleWorkspaceStickyOutcome, WorkspaceStickyError> {
         let ws_id = match workspace {
             Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
             None => self.active_workspace_mut().map(|ws| ws.id()),
         }
-        .ok_or(ToggleWorkspaceStickyError::WorkspaceNotFound)?;
+        .ok_or(WorkspaceStickyError::WorkspaceNotFound)?;
 
         // Read current flag in a narrow scope so the shared borrow releases
         // before the delegate call.

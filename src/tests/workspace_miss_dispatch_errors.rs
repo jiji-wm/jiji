@@ -20,8 +20,8 @@ use super::client::ClientId;
 use super::fixture::{config_with_two_activities, Fixture};
 use crate::layout::{
     DoActionError, DoActionOutcome, FocusWorkspaceInActivityError, LayoutElement,
-    MoveWorkspaceToActivityError, SetWorkspaceActivitiesError, SetWorkspaceStickyError,
-    SwitchActivityError, ToggleWorkspaceStickyError, UnsetWorkspaceStickyError,
+    MoveWorkspaceToActivityError, SetWorkspaceActivitiesError, SwitchActivityError,
+    WorkspaceStickyError,
 };
 
 fn map_window(f: &mut Fixture, id: ClientId, w: u16, h: u16) {
@@ -429,7 +429,7 @@ fn toggle_workspace_sticky_workspace_not_found_returns_err() {
     assert_eq!(
         result,
         Err(DoActionError::ToggleWorkspaceSticky(
-            ToggleWorkspaceStickyError::WorkspaceNotFound,
+            WorkspaceStickyError::WorkspaceNotFound,
         )),
         "ToggleWorkspaceStickyByRef with a bogus workspace ref must surface \
          Err(ToggleWorkspaceSticky(WorkspaceNotFound))",
@@ -449,7 +449,7 @@ fn set_workspace_sticky_workspace_not_found_returns_err() {
     assert_eq!(
         result,
         Err(DoActionError::SetWorkspaceSticky(
-            SetWorkspaceStickyError::WorkspaceNotFound,
+            WorkspaceStickyError::WorkspaceNotFound,
         )),
         "SetWorkspaceStickyByRef with a bogus workspace ref must surface \
          Err(SetWorkspaceSticky(WorkspaceNotFound))",
@@ -469,7 +469,7 @@ fn unset_workspace_sticky_workspace_not_found_returns_err() {
     assert_eq!(
         result,
         Err(DoActionError::UnsetWorkspaceSticky(
-            UnsetWorkspaceStickyError::WorkspaceNotFound,
+            WorkspaceStickyError::WorkspaceNotFound,
         )),
         "UnsetWorkspaceStickyByRef with a bogus workspace ref must surface \
          Err(UnsetWorkspaceSticky(WorkspaceNotFound))",
