@@ -579,10 +579,12 @@ pub(crate) fn format_activity_switch_block_err(block: ActivitySwitchBlock) -> St
 /// three pin sites together. Token drift on a wrapped inner enum's `Display`
 /// fails the outer pin tests in addition to the inner enum's own pin tests.
 ///
-/// Do **not** add `#[non_exhaustive]` or `_` wildcards to the cohort match
-/// arms at `ipc/server.rs:478-489` and `ipc/server.rs:824-835` —
-/// exhaustiveness checks on those arms are the load-bearing parity guard
-/// ensuring the drain-walk and insert-idle arms stay in sync.
+/// Do **not** add a wildcard arm to [`DoActionError::disposition`] — the
+/// single exhaustive match in `disposition()` is now the load-bearing
+/// classification guard. The two `ipc/server.rs` dispatch sites (drain-walk
+/// and insert-idle) both match on `disposition()` rather than re-listing
+/// variants themselves, so parity between the two sites is structural rather
+/// than maintained by parallel variant lists.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DoActionError {
     /// A hard-block (interactive move, DnD, or workspace-switch
@@ -701,6 +703,60 @@ pub(crate) enum DoActionError {
     /// error — no state mutation. `reason` names the offending field and
     /// value.
     AppearanceOverrideInvalid { reason: String },
+}
+
+/// How the IPC dispatch path must react to a [`DoActionError`].
+///
+/// `Park`: the error is a transient hard-block. The dispatch path parks the
+/// waiter on the per-connection queue ([`crate::ipc::server::IpcServer::blocked_action_waiters`])
+/// and re-dispatches it on the next drain once the hard-block clears.
+///
+/// `Terminal`: the waiter is signalled immediately. Parking a terminal error
+/// would deadlock the connection — there is no hard-block condition for a
+/// later drain to clear, so a parked terminal waiter would never be
+/// re-dispatched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Disposition {
+    Park,
+    Terminal,
+}
+
+impl DoActionError {
+    /// Classifies this error as [`Disposition::Park`] or
+    /// [`Disposition::Terminal`] for the IPC dispatch path.
+    ///
+    /// This is a single exhaustive match with no wildcard arm by design: a
+    /// new variant must fail to compile here until its disposition is an
+    /// explicit author decision, rather than silently inheriting whatever a
+    /// wildcard arm picks.
+    pub(crate) fn disposition(&self) -> Disposition {
+        match self {
+            Self::ActivitySwitchBlocked(_) => Disposition::Park,
+            Self::WindowNotFound { .. }
+            | Self::MoveWindowTargetUnreachable { .. }
+            | Self::MoveWindowTargetUnknownName { .. }
+            | Self::CreateActivity(_)
+            | Self::RemoveActivity(_)
+            | Self::RenameActivity(_)
+            | Self::SwitchActivity(_)
+            | Self::AddWorkspaceToActivity(_)
+            | Self::RemoveWorkspaceFromActivity(_)
+            | Self::SetWorkspaceActivities(_)
+            | Self::MoveWorkspaceToActivity(_)
+            | Self::ToggleWorkspaceSticky(_)
+            | Self::SetWorkspaceSticky(_)
+            | Self::UnsetWorkspaceSticky(_)
+            | Self::FocusWorkspaceInActivity(_)
+            | Self::FocusWorkspaceTargetUnknown { .. }
+            | Self::BookmarkNotFound { .. }
+            | Self::BookmarkKeyInvalid { .. }
+            | Self::BookmarkKeyCollision { .. }
+            | Self::BookmarkNameInvalid { .. }
+            | Self::BookmarkDangling { .. }
+            | Self::BookmarkRuleInvalid { .. }
+            | Self::AppearanceOverrideInvalid { .. } => Disposition::Terminal,
+        }
+    }
 }
 
 impl From<ActivitySwitchBlock> for DoActionError {

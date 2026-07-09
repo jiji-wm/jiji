@@ -37,7 +37,7 @@ use crate::layout::activity::ActivityId;
 use crate::layout::bookmarks::{AnchorWire, BookmarkRule};
 use crate::layout::workspace::WorkspaceId;
 use crate::layout::{
-    format_do_action_error, DoActionError, DoActionOutcome, Layout, LayoutElement,
+    format_do_action_error, Disposition, DoActionError, DoActionOutcome, Layout, LayoutElement,
 };
 use crate::niri::State;
 use crate::utils::id::IdCounter;
@@ -247,9 +247,10 @@ impl IpcServer {
     /// (4) schedules a single `insert_idle` task.
     ///
     /// That deferred task calls `do_action_inner` and inserts into the
-    /// registry **only** on `Err(`[`DoActionError::ActivitySwitchBlocked`]`)`; `Ok`
-    /// and other `Err` variants send on the channel without ever touching the
-    /// registry.
+    /// registry only on an `Err` whose [`DoActionError::disposition`] is
+    /// [`Disposition::Park`] (today, only `Err(`[`DoActionError::ActivitySwitchBlocked`]`)`);
+    /// `Ok` and other `Err` variants send on the channel without ever
+    /// touching the registry.
     ///
     /// This helper collapses (1) and the conditional registry insert into one
     /// synchronous call so the test can assert registry state without standing
@@ -352,15 +353,17 @@ impl Drop for IpcServer {
 ///   `Ok(DoActionOutcome::NoOp(reason))`; the `process` recv site maps it to
 ///   `Response::NoOp(reason)`. The send half is dropped without signalling on silent-prune paths
 ///   (closed receiver).
-/// - **FIFO preserved across re-block** (scoped to `Err(DoActionError::ActivitySwitchBlocked)`): if
-///   `do_action_inner` re-raises a hard block mid-drain (no current action reaches this;
-///   forward-compat for future gating widening), the waiter is re-inserted at its index at removal
-///   via `shift_insert(original_idx, …)` and the walk **breaks** — continuing past a re-blocked
-///   waiter would promote later waiters ahead of it. The `// FIFO pin` breadcrumb on the `break`
-///   pins this semantic against accidental refactor.
-/// - **Terminal errors advance the drain** (scoped to `Err(DoActionError::WindowNotFound)`): a
-///   terminal error for one waiter does not block later waiters. The waiter is signalled
-///   `Err(DoActionError::WindowNotFound { id })` and the walk `continue`s to the next connection.
+/// - **FIFO preserved across re-block** (scoped to `Err` whose [`DoActionError::disposition`] is
+///   [`Disposition::Park`]; today only `ActivitySwitchBlocked`): if `do_action_inner` re-raises a
+///   hard block mid-drain (no current action reaches this; forward-compat for future gating
+///   widening), the waiter is re-inserted at its index at removal via `shift_insert(original_idx,
+///   …)` and the walk **breaks** — continuing past a re-blocked waiter would promote later waiters
+///   ahead of it. The `// FIFO pin` breadcrumb on the `break` pins this semantic against accidental
+///   refactor.
+/// - **Terminal errors advance the drain** (scoped to `Err` whose [`DoActionError::disposition`] is
+///   [`Disposition::Terminal`] — every variant except `ActivitySwitchBlocked`): a terminal error
+///   for one waiter does not block later waiters. The waiter is signalled `Err(err)` and the walk
+///   `continue`s to the next connection.
 /// - **Closed-receiver prune**: if the client disconnected between enqueue and drain
 ///   (`tx.is_closed()`), the entry is dropped without dispatch. No side effects, no replay.
 /// - **No registry borrow across `do_action_inner`**: the walk grabs and drops the registry
@@ -432,77 +435,50 @@ pub(crate) fn drain_blocked_action_waiters(state: &mut State) {
                 // `Response` variant.
                 let _ = waiter.tx.send_blocking(Ok(outcome));
             }
-            Err(DoActionError::ActivitySwitchBlocked(block)) => {
-                // Re-block mid-drain: re-insert at its index at removal so
-                // later waiters don't promote past this one. Today's
-                // `do_action_inner` surface cannot produce this; forward-
-                // compat against future widening of hard-block gating.
-                let server = state
-                    .niri
-                    .ipc_server
-                    .as_ref()
-                    .expect("ipc_server present — re-block path, registry still alive");
-                let prev = server.blocked_action_waiters.borrow_mut().shift_insert(
-                    original_idx,
-                    conn_id,
-                    BlockedWaiter {
-                        action: waiter.action,
-                        tx: waiter.tx,
-                    },
-                );
-                debug_assert!(
-                    prev.is_none(),
-                    "shift_insert on re-block must not overwrite: conn_id={conn_id:?} original_idx={original_idx}",
-                );
-                let _ = block;
-                // FIFO pin — drain order must not promote later waiters ahead of re-blocked ones.
-                //
-                // Do NOT convert this `break` to `continue`: walking past a
-                // re-blocked waiter promotes later waiters ahead of it and
-                // violates FIFO. The drain-re-block invariant is pinned by
-                // `blocked_action_waiters_reblock_leaves_entry`.
-                break;
-            }
-            Err(DoActionError::WindowNotFound { id }) => {
-                // Terminal error — not a block; advance the drain walk.
-                // A stale id for waiter X does not affect waiters Y, Z: the
-                // registry entry was already removed via `shift_remove`
-                // above, and the walk continues to the next connection
-                //. Do NOT convert this `continue` to `break` —
-                // that would halt drain for all later waiters after one
-                // unknown-id action.
-                let _ = waiter
-                    .tx
-                    .send_blocking(Err(DoActionError::WindowNotFound { id }));
-                continue;
-            }
-            Err(err @ DoActionError::AddWorkspaceToActivity(_))
-            | Err(err @ DoActionError::RemoveWorkspaceFromActivity(_))
-            | Err(err @ DoActionError::SetWorkspaceActivities(_))
-            | Err(err @ DoActionError::MoveWorkspaceToActivity(_))
-            | Err(err @ DoActionError::CreateActivity(_))
-            | Err(err @ DoActionError::RemoveActivity(_))
-            | Err(err @ DoActionError::RenameActivity(_))
-            | Err(err @ DoActionError::SwitchActivity(_))
-            | Err(err @ DoActionError::ToggleWorkspaceSticky(_))
-            | Err(err @ DoActionError::SetWorkspaceSticky(_))
-            | Err(err @ DoActionError::UnsetWorkspaceSticky(_))
-            | Err(err @ DoActionError::MoveWindowTargetUnreachable { .. })
-            | Err(err @ DoActionError::FocusWorkspaceInActivity(_))
-            | Err(err @ DoActionError::FocusWorkspaceTargetUnknown { .. })
-            | Err(err @ DoActionError::MoveWindowTargetUnknownName { .. })
-            | Err(err @ DoActionError::BookmarkNotFound { .. })
-            | Err(err @ DoActionError::BookmarkKeyInvalid { .. })
-            | Err(err @ DoActionError::BookmarkKeyCollision { .. })
-            | Err(err @ DoActionError::BookmarkNameInvalid { .. })
-            | Err(err @ DoActionError::BookmarkDangling { .. })
-            | Err(err @ DoActionError::BookmarkRuleInvalid { .. })
-            | Err(err @ DoActionError::AppearanceOverrideInvalid { .. }) => {
-                // Terminal errors. Same shape as `WindowNotFound`:
-                // forward and advance the walk — do not re-block.
-                let _ = waiter.tx.send_blocking(Err(err));
-                continue;
-            }
+            Err(err) => match err.disposition() {
+                Disposition::Park => {
+                    // Re-block mid-drain: re-insert at its index at removal so
+                    // later waiters don't promote past this one. Today's
+                    // `do_action_inner` surface cannot produce this; forward-
+                    // compat against future widening of hard-block gating.
+                    let server = state
+                        .niri
+                        .ipc_server
+                        .as_ref()
+                        .expect("ipc_server present — re-block path, registry still alive");
+                    let prev = server.blocked_action_waiters.borrow_mut().shift_insert(
+                        original_idx,
+                        conn_id,
+                        BlockedWaiter {
+                            action: waiter.action,
+                            tx: waiter.tx,
+                        },
+                    );
+                    debug_assert!(
+                        prev.is_none(),
+                        "shift_insert on re-block must not overwrite: conn_id={conn_id:?} original_idx={original_idx}",
+                    );
+                    // FIFO pin — drain order must not promote later waiters ahead of re-blocked
+                    // ones.
+                    //
+                    // Do NOT convert this `break` to `continue`: walking past a
+                    // re-blocked waiter promotes later waiters ahead of it and
+                    // violates FIFO. The drain-re-block invariant is pinned by
+                    // `blocked_action_waiters_reblock_leaves_entry`.
+                    break;
+                }
+                Disposition::Terminal => {
+                    // Terminal error — not a block; advance the drain walk.
+                    // A stale error for waiter X does not affect waiters Y, Z:
+                    // the registry entry was already removed via
+                    // `shift_remove` above, and the walk continues to the
+                    // next connection. Do NOT convert this `continue` to
+                    // `break` — that would halt drain for all later waiters
+                    // after one terminal error.
+                    let _ = waiter.tx.send_blocking(Err(err));
+                    continue;
+                }
+            },
         }
     }
 }
@@ -830,54 +806,26 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                         // `Response` variants.
                         let _ = tx.send_blocking(Ok(outcome));
                     }
-                    Err(DoActionError::ActivitySwitchBlocked(block)) => {
-                        // Park; drain on next refresh preserves Handled ≡ performed.
-                        let _ = block;
-                        let prev = waiters
-                            .borrow_mut()
-                            .insert(conn_id, BlockedWaiter { action, tx });
-                        debug_assert!(
-                            prev.is_none(),
-                            "depth-1 admission must keep the registry empty for conn_id={conn_id:?} at insert_idle execution time",
-                        );
-                    }
-                    Err(DoActionError::WindowNotFound { id }) => {
-                        // Terminal error: forward immediately.
-                        // Do NOT insert into `blocked_action_waiters` — a
-                        // registry entry would deadlock the connection,
-                        // since no hard-block condition exists to clear
-                        // and the drain site would never re-dispatch.
-                        let _ = tx.send_blocking(Err(DoActionError::WindowNotFound { id }));
-                    }
-                    // Terminal errors — no hard-block condition applies;
-                    // forward immediately without parking. Same rationale as
-                    // `WindowNotFound`: do not park — forward to the
-                    // waiter so the IPC envelope is produced on the main
-                    // dispatch path.
-                    Err(err @ DoActionError::AddWorkspaceToActivity(_))
-                    | Err(err @ DoActionError::RemoveWorkspaceFromActivity(_))
-                    | Err(err @ DoActionError::SetWorkspaceActivities(_))
-                    | Err(err @ DoActionError::MoveWorkspaceToActivity(_))
-                    | Err(err @ DoActionError::CreateActivity(_))
-                    | Err(err @ DoActionError::RemoveActivity(_))
-                    | Err(err @ DoActionError::RenameActivity(_))
-                    | Err(err @ DoActionError::SwitchActivity(_))
-                    | Err(err @ DoActionError::ToggleWorkspaceSticky(_))
-                    | Err(err @ DoActionError::SetWorkspaceSticky(_))
-                    | Err(err @ DoActionError::UnsetWorkspaceSticky(_))
-                    | Err(err @ DoActionError::MoveWindowTargetUnreachable { .. })
-                    | Err(err @ DoActionError::FocusWorkspaceInActivity(_))
-                    | Err(err @ DoActionError::FocusWorkspaceTargetUnknown { .. })
-                    | Err(err @ DoActionError::MoveWindowTargetUnknownName { .. })
-                    | Err(err @ DoActionError::BookmarkNotFound { .. })
-                    | Err(err @ DoActionError::BookmarkKeyInvalid { .. })
-                    | Err(err @ DoActionError::BookmarkKeyCollision { .. })
-                    | Err(err @ DoActionError::BookmarkNameInvalid { .. })
-                    | Err(err @ DoActionError::BookmarkDangling { .. })
-                    | Err(err @ DoActionError::BookmarkRuleInvalid { .. })
-                    | Err(err @ DoActionError::AppearanceOverrideInvalid { .. }) => {
-                        let _ = tx.send_blocking(Err(err));
-                    }
+                    Err(err) => match err.disposition() {
+                        Disposition::Park => {
+                            // Park; drain on next refresh preserves Handled ≡ performed.
+                            let prev = waiters
+                                .borrow_mut()
+                                .insert(conn_id, BlockedWaiter { action, tx });
+                            debug_assert!(
+                                prev.is_none(),
+                                "depth-1 admission must keep the registry empty for conn_id={conn_id:?} at insert_idle execution time",
+                            );
+                        }
+                        Disposition::Terminal => {
+                            // Terminal error: forward immediately.
+                            // Do NOT insert into `blocked_action_waiters` — a
+                            // registry entry would deadlock the connection,
+                            // since no hard-block condition exists to clear
+                            // and the drain site would never re-dispatch.
+                            let _ = tx.send_blocking(Err(err));
+                        }
+                    },
                 }
             });
 
