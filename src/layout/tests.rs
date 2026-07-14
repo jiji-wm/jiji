@@ -1890,13 +1890,19 @@ fn test_mint_empty_for(
 
 /// Test-side helper: override `activity_id`'s view for `output_id` with a hand-rolled
 /// `new_view`, dropping any materializer-installed bookend workspaces that the override no
-/// longer references so the pool-keys union invariant stays satisfied.
+/// longer references so the pool-keys union invariant stays satisfied, and stamping
+/// `activity_id` into every kept id's `activities` set so membership↔view coherence holds.
 ///
 /// Direct `activity.views_mut().insert(...)` calls from tests that bypass the materializer
 /// leak the materializer's freshly-minted bookend workspaces into the pool — they remain pool
 /// keys but no view references them, tripping `Layout::verify_invariants`' "pool keys must
 /// equal the union of every activity's views over all outputs plus disconnected_workspace_ids"
 /// assertion. This helper performs the override and the cleanup atomically.
+///
+/// Tests that need a *divergent* view — one that deliberately holds an id lacking
+/// `activity_id` in its `activities` set, exercising a repair path's illegal-input handling —
+/// must not route through this helper; they inline the raw `views_mut()` manipulation with a
+/// comment explaining why the divergence is the point.
 #[track_caller]
 fn test_override_activity_view(
     layout: &mut Layout<TestWindow>,
@@ -1923,6 +1929,14 @@ fn test_override_activity_view(
         if !keep.contains(&id) {
             layout.workspaces.remove(&id);
         }
+    }
+    for id in &keep {
+        layout
+            .workspaces
+            .get_mut(id)
+            .expect("overridden view id must be a live pool key")
+            .activities
+            .insert(activity_id);
     }
 }
 
@@ -9782,16 +9796,33 @@ fn workspaces_with_activity_filters_by_membership() {
         .expect("materializer installed beta's view")
         .ids()[0];
 
-    // Stamp the first alpha-tagged workspace (lowest id) with beta-only; leave the rest as
-    // alpha-only. Direct field mutation is legal here: tests live in the `super` module and
-    // `Workspace::activities` is `pub(super)`.
-    let beta_ws_id = on_output[0];
-    let expected_alpha_ids: HashSet<WorkspaceId> = on_output[1..].iter().copied().collect();
+    // Stamp the named workspace with beta-only via the production path; leave the rest
+    // (the trailing-empty bookend) as alpha-only. Picked by name rather than by lowest id: the
+    // lowest id here is alpha's own trailing bookend, and re-tagging it away from alpha via
+    // `set_workspace_activities` would strip alpha's connected-output view of its required
+    // trailing entry — a different (production) hazard this test isn't about.
+    let beta_ws_id = *on_output
+        .iter()
+        .find(|id| {
+            layout
+                .workspaces
+                .get(id)
+                .expect("on_output id must be a live pool key")
+                .name()
+                .is_some()
+        })
+        .expect("named workspace must be among the alpha-tagged ids");
+    let expected_alpha_ids: HashSet<WorkspaceId> = on_output
+        .iter()
+        .copied()
+        .filter(|id| *id != beta_ws_id)
+        .collect();
     layout
-        .workspaces
-        .get_mut(&beta_ws_id)
-        .expect("beta_ws_id must be a pool key")
-        .activities = std::iter::once(beta).collect();
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(beta_ws_id.get())),
+            &[ActivityReferenceArg::Id(beta.get())],
+        )
+        .expect("production setup must succeed");
 
     let alpha_ids: HashSet<WorkspaceId> = layout
         .workspaces_with_activity(alpha, &mon_out)
@@ -9919,7 +9950,8 @@ fn layout_activity_is_urgent_aggregates_workspace_urgency() {
     let gamma_id = gamma_activity.id();
     test_insert_activity(&mut layout, gamma_activity);
 
-    // Find the workspace holding the window and tag it with seed + beta.
+    // Find the workspace holding the window and share it into beta via the production path
+    // (it already carries seed from `AddWindow`, so this widens it to {seed, beta}).
     let ws_id = layout
         .workspaces
         .values()
@@ -9927,10 +9959,11 @@ fn layout_activity_is_urgent_aggregates_workspace_urgency() {
         .expect("workspace holding the test window must exist")
         .id();
     layout
-        .workspaces
-        .get_mut(&ws_id)
-        .expect("ws_id must be a pool key")
-        .activities = [seed_id, beta_id].into_iter().collect();
+        .add_workspace_to_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(beta_id.get()),
+        )
+        .expect("production setup must succeed");
 
     // Initially no urgent windows → every activity reports `false`.
     assert!(!layout.activity_is_urgent(seed_id));
@@ -10048,14 +10081,28 @@ fn ipc_workspace_snapshot_hidden_workspace_has_idx_zero_and_flag_false() {
     let beta = beta_activity.id();
     test_insert_activity(&mut layout, beta_activity);
 
-    // Stamp the lowest-id workspace with beta-only so it leaves the active
-    // (seed) activity's membership.
-    let hidden_ws_id = on_output[0];
+    // Stamp the named workspace with beta-only, via the production path, so it leaves the
+    // active (seed) activity's membership. Picked by name rather than lowest id: the lowest id
+    // here is the seed activity's own trailing bookend, and re-tagging it away via
+    // `set_workspace_activities` would strip the seed activity's connected-output view of its
+    // required trailing entry — a different (production) hazard this test isn't about.
+    let hidden_ws_id = *on_output
+        .iter()
+        .find(|id| {
+            layout
+                .workspaces
+                .get(id)
+                .expect("on_output id must be a live pool key")
+                .name()
+                .is_some()
+        })
+        .expect("named workspace must be among the output's ids");
     layout
-        .workspaces
-        .get_mut(&hidden_ws_id)
-        .expect("hidden_ws_id must be a pool key")
-        .activities = std::iter::once(beta).collect();
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(hidden_ws_id.get())),
+            &[ActivityReferenceArg::Id(beta.get())],
+        )
+        .expect("production setup must succeed");
 
     let snapshot = crate::ipc::server::build_workspace_snapshot(&layout, None, test_window_id_of);
 
@@ -10210,20 +10257,40 @@ fn ipc_workspace_snapshot_mixed_visibility_preserves_pass_disjointness() {
 
     // ws_b: beta-only (hidden, pass 2).
     // ws_c: alpha + beta (visible via alpha, pass 1).
-    // Remaining workspaces: alpha-only (pass 1).
-    let ws_b = on_output[0];
-    let ws_c = on_output[1];
+    // Remaining workspaces (including the trailing-empty bookend): alpha-only (pass 1).
+    //
+    // Both are picked by name rather than by lowest id: the lowest id among `on_output` is
+    // alpha's own trailing bookend, and re-tagging it away from alpha via
+    // `set_workspace_activities` would strip alpha's connected-output view of its required
+    // trailing entry — a different (production) hazard this test isn't about.
+    let find_named = |layout: &Layout<TestWindow>, name: &str| -> WorkspaceId {
+        *on_output
+            .iter()
+            .find(|id| {
+                layout
+                    .workspaces
+                    .get(id)
+                    .expect("on_output id must be a live pool key")
+                    .name()
+                    == Some(&name.to_owned())
+            })
+            .expect("named workspace must be among the output's ids")
+    };
+    let ws_b = find_named(&layout, "ws1");
+    let ws_c = find_named(&layout, "ws2");
 
     layout
-        .workspaces
-        .get_mut(&ws_b)
-        .expect("ws_b must be a pool key")
-        .activities = std::iter::once(beta).collect();
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_b.get())),
+            &[ActivityReferenceArg::Id(beta.get())],
+        )
+        .expect("production setup must succeed");
     layout
-        .workspaces
-        .get_mut(&ws_c)
-        .expect("ws_c must be a pool key")
-        .activities = [alpha, beta].into_iter().collect();
+        .add_workspace_to_activity(
+            Some(WorkspaceReference::Id(ws_c.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("production setup must succeed");
 
     let view = layout.active_view(&mon_out);
     let ws_c_view_pos = view
@@ -10935,8 +11002,8 @@ fn remove_activity_exclusive_workspace_with_windows_errs() {
     let beta = beta_activity.id();
     test_insert_activity(&mut layout, beta_activity);
 
-    // Pick the window-carrying workspace and flip its activities set to
-    // {beta} exclusively.
+    // Pick the window-carrying workspace and flip its activities set to {beta} exclusively
+    // via the production path, so the resulting state keeps membership↔view coherence.
     let window_ws_id = layout
         .workspaces
         .values()
@@ -10944,10 +11011,11 @@ fn remove_activity_exclusive_workspace_with_windows_errs() {
         .expect("window was added")
         .id();
     layout
-        .workspaces
-        .get_mut(&window_ws_id)
-        .expect("window_ws_id must be a live pool key")
-        .activities = std::iter::once(beta).collect();
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(window_ws_id.get())),
+            &[ActivityReferenceArg::Id(beta.get())],
+        )
+        .expect("production setup must succeed");
 
     let size_before = layout.activities.len();
     let pool_before = layout.workspaces.len();
@@ -10982,7 +11050,8 @@ fn remove_activity_exclusive_named_workspace_errs() {
     let beta = beta_activity.id();
     test_insert_activity(&mut layout, beta_activity);
 
-    // Find the named workspace and flip it to exclusively beta.
+    // Find the named workspace and flip it to exclusively beta via the production path, so
+    // the resulting state keeps membership↔view coherence.
     let named_ws_id = layout
         .workspaces
         .values()
@@ -10990,10 +11059,11 @@ fn remove_activity_exclusive_named_workspace_errs() {
         .expect("named workspace was added")
         .id();
     layout
-        .workspaces
-        .get_mut(&named_ws_id)
-        .expect("named_ws_id must be a live pool key")
-        .activities = std::iter::once(beta).collect();
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(named_ws_id.get())),
+            &[ActivityReferenceArg::Id(beta.get())],
+        )
+        .expect("production setup must succeed");
 
     let size_before = layout.activities.len();
 
@@ -11321,7 +11391,8 @@ fn remove_activity_error_precedence_windows_beats_named() {
     let beta = beta_activity.id();
     test_insert_activity(&mut layout, beta_activity);
 
-    // Flip the named workspace to exclusively beta.
+    // Flip the named workspace to exclusively beta via the production path, so the resulting
+    // state keeps membership↔view coherence.
     let named_ws_id = layout
         .workspaces
         .values()
@@ -11329,12 +11400,13 @@ fn remove_activity_error_precedence_windows_beats_named() {
         .expect("named workspace was added")
         .id();
     layout
-        .workspaces
-        .get_mut(&named_ws_id)
-        .expect("named_ws_id must be a live pool key")
-        .activities = std::iter::once(beta).collect();
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(named_ws_id.get())),
+            &[ActivityReferenceArg::Id(beta.get())],
+        )
+        .expect("production setup must succeed");
 
-    // Flip the window-carrying workspace to exclusively beta.
+    // Flip the window-carrying workspace to exclusively beta, same recipe.
     let windowed_ws_id = layout
         .workspaces
         .values()
@@ -11342,10 +11414,11 @@ fn remove_activity_error_precedence_windows_beats_named() {
         .expect("window was added")
         .id();
     layout
-        .workspaces
-        .get_mut(&windowed_ws_id)
-        .expect("windowed_ws_id must be a live pool key")
-        .activities = std::iter::once(beta).collect();
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(windowed_ws_id.get())),
+            &[ActivityReferenceArg::Id(beta.get())],
+        )
+        .expect("production setup must succeed");
 
     assert_ne!(
         named_ws_id, windowed_ws_id,
@@ -11425,13 +11498,29 @@ fn remove_activity_view_patching_both_branches() {
         .expect("active activity must have a view for the connected output")
         .insert(1, beta_ws_id);
 
-    // Drop branch: give gamma a dormant view whose sole entry is beta_ws_id.
-    test_override_activity_view(
-        &mut layout,
-        gamma,
-        mon_out.clone(),
-        WorkspaceView::new(vec![beta_ws_id], 0),
-    );
+    // Drop branch: give gamma a dormant view whose sole entry is beta_ws_id — a stale
+    // reference gamma does not own (beta_ws_id stays exclusive to beta). This divergence is
+    // the point: the drop branch under test is the destroy loop patching another activity's
+    // view that references a workspace it was never tagged to, so this bypasses
+    // `test_override_activity_view` (which would stamp gamma into beta_ws_id's membership,
+    // making it shared rather than exclusive) and manipulates gamma's view directly.
+    let gamma_materialized: Vec<WorkspaceId> = layout
+        .activities
+        .get(gamma)
+        .expect("gamma live")
+        .views()
+        .get(&mon_out)
+        .map(|v| v.ids().to_vec())
+        .unwrap_or_default();
+    layout
+        .activities
+        .get_mut(gamma)
+        .expect("gamma live")
+        .views_mut()
+        .insert(mon_out.clone(), WorkspaceView::new(vec![beta_ws_id], 0));
+    for id in gamma_materialized {
+        layout.workspaces.remove(&id);
+    }
 
     // Sanity: both branches are populated before removal.
     assert_eq!(
@@ -11887,13 +11976,32 @@ fn destroy_workspaces_cross_activity_patches_other_activity_views() {
     // Seed Beta's view with a stale reference to doomed_id. doomed_id.activities
     // remains {Alpha} (exclusive), so the guard clears and destroy proceeds.
     // The retain closure patches Beta's view because it iterates every activity's
-    // views regardless of workspace membership.
-    test_override_activity_view(
-        &mut layout,
-        beta_id,
-        mon_out.clone(),
-        WorkspaceView::new(vec![doomed_id, spare_id], 0),
-    );
+    // views regardless of workspace membership. This divergence — Beta's view
+    // anchoring a workspace Beta was never tagged to — is the point, so this bypasses
+    // `test_override_activity_view` (which would stamp Beta into doomed_id's membership,
+    // making it shared rather than exclusive) and manipulates Beta's view directly.
+    let beta_materialized: Vec<WorkspaceId> = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .map(|v| v.ids().to_vec())
+        .unwrap_or_default();
+    layout
+        .activities
+        .get_mut(beta_id)
+        .expect("beta live")
+        .views_mut()
+        .insert(
+            mon_out.clone(),
+            WorkspaceView::new(vec![doomed_id, spare_id], 0),
+        );
+    for id in beta_materialized {
+        if id != spare_id {
+            layout.workspaces.remove(&id);
+        }
+    }
 
     // Call destroy with `doomed_id`. Active activity's view contains it at
     // a non-terminal position (pos 1) and has multiple entries — it must be
@@ -11951,13 +12059,27 @@ fn destroy_workspaces_cross_activity_drops_single_entry_view() {
     // Seed Beta's view with a stale reference to doomed_id. doomed_id.activities
     // remains {Alpha} (exclusive), so the guard clears and destroy proceeds.
     // The retain closure patches Beta's view because it iterates every activity's
-    // views regardless of workspace membership.
-    test_override_activity_view(
-        &mut layout,
-        beta_id,
-        mon_out.clone(),
-        WorkspaceView::new(vec![doomed_id], 0),
-    );
+    // views regardless of workspace membership. This divergence — Beta's view
+    // anchoring a workspace Beta was never tagged to — is the point, so this bypasses
+    // `test_override_activity_view` (which would stamp Beta into doomed_id's membership,
+    // making it shared rather than exclusive) and manipulates Beta's view directly.
+    let beta_materialized: Vec<WorkspaceId> = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .map(|v| v.ids().to_vec())
+        .unwrap_or_default();
+    layout
+        .activities
+        .get_mut(beta_id)
+        .expect("beta live")
+        .views_mut()
+        .insert(mon_out.clone(), WorkspaceView::new(vec![doomed_id], 0));
+    for id in beta_materialized {
+        layout.workspaces.remove(&id);
+    }
 
     Layout::<TestWindow>::destroy_workspaces_cross_activity(
         &mut layout.activities,
@@ -12257,11 +12379,9 @@ fn destroy_workspaces_cross_activity_mixed_batch_drops_only_safe_id() {
         .create_activity("Beta".to_owned())
         .expect("create beta");
 
-    // Two spares, both seeded into Alpha's view between W1 and E_bottom:
-    // `[W1 (active, pos 0), shared, doomed, E_bottom]`. `shared` is named so
-    // that `has_windows_or_name()` returns `true`, clearing the
-    // non-terminal-empty bookend check inside `Monitor::verify_invariants`
-    // (monitor.rs:1772).
+    // `shared`, seeded into Alpha's view between W1 and E_bottom: `[W1 (active, pos 0),
+    // shared, E_bottom]`. Named so that `has_windows_or_name()` returns `true`, clearing the
+    // non-terminal-empty bookend check inside `Monitor::verify_invariants` (monitor.rs:1772).
     let shared_id = {
         let spare = Workspace::<TestWindow>::new_with_config_no_outputs(
             Some(WorkspaceConfig {
@@ -12284,6 +12404,22 @@ fn destroy_workspaces_cross_activity_mixed_batch_drops_only_safe_id() {
             .bind_output(&mon_output);
         id
     };
+    layout.active_view_mut(&mon_out).insert(1, shared_id);
+
+    // Widen `shared_id` to Beta's membership via the production path so it fails the guard —
+    // this also installs a Beta view entry, so it must run before `doomed_id` seeds the
+    // deliberately-invalid middle-empty shape below (`add_workspace_to_activity` checks
+    // invariants at its own tail).
+    layout
+        .add_workspace_to_activity(
+            Some(WorkspaceReference::Id(shared_id.get())),
+            &ActivityReferenceArg::Id(beta_id.get()),
+        )
+        .expect("production setup must succeed");
+
+    // `doomed`, spliced in after `shared_id`'s widening so its deliberately-invalid
+    // middle-empty shape doesn't meet a checkpoint prematurely: `[W1, shared, doomed,
+    // E_bottom]`. Left exclusive to Alpha so the guard clears it.
     let doomed_id = {
         let spare = Workspace::<TestWindow>::new_no_outputs(
             HashSet::from([seed_activity]),
@@ -12299,19 +12435,7 @@ fn destroy_workspaces_cross_activity_mixed_batch_drops_only_safe_id() {
             .bind_output(&mon_output);
         id
     };
-    layout.active_view_mut(&mon_out).insert(1, shared_id);
     layout.active_view_mut(&mon_out).insert(2, doomed_id);
-
-    // Widen `shared_id` to Beta's membership so it fails the guard. Leave
-    // `doomed_id` exclusive to Alpha so the guard clears it. Beta does not
-    // need a view entry on this output — cross-activity view patching is
-    // covered by `destroy_workspaces_cross_activity_patches_other_activity_views`.
-    layout
-        .workspaces
-        .get_mut(&shared_id)
-        .expect("shared in pool")
-        .activities
-        .insert(beta_id);
 
     Layout::<TestWindow>::destroy_workspaces_cross_activity(
         &mut layout.activities,
@@ -12394,16 +12518,35 @@ fn take_workspace_ids_doomed_flushed_from_other_activity_view_on_remove_output()
             .bind_output(&mon_output);
         id
     };
-    // Seed Beta's view with a stale reference to doomed_id. doomed_id.activities
+    // Seed Beta's view with a stale reference to e_bottom_id. e_bottom_id.activities
     // remains {Alpha} (exclusive), so the guard clears and destroy proceeds.
     // The retain closure patches Beta's view because it iterates every activity's
-    // views regardless of workspace membership.
-    test_override_activity_view(
-        &mut layout,
-        beta_id,
-        mon_out.clone(),
-        WorkspaceView::new(vec![beta_spare_id, e_bottom_id], 0),
-    );
+    // views regardless of workspace membership. This divergence — Beta's view
+    // anchoring a workspace Beta was never tagged to — is the point, so this bypasses
+    // `test_override_activity_view` (which would stamp Beta into e_bottom_id's membership,
+    // making it shared rather than exclusive) and manipulates Beta's view directly.
+    let beta_materialized: Vec<WorkspaceId> = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .map(|v| v.ids().to_vec())
+        .unwrap_or_default();
+    layout
+        .activities
+        .get_mut(beta_id)
+        .expect("beta live")
+        .views_mut()
+        .insert(
+            mon_out.clone(),
+            WorkspaceView::new(vec![beta_spare_id, e_bottom_id], 0),
+        );
+    for id in beta_materialized {
+        if id != beta_spare_id {
+            layout.workspaces.remove(&id);
+        }
+    }
 
     // Disconnect the output. `remove_output` → `take_workspace_ids` returns
     // `e_bottom_id` as a doomed bookend and must flush it through
@@ -15572,10 +15715,11 @@ fn reconcile_remove_rejects_on_exclusive_workspace_has_windows() {
         .expect("AddWindow allocated a window-carrying workspace")
         .id();
     layout
-        .workspaces
-        .get_mut(&window_ws_id)
-        .expect("live pool key")
-        .activities = std::iter::once(beta_id).collect();
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(window_ws_id.get())),
+            &[ActivityReferenceArg::Id(beta_id.get())],
+        )
+        .expect("production setup must succeed");
 
     let pool_before = layout.activities.len();
     let ws_before = layout.workspaces.len();
@@ -15845,7 +15989,12 @@ fn reconcile_remove_rebinds_orphan_workspace_into_cascade_target_view() {
     // does not fire: an unnamed empty workspace at a non-last position would
     // violate it. This constructs the runtime orphan shape — a config-named
     // workspace tagged to a non-active activity, sitting in a non-member
-    // activity's view where a path not yet coherence-guaranteed left it.
+    // activity's view where a path not yet coherence-guaranteed left it. This divergence —
+    // alpha's view anchoring the orphan while the orphan's `activities` set names only beta —
+    // is the repair path's deliberate input, not a production-reachable steady state; no
+    // membership-mutating production call reproduces it, so it must not meet a
+    // `verify_invariants` checkpoint before `reconcile_activities_on_reload_remove` runs the
+    // rebind below. Only the post-rebind checkpoint at the end of this test applies.
     let orphan_cfg = jiji_config::Workspace {
         name: jiji_config::workspace::WorkspaceName("ws_b".to_owned()),
         open_on_output: None,
@@ -15882,7 +16031,30 @@ fn reconcile_remove_rebinds_orphan_workspace_into_cascade_target_view() {
     let insert_pos = alpha_view.len() - 1;
     alpha_view.insert(insert_pos, orphan_id);
 
-    layout.verify_invariants();
+    // Targeted precondition in place of a full verify_invariants() checkpoint (which would
+    // trip on the deliberate membership↔view divergence seeded above): alpha's view must
+    // anchor the orphan even though the orphan's own `activities` set lacks alpha.
+    assert!(
+        layout
+            .activities
+            .get(alpha_id)
+            .expect("alpha live")
+            .views()
+            .get(&mon_out)
+            .expect("alpha holds a view on mon_out post-add_output")
+            .position_of(orphan_id)
+            .is_some(),
+        "precondition: alpha's view must anchor the orphan before the rebind",
+    );
+    assert!(
+        !layout
+            .workspaces
+            .get(&orphan_id)
+            .expect("orphan in pool")
+            .activities()
+            .contains(&alpha_id),
+        "precondition: the orphan's activities set must not name alpha (the incoherence under test)",
+    );
 
     // Reload: keep only beta — drops Default and alpha. Both active and
     // previous are in remove_set, so the cascade falls through to the
@@ -16206,6 +16378,13 @@ fn reconcile_remove_rebinds_orphan_when_workspace_tagged_to_both_removed_and_sur
     // non-member-view shape), but NOT into gamma's view. This is the precondition that exposes the
     // bug: gamma is a surviving activity but its view on mon_out does not contain
     // the orphan, so the orphan is unanchored after the remove pass.
+    //
+    // This divergence — gamma carries the orphan in its `activities` set with no view of
+    // gamma's anchoring it — is the repair path's deliberate input, not a production-reachable
+    // steady state; every membership-mutating production call keeps membership↔view coherent
+    // by construction, so none reproduces it. It must not meet a `verify_invariants` checkpoint
+    // before `reconcile_activities_on_reload_remove` runs the rebind below; only the
+    // post-rebind checkpoint applies.
     {
         let alpha_view = layout
             .activities
@@ -16218,7 +16397,33 @@ fn reconcile_remove_rebinds_orphan_when_workspace_tagged_to_both_removed_and_sur
         alpha_view.insert(insert_pos, orphan_id);
     }
 
-    layout.verify_invariants();
+    // Targeted preconditions in place of a full verify_invariants() checkpoint: alpha's view
+    // must anchor the orphan, while gamma's view of mon_out must not — even though gamma is
+    // also named in the orphan's `activities` set (the mixed-tag incoherence under test).
+    assert!(
+        layout
+            .activities
+            .get(alpha_id)
+            .expect("alpha live")
+            .views()
+            .get(&mon_out)
+            .expect("alpha holds a view on mon_out post-add_output")
+            .position_of(orphan_id)
+            .is_some(),
+        "precondition: alpha's view must anchor the orphan before the rebind",
+    );
+    assert!(
+        layout
+            .activities
+            .get(gamma_id)
+            .expect("gamma live")
+            .views()
+            .get(&mon_out)
+            .expect("gamma holds a view on mon_out post-add_output")
+            .position_of(orphan_id)
+            .is_none(),
+        "precondition: gamma's view must not anchor the orphan before the rebind",
+    );
 
     // Reload: keep only gamma — drops Default and alpha.
     // Cascade target: alpha was active, previous = Default (in remove_set) →
@@ -18227,9 +18432,6 @@ fn set_workspace_activities_active_affected_via_to_add_branch() {
     // (which all exercise active_affected=true via to_remove). Fixture:
     // ws starts in {beta} only; active=alpha; Set(ws, [alpha, beta]) →
     // to_add={alpha}, to_remove={}, active_affected=true.
-    //
-    // The fixture is a clean slate (single ws owns the active view) to avoid
-    // bookend-ordering complications when to_add appends to alpha's view.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();
@@ -18250,19 +18452,10 @@ fn set_workspace_activities_active_affected_via_to_add_branch() {
     let ws_id = ws.id();
     assert!(layout.workspaces.insert(ws_id, ws).is_none());
 
-    // Clear alpha's active view to a single-entry view holding ws so the pool
-    // satisfies the active-activity invariant (every monitor's view id is in the
-    // pool). ws.activities remains {beta} — alpha is NOT yet a member.
-    let old_ids: Vec<_> = layout.active_view(&mon_out).ids().to_vec();
-    layout
-        .activities
-        .active_mut()
-        .views_mut()
-        .insert(mon_out.clone(), WorkspaceView::new(vec![ws_id], 0));
-    for id in &old_ids {
-        layout.workspaces.remove(id);
-    }
-    // Beta's dormant view also holds ws so pool-keys equality holds.
+    // Beta's dormant view holds ws so pool-keys equality holds. Alpha's own active view is
+    // left untouched by this fixture: `set_workspace_activities`'s Add branch installs the
+    // view entry on the fly at ws's holding output (beta's), so alpha's view need not already
+    // anchor ws before the call.
     test_override_activity_view(
         &mut layout,
         beta,
@@ -18359,19 +18552,47 @@ fn move_workspace_to_activity_atomic_add_then_remove() {
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();
     let mon_out = layout.monitors[0].output_id();
+    let mon_output = layout.monitors[0].output.clone();
 
     let beta = layout
         .create_activity("Beta".to_owned())
         .expect("create beta");
-    // Seed beta's view with an id from alpha's view (distinct from the named one we'll move,
-    // so Move appends to a non-empty view). Append a freshly-minted trailing-empty bookend so
-    // the per-view bookend invariant holds on beta's dormant view.
-    let seed_ws_id = layout
-        .active_view(&mon_out)
-        .ids()
-        .first()
-        .copied()
-        .expect("alpha view has ws");
+    // Seed a second alpha-tagged workspace, distinct from the named one we'll move, and splice
+    // it into alpha's view. (A prior version of this fixture reused alpha's view `.first()` id
+    // directly as the "distinct" filler — with only the named workspace and its trailing
+    // bookend present, `.first()` aliased the move target itself; the membership↔view coherence
+    // assert on the post-move precondition check now catches that aliasing.) Named so it can
+    // legally sit at a non-terminal active-view position.
+    let seed_ws_id = {
+        let spare = Workspace::<TestWindow>::new_with_config_no_outputs(
+            Some(WorkspaceConfig {
+                name: WorkspaceName("seed".to_owned()),
+                open_on_output: None,
+                layout: None,
+                activities: Vec::new(),
+                sticky: None,
+            }),
+            HashSet::from([alpha]),
+            layout.clock.clone(),
+            layout.options.clone(),
+        );
+        let id = spare.id();
+        layout.workspaces.insert(id, spare);
+        layout
+            .workspaces
+            .get_mut(&id)
+            .expect("seed spare must be in pool")
+            .bind_output(&mon_output);
+        id
+    };
+    let seed_insert_pos = layout.active_view(&mon_out).len() - 1;
+    layout
+        .active_view_mut(&mon_out)
+        .insert(seed_insert_pos, seed_ws_id);
+
+    // Seed beta's view with the id above (so Move appends to a non-empty view). Append a
+    // freshly-minted trailing-empty bookend so the per-view bookend invariant holds on beta's
+    // dormant view.
     let beta_bottom = test_mint_empty_for(&mut layout, 0, beta);
     test_override_activity_view(
         &mut layout,
@@ -18870,15 +19091,25 @@ fn set_workspace_sticky_no_op_when_already_sticky_with_full_set() {
         .copied()
         .expect("alpha view has ws");
 
-    // Hand-construct the "already sticky + full set" state.
-    {
-        let ws = layout
-            .workspaces
-            .get_mut(&target_ws_id)
-            .expect("target ws live");
-        ws.is_sticky = true;
-        ws.activities = HashSet::from([alpha, beta]);
-    }
+    // Hand-construct the "already sticky + full set" state. Membership is built through the
+    // production path so it stays view-coherent; the `is_sticky` flag is a direct poke — a
+    // flag-only flip is invariant-preserving by contract (the passing sibling
+    // `set_workspace_sticky_re_expands_when_activities_was_narrowed_to_subset` pins that
+    // `is_sticky ∧ activities ⊊ all` is itself a legal state).
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("production setup must succeed");
+    layout
+        .workspaces
+        .get_mut(&target_ws_id)
+        .expect("target ws live")
+        .is_sticky = true;
     layout.verify_invariants();
 
     let (ws_id, active_affected) = layout
@@ -19005,10 +19236,12 @@ fn set_workspace_sticky_reports_active_affected_when_active_enters_set() {
     // returns false would silence the redraw and leave the workspace
     // invisible in the active view.
     //
-    // We seed ws.activities = {beta} (beta is inactive, alpha is active)
-    // by hand. Going through RemoveWorkspaceFromActivity would surface
-    // the pre-existing "last must be unnamed" limitation (see the
-    // re_expands test above for the full explanation).
+    // We seed ws.activities = {beta} (beta is inactive, alpha is active) via
+    // `set_workspace_activities`. Alpha's view here is the single-entry seed bookend, so the
+    // removal takes the drop-entire-view branch (not `remove_at`) and `ensure_all_activity_views`
+    // re-materializes alpha's view with a fresh bookend afterward — it relocates the view entry
+    // coherently rather than hitting the "last must be unnamed" limitation the re_expands test
+    // above documents for named/multi-entry views.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();
@@ -19025,10 +19258,12 @@ fn set_workspace_sticky_reports_active_affected_when_active_enters_set() {
         .expect("alpha view has seed ws");
 
     // Seed: activities = {beta} only, so active (alpha) is NOT in the set.
-    {
-        let ws = layout.workspaces.get_mut(&target_ws_id).expect("live");
-        ws.activities = HashSet::from([beta]);
-    }
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[ActivityReferenceArg::Id(beta.get())],
+        )
+        .expect("production setup must succeed");
 
     let (ws_id, active_affected) = layout
         .set_workspace_sticky(Some(WorkspaceReference::Id(target_ws_id.get())))
@@ -19064,11 +19299,22 @@ fn unset_workspace_sticky_clears_flag_keeps_activities_set() {
         .copied()
         .expect("alpha view has ws");
 
-    {
-        let ws = layout.workspaces.get_mut(&target_ws_id).expect("live");
-        ws.is_sticky = true;
-        ws.activities = HashSet::from([alpha, beta]);
-    }
+    // Membership is built through the production path so it stays view-coherent; `is_sticky`
+    // is a direct poke — a flag-only flip is invariant-preserving by contract.
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("production setup must succeed");
+    layout
+        .workspaces
+        .get_mut(&target_ws_id)
+        .expect("target ws live")
+        .is_sticky = true;
     layout.verify_invariants();
 
     let ws_id = layout
@@ -19240,11 +19486,22 @@ fn toggle_workspace_sticky_dispatches_to_unset_when_on() {
         .copied()
         .expect("alpha view has ws");
 
-    {
-        let ws = layout.workspaces.get_mut(&target_ws_id).expect("live");
-        ws.is_sticky = true;
-        ws.activities = HashSet::from([alpha, beta]);
-    }
+    // Membership is built through the production path so it stays view-coherent; `is_sticky`
+    // is a direct poke — a flag-only flip is invariant-preserving by contract.
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(target_ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("production setup must succeed");
+    layout
+        .workspaces
+        .get_mut(&target_ws_id)
+        .expect("target ws live")
+        .is_sticky = true;
     layout.verify_invariants();
 
     let outcome = layout
