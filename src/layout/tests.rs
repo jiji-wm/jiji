@@ -6461,6 +6461,139 @@ fn set_workspace_activities_reinstates_view_after_single_entry_drop_in_dormant_a
     layout.verify_invariants();
 }
 
+// Shared EWAF fixture for the two runtime-narrowing collapse pins: a dormant
+// activity "Beta" whose view holds a single named workspace amid two empty
+// bookends — the shape [leading, ws, trailing] a Remove narrows to [leading,
+// trailing]. Returns (layout, alpha, beta, mon_out, ws_id).
+fn ewaf_dormant_named_len3_fixture() -> (
+    Layout<TestWindow>,
+    ActivityId,
+    ActivityId,
+    OutputId,
+    WorkspaceId,
+) {
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut layout = check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddNamedWorkspace {
+                ws_name: 1,
+                output_name: None,
+                layout_config: None,
+            },
+        ],
+    );
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name().is_some())
+        .expect("named workspace present")
+        .id();
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("share into beta");
+    layout.verify_invariants();
+    assert_eq!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .len(),
+        3,
+        "precondition: beta's dormant EWAF view is [leading, ws, trailing]",
+    );
+    (layout, alpha, beta, mon_out, ws_id)
+}
+
+#[test]
+fn remove_workspace_from_activity_collapses_empty_exclusive_ewaf_len2() {
+    // Removing the sole named workspace from a dormant EWAF activity's
+    // [leading, ws, trailing] view yields [leading, trailing] — an all-empty
+    // exclusive len-2 shape `assert_view_bookends` rejects. The runtime collapse
+    // must cull the exclusive trailing bookend so the tail `verify_invariants`
+    // passes (pre-fix it debug-panics there).
+    let (mut layout, _alpha, beta, mon_out, ws_id) = ewaf_dormant_named_len3_fixture();
+
+    layout
+        .remove_workspace_from_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("remove must succeed");
+
+    assert_eq!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .len(),
+        1,
+        "collapse must restore beta's view to a single bookend",
+    );
+    assert!(
+        layout.workspaces.contains_key(&ws_id),
+        "the named workspace survives in its remaining activity",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_collapses_empty_exclusive_ewaf_len2() {
+    // The `to_remove` twin of the collapse pin: narrowing the named workspace off
+    // beta via `set_workspace_activities` leaves the same all-empty exclusive
+    // len-2 view, which the post-loop collapse must normalize before the tail
+    // verify (pre-fix it debug-panics there).
+    let (mut layout, alpha, beta, mon_out, ws_id) = ewaf_dormant_named_len3_fixture();
+
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[ActivityReferenceArg::Id(alpha.get())],
+        )
+        .expect("narrow to alpha must succeed");
+
+    assert_eq!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .len(),
+        1,
+        "collapse must restore beta's view to a single bookend",
+    );
+    assert!(
+        layout.workspaces.contains_key(&ws_id),
+        "the named workspace survives in alpha",
+    );
+    layout.verify_invariants();
+}
+
 #[test]
 fn ensure_all_activity_views_no_op_when_monitors_empty() {
     // `ensure_all_activity_views` early-returns when monitors is empty — no view fabrication,

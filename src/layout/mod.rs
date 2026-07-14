@@ -7709,6 +7709,7 @@ impl<W: LayoutElement> Layout<W> {
         // workspace's holding view (if it has one at all) must be one of `activity_id`'s own
         // views, not some other activity's.
         let mut dropped_any_view_entry = false;
+        let mut collapse_out_id: Option<OutputId> = None;
         let holding = {
             let activity = self
                 .activities
@@ -7753,6 +7754,9 @@ impl<W: LayoutElement> Layout<W> {
                 }
             } else {
                 view.remove_at(pos);
+                // A `remove_at` on a length-3 view leaves length 2, which the collapse helper
+                // normalizes below when both survivors are empty and the second is exclusive.
+                collapse_out_id = Some(out_id);
             }
         }
 
@@ -7761,6 +7765,13 @@ impl<W: LayoutElement> Layout<W> {
         // scope above ended).
         if dropped_any_view_entry {
             self.ensure_all_activity_views();
+        }
+
+        // Normalize any all-empty exclusive EWAF len-2 view the removal left behind, before the
+        // narrowed-workspace reclaim and the tail verify (the len-2 shape trips
+        // `assert_view_bookends`). Guarded and idempotent — a non-len-2 view early-returns.
+        if let Some(out_id) = collapse_out_id {
+            self.collapse_empty_exclusive_ewaf_len2_view(activity_id, &out_id);
         }
 
         // The narrowing may have left ws_id exclusively in one activity's view
@@ -7897,6 +7908,8 @@ impl<W: LayoutElement> Layout<W> {
         // Patch each affected activity's view. Track any view-entry drop on a connected monitor
         // so the materializer can reinstate the dropped view via ensure_all_activity_views below.
         let mut dropped_any_view_entry = false;
+        // (activity, output) pairs a Remove narrowed to length 2 — normalized after the loop.
+        let mut collapse_pairs: Vec<(ActivityId, OutputId)> = Vec::new();
 
         // Removes first — mirrors `remove_workspace_from_activity`'s single-entry drop vs
         // `remove_at` branch. Each removed activity is scanned independently for its own holding
@@ -7948,6 +7961,9 @@ impl<W: LayoutElement> Layout<W> {
                 }
             } else {
                 view.remove_at(pos);
+                // Length-3 → length-2: a candidate for the all-empty exclusive EWAF collapse
+                // applied after the loop.
+                collapse_pairs.push((*act_id, out_id));
             }
         }
 
@@ -8052,6 +8068,14 @@ impl<W: LayoutElement> Layout<W> {
         // `remove_workspace_from_activity` recipe.
         if dropped_any_view_entry {
             self.ensure_all_activity_views();
+        }
+
+        // Normalize any all-empty exclusive EWAF len-2 view a Remove left behind, before the
+        // narrowed-workspace reclaim and the tail verify (the len-2 shape trips
+        // `assert_view_bookends`). Guarded and idempotent — duplicate pairs and non-len-2 views
+        // early-return.
+        for (act_id, out_id) in &collapse_pairs {
+            self.collapse_empty_exclusive_ewaf_len2_view(*act_id, out_id);
         }
 
         // When to_remove is non-empty, ws_id may have been narrowed to a single
