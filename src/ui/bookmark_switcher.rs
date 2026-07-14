@@ -94,7 +94,7 @@ use crate::niri_render_elements;
 use crate::render_helpers::memory::MemoryBuffer;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
-use crate::render_helpers::text::{rasterize, TextBoxStyle};
+use crate::render_helpers::text::{rasterize, TextBoxStyle, MAX_SURFACE_SIZE};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::utils::{output_size, with_toplevel_role};
 use crate::window::Mapped;
@@ -1603,7 +1603,7 @@ fn render_boxed(
             border_width: BORDER,
             border_color: [0.9, 0.6, 0.1],
         }),
-        None,
+        Some(MAX_SURFACE_SIZE),
         set_content,
     )
 }
@@ -2711,5 +2711,21 @@ mod tests {
         let long: String = "x".repeat(60);
         let text = capture_line_text(&long, None);
         assert!(text.contains(&format!("{}…", "x".repeat(48))));
+    }
+
+    /// Pins that `render_boxed` wires `max_surface_size` through to
+    /// `rasterize` at all: an oversized fixture must come back clamped to
+    /// exactly [`MAX_SURFACE_SIZE`], not just `<=` it — equality is the only
+    /// way to prove the fixture's natural (unclamped) width actually exceeded
+    /// the clamp, rather than the test passing vacuously because the fixture
+    /// was too short to reach it.
+    #[test]
+    fn render_boxed_clamps_to_max_surface_size() {
+        // 4000 chars at this module's mono 16px font is ~40000px of natural
+        // width, comfortably >2x the 16383 clamp, so the assert below can't
+        // pass vacuously on a fixture too short to reach the clamp.
+        let buffer = render_boxed(1., |l| l.set_text(&"x".repeat(4000))).unwrap();
+        assert_eq!(buffer.size().w, MAX_SURFACE_SIZE);
+        assert!(buffer.size().h <= MAX_SURFACE_SIZE);
     }
 }

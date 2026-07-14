@@ -17,7 +17,7 @@ use crate::render_helpers::memory::MemoryBuffer;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
-use crate::render_helpers::text::{rasterize, TextBoxStyle};
+use crate::render_helpers::text::{rasterize, TextBoxStyle, MAX_SURFACE_SIZE};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::utils::output_size;
 
@@ -327,7 +327,7 @@ fn render(kind: ConfirmKind, scale: f64) -> anyhow::Result<MemoryBuffer> {
             border_width: BORDER,
             border_color: [1., 0.3, 0.3],
         }),
-        None,
+        Some(MAX_SURFACE_SIZE),
         |layout| {
             layout.set_alignment(Alignment::Center);
             layout.set_markup(&markup);

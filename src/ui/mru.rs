@@ -30,7 +30,7 @@ use crate::render_helpers::offscreen::{OffscreenBuffer, OffscreenRenderElement};
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
-use crate::render_helpers::text::{rasterize, TextBoxStyle};
+use crate::render_helpers::text::{rasterize, TextBoxStyle, MAX_SURFACE_SIZE};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::render_helpers::RenderCtx;
 use crate::utils::{
@@ -1661,7 +1661,7 @@ fn generate_title_texture(
         FONT,
         None,
         // Guard against overly long window titles.
-        Some(16383),
+        Some(MAX_SURFACE_SIZE),
         |layout| {
             // On Window CSD, line breaks are either stripped or replaced with the linebreak
             // symbol anyway. No use rendering it as multiple lines.
@@ -1744,7 +1744,7 @@ fn render_panel(renderer: &mut GlesRenderer, scale: f64, text: &str) -> anyhow::
             border_width: PANEL_BORDER,
             border_color: [0.5, 0.5, 0.5],
         }),
-        None,
+        Some(MAX_SURFACE_SIZE),
         |layout| layout.set_markup(text),
     )?;
 

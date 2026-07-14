@@ -14,10 +14,19 @@
 //! adopter that opts out ([`crate::ui::mru`]'s window-title texture) relies
 //! on the surface's transparent-black default so the title floats over
 //! whatever it's composited onto; drawing has no border in that case either.
-//! The `max_surface_size` clamp is likewise adopter-specific rather than
-//! universal: only the title path takes untrusted-length window titles that
-//! must stay under the GL max-texture-size ballpark, so it alone passes
-//! `Some(_)`.
+//! Every adopter passes [`MAX_SURFACE_SIZE`] for `max_surface_size`: any
+//! rasterized surface can end up uploaded as a GL texture, and at least one
+//! shared rasterize path per component carries untrusted or unbounded text —
+//! [`crate::ui::mru`]'s title texture and the bookmark switcher's search
+//! query and interpolated window titles — even though other call sites on
+//! the same components only ever draw short, fixed, developer-controlled
+//! strings (the confirm dialog's labels, the MRU scope panel's labels). It's
+//! simpler and safer to clamp unconditionally for every adopter than to
+//! track which specific call is exposed, so the clamp is load-bearing
+//! everywhere, not just on the title path. The parameter stays `Option`
+//! rather than being applied unconditionally inside [`rasterize`] so the
+//! clamp remains cheap to exercise with small test values instead of only
+//! at the real GL-sized limit.
 
 use anyhow::{ensure, Result};
 use pangocairo::cairo::{self, ImageSurface};
@@ -27,6 +36,13 @@ use smithay::utils::Transform;
 
 use crate::render_helpers::memory::MemoryBuffer;
 use crate::utils::to_physical_precise_round;
+
+/// Upper bound for a rasterized surface's width and height, in physical pixels.
+///
+/// Stays strictly under the common 16384 GL `MAX_TEXTURE_SIZE` floor so a
+/// texture built from a [`rasterize`]d surface never exceeds it on any
+/// adopter's target hardware.
+pub const MAX_SURFACE_SIZE: i32 = 16383;
 
 /// Chrome drawn around rasterized text: padding, an even-width border, and
 /// the border's color. Passing `None` for the `style` parameter of

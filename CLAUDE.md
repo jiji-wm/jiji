@@ -10,7 +10,7 @@ This file covers **fork-specific coding conventions** that are enforced in revie
 
 - `cargo check --workspace` — fast compile feedback.
 - `cargo test --all --exclude jiji-visual-tests` — full suite.
-  - **Expected pass count: 924 + 67 + 61 + 1.** If this number changes, the active spec must be updated in the same commit.
+  - **Expected pass count: 925 + 67 + 61 + 1.** If this number changes, the active spec must be updated in the same commit.
 - `RUN_SLOW_TESTS=1 cargo test random_operations_dont_panic` — proptest corpus (slow; off by default).
 - `cargo clippy --all --all-targets` — **baseline: 0 pre-existing warnings.** Any new warning must be fixed before commit.
 - `cargo build --release` — sanity-check release profile after any `#[cfg(debug_assertions)]` edit.
