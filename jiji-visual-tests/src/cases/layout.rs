@@ -271,18 +271,14 @@ impl TestCase for Layout {
 
         let mut rv = Vec::new();
         let mon = self.layout.monitor_for_output(&self.output).unwrap();
-        let lctx = self.layout.ctx_for(mon);
         let ctx = RenderCtx {
             renderer,
             target: RenderTarget::Output,
             xray: None,
         };
-        mon.render_workspaces(
-            jiji::layout::monitor::StripCtx::incoming(lctx),
-            ctx,
-            true,
-            &mut |elem| rv.push(Box::new(elem) as _),
-        );
+        mon.render_workspaces(self.layout.incoming_ctx_for(mon), ctx, true, &mut |elem| {
+            rv.push(Box::new(elem) as _)
+        });
         rv
     }
 }

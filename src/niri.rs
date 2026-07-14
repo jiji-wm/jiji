@@ -138,7 +138,6 @@ use crate::input::{
 use crate::ipc::server::IpcServer;
 use crate::layer::mapped::LayerSurfaceRenderElement;
 use crate::layer::MappedLayer;
-use crate::layout::monitor::StripCtx;
 use crate::layout::tile::TileRenderElement;
 use crate::layout::workspace::Workspace;
 use crate::layout::{
@@ -4648,6 +4647,7 @@ impl Niri {
         // Get monitor elements.
         let mon = self.layout.monitor_for_output(output).unwrap();
         let lctx = self.layout.ctx_for(mon);
+        let in_sctx = self.layout.incoming_ctx_for(mon);
         let out_sctx = self.layout.outgoing_ctx_for(mon);
         let zoom = mon.overview_zoom();
 
@@ -4721,9 +4721,7 @@ impl Niri {
 
             mon.render_insert_hint_between_workspaces(ctx.renderer, &mut |elem| push(elem.into()));
 
-            mon.render_workspaces(StripCtx::incoming(lctx), ctx.r(), focus_ring, &mut |elem| {
-                push(elem.into())
-            });
+            mon.render_workspaces(in_sctx, ctx.r(), focus_ring, &mut |elem| push(elem.into()));
 
             push_popups_from_layer!(Layer::Top);
             push_normal_from_layer!(Layer::Top);
@@ -4783,9 +4781,7 @@ impl Niri {
                 }
             }
 
-            mon.render_workspaces(StripCtx::incoming(lctx), ctx.r(), focus_ring, &mut |elem| {
-                push(elem.into())
-            });
+            mon.render_workspaces(in_sctx, ctx.r(), focus_ring, &mut |elem| push(elem.into()));
 
             if let Some(out_sctx) = out_sctx {
                 mon.render_workspaces(out_sctx, ctx.r(), false, &mut |elem| push(elem.into()));

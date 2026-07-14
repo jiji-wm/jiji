@@ -149,8 +149,9 @@ pub enum SizingMode {
 /// Prefer `layout.ctx_for(mon)` to construct this at call sites. Both borrows
 /// are shared, so a caller holding `&mon` can pass `ctx` into `&self` methods
 /// on the same `mon` without conflict. The raw constructor `LayoutCtx::new`
-/// remains available for sites where `&pool` is already bound separately from
-/// the layout and `Layout::ctx_for` can't be called.
+/// is `pub(crate)`: it remains available for in-crate sites where `&pool` is
+/// already bound separately from the layout and `Layout::ctx_for` can't be
+/// called, but crate-external callers must go through `Layout::ctx_for`.
 #[derive(Debug)]
 pub struct LayoutCtx<'a, W: LayoutElement> {
     pool: &'a HashMap<WorkspaceId, Workspace<W>>,
@@ -168,7 +169,10 @@ impl<W: LayoutElement> Clone for LayoutCtx<'_, W> {
 }
 
 impl<'a, W: LayoutElement> LayoutCtx<'a, W> {
-    pub fn new(pool: &'a HashMap<WorkspaceId, Workspace<W>>, view: &'a WorkspaceView) -> Self {
+    pub(crate) fn new(
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        view: &'a WorkspaceView,
+    ) -> Self {
         Self { pool, view }
     }
 
@@ -5398,10 +5402,22 @@ impl<W: LayoutElement> Layout<W> {
     ///
     /// Convenience wrapper that bundles `&self.workspaces` with the monitor's
     /// active view via [`Layout::active_view`]. Use at call sites where
-    /// `&self` is freely available; sites that have already bound the pool
-    /// separately should call [`LayoutCtx::new`] directly.
+    /// `&self` is freely available; in-crate sites that have already bound
+    /// the pool separately can call `LayoutCtx::new` directly.
     pub fn ctx_for<'a>(&'a self, mon: &Monitor<W>) -> LayoutCtx<'a, W> {
         LayoutCtx::new(&self.workspaces, self.active_view(&mon.output_id()))
+    }
+
+    /// Build the Incoming-tagged strip context for `mon`'s active view.
+    ///
+    /// Unlike [`Layout::outgoing_ctx_for`], this always returns a value: only the Outgoing
+    /// strip is gated on an activity switch being in flight, so the Incoming strip — the
+    /// monitor's currently active view — always exists.
+    ///
+    /// This and [`Layout::outgoing_ctx_for`] are the only paths that mint a [`StripCtx`]
+    /// outside `crate::layout`.
+    pub fn incoming_ctx_for<'a>(&'a self, mon: &Monitor<W>) -> StripCtx<'a, W> {
+        StripCtx::incoming(self.ctx_for(mon))
     }
 
     /// Build the Outgoing-tagged strip context for `mon`'s activity switch, if one is in flight.

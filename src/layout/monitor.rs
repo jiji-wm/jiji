@@ -119,13 +119,15 @@ pub(super) enum ActivityStrip {
 
 /// A [`LayoutCtx`] tagged with which activity strip it belongs to.
 ///
-/// The Outgoing tag is unforgeable outside `crate::layout` — its view is always the
-/// switch's `from`-activity view because [`StripCtx::outgoing`] is `pub(super)` and the
-/// only outside caller is [`Layout::outgoing_ctx_for`](super::Layout::outgoing_ctx_for),
-/// which resolves it from `mon.activity_switch`. The Incoming tag carries no such
-/// structural guarantee: [`StripCtx::incoming`] is `pub` and accepts any `LayoutCtx`;
-/// callers are expected to pass the monitor's active view (typically via
-/// [`Layout::ctx_for`](super::Layout::ctx_for)).
+/// Both tags are unforgeable outside `crate::layout`: [`StripCtx::outgoing`] and
+/// [`StripCtx::incoming`] are both `pub(super)`, so the only way to mint a `StripCtx`
+/// from outside this module is through one of `Layout`'s two minting methods. The
+/// Outgoing tag's view is always the switch's `from`-activity view because its only
+/// outside caller is [`Layout::outgoing_ctx_for`](super::Layout::outgoing_ctx_for), which
+/// resolves it from `mon.activity_switch`. The Incoming tag's view is always the
+/// monitor's active view because its only outside caller is
+/// [`Layout::incoming_ctx_for`](super::Layout::incoming_ctx_for), which resolves it via
+/// [`Layout::ctx_for`](super::Layout::ctx_for).
 #[derive(Debug)]
 pub struct StripCtx<'a, W: LayoutElement> {
     lctx: LayoutCtx<'a, W>,
@@ -141,8 +143,10 @@ impl<W: LayoutElement> Clone for StripCtx<'_, W> {
 }
 
 impl<'a, W: LayoutElement> StripCtx<'a, W> {
-    /// Wrap `lctx` as the Incoming strip.
-    pub fn incoming(lctx: LayoutCtx<'a, W>) -> Self {
+    /// Wrap `lctx` as the Incoming strip. Only reachable from within `crate::layout`, where
+    /// callers are expected to have resolved `lctx` from the monitor's active view (typically
+    /// via [`Layout::ctx_for`](super::Layout::ctx_for)).
+    pub(super) fn incoming(lctx: LayoutCtx<'a, W>) -> Self {
         Self {
             lctx,
             strip: ActivityStrip::Incoming,
