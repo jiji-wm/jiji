@@ -16359,6 +16359,163 @@ fn remove_workspace_from_activity_patches_multi_entry_view() {
 }
 
 #[test]
+fn remove_workspace_from_activity_scopes_to_own_activity_view_after_divergent_partial_disconnect() {
+    // Pins the Remove-path's "scan the target activity's own views" narrowing against the
+    // layout-wide `Layout::workspace_holding_output` resolver it deliberately does NOT use.
+    //
+    // Setup: a named (window-less, survives disconnect via `has_windows_or_name`) workspace
+    // shared by {alpha, beta} is spliced into alpha's out3 view and beta's out1 view — both
+    // legal per-activity placements since each activity holds an independent view per
+    // connected output. A partial disconnect of out1 then diverges their holding outputs
+    // through production migration: alpha's out3 view is untouched, while beta's out1 entry
+    // migrates to the new primary (out2, since out1 was monitor index 0 and `primary_idx`
+    // tracks index 0 after removal) via `remove_output`'s dormant walk. Direct splicing only
+    // seeds the pre-disconnect placement (same technique as
+    // `partial_disconnect_dormant_walk_handles_multi_activity_membership`); the divergence
+    // itself comes from the real migration, not from hand-poking `ws.output_id`.
+    //
+    // `Activities` is an `IndexMap` in creation order (seed, then alpha, then beta), so the
+    // layout-wide resolver's first-match scan would hit alpha's out3 entry before beta's own
+    // out2 entry. Removing shared_ws_id from beta must patch beta's out2 view — sabotage-check:
+    // reverting the Remove-path scan to `self.workspace_holding_output(ws_id)` makes the final
+    // assertion below fail (beta's out2 entry survives as a zombie).
+    let ops = [Op::AddOutput(1), Op::AddOutput(2), Op::AddOutput(3)];
+    let mut layout = check_ops(ops);
+    let out1 = layout.monitors[0].output_id();
+    let out2 = layout.monitors[1].output_id();
+    let out3 = layout.monitors[2].output_id();
+    let out1_output = layout.monitors[0].output.clone();
+
+    let alpha = layout
+        .create_activity("alpha".to_owned())
+        .expect("create alpha");
+    let beta = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    let shared_ws_id = {
+        let ws = Workspace::<TestWindow>::new_with_config(
+            &out1_output,
+            Some(WorkspaceConfig {
+                name: WorkspaceName("shared".to_owned()),
+                open_on_output: None,
+                layout: None,
+                activities: Vec::new(),
+                sticky: None,
+            }),
+            [alpha, beta].into_iter().collect(),
+            layout.clock.clone(),
+            layout.options.clone(),
+        );
+        let id = ws.id();
+        layout.workspaces.insert(id, ws);
+        id
+    };
+
+    // Splice above each activity's trailing bookend.
+    {
+        let alpha_out3 = layout
+            .activities
+            .get_mut(alpha)
+            .expect("alpha live")
+            .views_mut()
+            .get_mut(&out3)
+            .expect("alpha has out3 view");
+        let pos = alpha_out3.len() - 1;
+        alpha_out3.insert(pos, shared_ws_id);
+    }
+    {
+        let beta_out1 = layout
+            .activities
+            .get_mut(beta)
+            .expect("beta live")
+            .views_mut()
+            .get_mut(&out1)
+            .expect("beta has out1 view");
+        let pos = beta_out1.len() - 1;
+        beta_out1.insert(pos, shared_ws_id);
+    }
+
+    layout.verify_invariants();
+
+    // Partial-disconnect out1.
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
+
+    // Precondition: the divergence landed as designed.
+    assert!(
+        layout
+            .activities
+            .get(alpha)
+            .expect("alpha live after disconnect")
+            .views()
+            .get(&out3)
+            .expect("alpha holds out3 view")
+            .ids()
+            .contains(&shared_ws_id),
+        "precondition: alpha's out3 view must retain shared_ws_id (untouched by the out1 \
+         disconnect)",
+    );
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live after disconnect")
+            .views()
+            .get(&out2)
+            .expect("beta holds out2 view (new primary)")
+            .ids()
+            .contains(&shared_ws_id),
+        "precondition: beta's shared_ws_id copy must have migrated to out2 (the new primary) \
+         via the partial-disconnect dormant walk",
+    );
+
+    layout
+        .remove_workspace_from_activity(
+            Some(WorkspaceReference::Id(shared_ws_id.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("remove must succeed");
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&shared_ws_id)
+            .expect("live")
+            .activities(),
+        &HashSet::from([alpha]),
+        "beta must be pruned from shared_ws_id's activities",
+    );
+    assert!(
+        layout
+            .activities
+            .get(alpha)
+            .expect("alpha live")
+            .views()
+            .get(&out3)
+            .expect("alpha holds out3 view")
+            .ids()
+            .contains(&shared_ws_id),
+        "alpha's out3 view must be untouched by a beta-targeted removal",
+    );
+    assert!(
+        !layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&out2)
+            .expect("beta holds out2 view")
+            .ids()
+            .contains(&shared_ws_id),
+        "beta's out2 view must have shared_ws_id's entry dropped — this fails if the \
+         Remove-path scan is reverted to the layout-wide `workspace_holding_output` resolver \
+         (first match picks alpha's out3, a no-op for beta's actual out2 entry)",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
 fn remove_workspace_from_activity_active_activity_recreates_view() {
     // Remove from the active activity in a way that drops its view's last
     // entry on a connected monitor. `ensure_all_activity_views` must reinstate
@@ -16723,6 +16880,151 @@ fn set_workspace_activities_diff_removes_from_dormant_view() {
         .expect("beta's view persists (carries the bookend)");
     assert!(!beta_view.ids().contains(&target_ws_id));
     assert_eq!(beta_view.len(), 1, "only trailing-empty bookend remains");
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_to_remove_scopes_to_own_activity_view_after_divergent_partial_disconnect(
+) {
+    // `set_workspace_activities`'s to_remove loop variant of
+    // `remove_workspace_from_activity_scopes_to_own_activity_view_after_divergent_partial_disconnect`
+    // — same fixture shape and rationale, pinning the same "scan the removed activity's own
+    // views" narrowing (mod.rs's to_remove loop) against the layout-wide
+    // `Layout::workspace_holding_output` resolver it deliberately does NOT use.
+    //
+    // `Activities` is an `IndexMap` in creation order (seed, then alpha, then beta), so the
+    // layout-wide resolver's first-match scan would hit alpha's out3 entry before beta's own
+    // out2 entry. Sabotage-check: reverting the to_remove loop's per-activity scan to
+    // `self.workspace_holding_output(ws_id)` makes the final assertion below fail (beta's out2
+    // entry survives as a zombie).
+    let ops = [Op::AddOutput(1), Op::AddOutput(2), Op::AddOutput(3)];
+    let mut layout = check_ops(ops);
+    let out1 = layout.monitors[0].output_id();
+    let out2 = layout.monitors[1].output_id();
+    let out3 = layout.monitors[2].output_id();
+    let out1_output = layout.monitors[0].output.clone();
+
+    let alpha = layout
+        .create_activity("alpha".to_owned())
+        .expect("create alpha");
+    let beta = layout
+        .create_activity("beta".to_owned())
+        .expect("create beta");
+
+    let shared_ws_id = {
+        let ws = Workspace::<TestWindow>::new_with_config(
+            &out1_output,
+            Some(WorkspaceConfig {
+                name: WorkspaceName("shared".to_owned()),
+                open_on_output: None,
+                layout: None,
+                activities: Vec::new(),
+                sticky: None,
+            }),
+            [alpha, beta].into_iter().collect(),
+            layout.clock.clone(),
+            layout.options.clone(),
+        );
+        let id = ws.id();
+        layout.workspaces.insert(id, ws);
+        id
+    };
+
+    // Splice above each activity's trailing bookend.
+    {
+        let alpha_out3 = layout
+            .activities
+            .get_mut(alpha)
+            .expect("alpha live")
+            .views_mut()
+            .get_mut(&out3)
+            .expect("alpha has out3 view");
+        let pos = alpha_out3.len() - 1;
+        alpha_out3.insert(pos, shared_ws_id);
+    }
+    {
+        let beta_out1 = layout
+            .activities
+            .get_mut(beta)
+            .expect("beta live")
+            .views_mut()
+            .get_mut(&out1)
+            .expect("beta has out1 view");
+        let pos = beta_out1.len() - 1;
+        beta_out1.insert(pos, shared_ws_id);
+    }
+
+    layout.verify_invariants();
+
+    // Partial-disconnect out1.
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
+
+    // Precondition: the divergence landed as designed.
+    assert!(
+        layout
+            .activities
+            .get(alpha)
+            .expect("alpha live after disconnect")
+            .views()
+            .get(&out3)
+            .expect("alpha holds out3 view")
+            .ids()
+            .contains(&shared_ws_id),
+        "precondition: alpha's out3 view must retain shared_ws_id (untouched by the out1 \
+         disconnect)",
+    );
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live after disconnect")
+            .views()
+            .get(&out2)
+            .expect("beta holds out2 view (new primary)")
+            .ids()
+            .contains(&shared_ws_id),
+        "precondition: beta's shared_ws_id copy must have migrated to out2 (the new primary) \
+         via the partial-disconnect dormant walk",
+    );
+
+    // Set(shared_ws_id, [alpha]): symmetric diff yields to_remove = {beta}, to_add = {}.
+    let (ws_id, new_set, _active_affected) = layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(shared_ws_id.get())),
+            &[ActivityReferenceArg::Id(alpha.get())],
+        )
+        .expect("set must succeed");
+    assert_eq!(ws_id, shared_ws_id);
+    assert_eq!(new_set, HashSet::from([alpha]));
+
+    assert!(
+        layout
+            .activities
+            .get(alpha)
+            .expect("alpha live")
+            .views()
+            .get(&out3)
+            .expect("alpha holds out3 view")
+            .ids()
+            .contains(&shared_ws_id),
+        "alpha's out3 view must be untouched by a beta-only removal",
+    );
+    assert!(
+        !layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&out2)
+            .expect("beta holds out2 view")
+            .ids()
+            .contains(&shared_ws_id),
+        "beta's out2 view must have shared_ws_id's entry dropped — this fails if the \
+         to_remove loop's per-activity scan is reverted to the layout-wide \
+         `workspace_holding_output` resolver (first match picks alpha's out3, a no-op for \
+         beta's actual out2 entry)",
+    );
 
     layout.verify_invariants();
 }
@@ -20314,15 +20616,17 @@ fn set_workspace_activities_add_for_empty_unnamed_workspace_does_not_mint() {
 }
 
 #[test]
-fn set_workspace_activities_add_targets_bound_output_not_active_monitor() {
+fn set_workspace_activities_add_targets_holding_output_not_active_monitor() {
     // Multi-output independence pin for the Add-path bookend placement.
     //
-    // Layout: two outputs, alpha active, workspace ws (named) bound to
-    // output 2 (the non-active monitor). Adding ws to a dormant activity beta
-    // must keep beta's *output-2* view ending in an empty bookend. A broken
-    // implementation that looked up the active monitor's index instead of
-    // ws's bound output would repair the wrong view (output 1) and leave
-    // output 2 without a bookend — `verify_invariants` would trip.
+    // Layout: two outputs, alpha active, workspace ws (named) living in
+    // alpha's output-2 view (the non-active monitor) — its output tag is
+    // accurate here, so this fixture pins the ordinary (non-stale-tag) case.
+    // Adding ws to a dormant activity beta must keep beta's *output-2* view
+    // ending in an empty bookend. A broken implementation that looked up the
+    // active monitor's index instead of ws's holding output would repair the
+    // wrong view (output 1) and leave output 2 without a bookend —
+    // `verify_invariants` would trip.
     let ops = [Op::AddOutput(1), Op::AddOutput(2)];
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();
@@ -20737,6 +21041,549 @@ fn set_workspace_activities_ewaf_dormant_len1_view_gains_leading_empty() {
         .get(beta_view.ids().first().expect("non-empty"))
         .expect("live");
     assert!(!top.has_windows_or_name());
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn add_workspace_to_activity_stale_tag_patches_holding_view() {
+    // View-keyed rekey pin: a workspace named on output 2 migrates to output 1 when
+    // output 2 disconnects; `Workspace::bind_output` intentionally leaves `output_id`
+    // pointing at output 2 (the reclaim tag does not track the transfer). Adding this
+    // stale-tagged workspace to a fresh dormant activity must land it in that activity's
+    // *output-1* view (the actual holding view) — keying by the stale `ws.output_id()` tag
+    // would silently miss, since no view is keyed by output 2 anymore.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let out1 = layout.monitors[0].output_id();
+    let out2 = layout.monitors[1].output_id();
+
+    let ws_id = layout
+        .active_view(&out2)
+        .ids()
+        .first()
+        .copied()
+        .expect("out2 active view has a bookend workspace");
+    layout.set_workspace_name("ws".to_owned(), Some(WorkspaceReference::Id(ws_id.get())));
+    layout.verify_invariants();
+
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(2)]);
+    layout.verify_invariants();
+
+    // Precondition: migration landed ws_id in the (now sole) output-1 view, tag still out2.
+    assert!(
+        layout.active_view(&out1).ids().contains(&ws_id),
+        "precondition: ws_id must have migrated into output-1's view",
+    );
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&ws_id)
+            .expect("live")
+            .output_id()
+            .cloned(),
+        Some(out2.clone()),
+        "precondition: output_id tag must remain stale at the disconnected output",
+    );
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    layout
+        .add_workspace_to_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("add must succeed");
+
+    let beta_out1 = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&out1)
+        .expect("beta holds an output-1 view");
+    assert!(
+        beta_out1.ids().contains(&ws_id),
+        "beta's output-1 view must gain ws_id (today: silent miss keyed by the stale out2 tag)",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_workspace_from_activity_stale_tag_patches_holding_view() {
+    // Remove-path counterpart: a workspace shared by {alpha, beta} migrates from output 2 to
+    // output 1 in *both* activities' dormant/active views when output 2 disconnects, with the
+    // stale out2 tag surviving on the pool entry. Removing beta's membership must drop the id
+    // from beta's actual (output-1) view — keying by the stale tag would silently miss (no view
+    // is keyed by out2 in beta anymore), leaving a zombie entry.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let out1 = layout.monitors[0].output_id();
+    let out2 = layout.monitors[1].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let ws_id = layout
+        .active_view(&out2)
+        .ids()
+        .first()
+        .copied()
+        .expect("out2 active view has a bookend workspace");
+    layout.set_workspace_name(
+        "shared".to_owned(),
+        Some(WorkspaceReference::Id(ws_id.get())),
+    );
+    layout
+        .add_workspace_to_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("add must succeed");
+    layout.verify_invariants();
+    assert!(layout
+        .workspaces
+        .get(&ws_id)
+        .expect("live")
+        .activities()
+        .contains(&beta));
+
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(2)]);
+    layout.verify_invariants();
+
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&ws_id)
+            .expect("live")
+            .output_id()
+            .cloned(),
+        Some(out2.clone()),
+        "precondition: output_id tag must remain stale at the disconnected output",
+    );
+    let beta_out1_before = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&out1)
+        .expect("beta holds an output-1 view after migration");
+    assert!(
+        beta_out1_before.ids().contains(&ws_id),
+        "precondition: ws_id must have migrated into beta's output-1 view",
+    );
+
+    layout
+        .remove_workspace_from_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("remove must succeed");
+
+    let beta_out1_after = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&out1)
+        .expect("beta still holds an output-1 view");
+    assert!(
+        !beta_out1_after.ids().contains(&ws_id),
+        "beta's output-1 view must drop ws_id (today: zombie entry keyed by the stale out2 tag)",
+    );
+    assert!(!layout
+        .workspaces
+        .get(&ws_id)
+        .expect("live")
+        .activities()
+        .contains(&beta));
+    assert!(layout
+        .workspaces
+        .get(&ws_id)
+        .expect("live")
+        .activities()
+        .contains(&alpha));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn set_workspace_activities_stale_tag_add_and_remove() {
+    // Set-path counterpart exercising both the Add and Remove halves in one call: a
+    // stale-tagged (out2) workspace living in alpha's output-1 view moves from `{alpha}` to
+    // `{beta}`. Alpha's Remove must find the workspace via alpha's own output-1 view (not the
+    // stale tag); beta's Add must land it in beta's output-1 view via the layout-wide holding
+    // resolver, with the trailing bookend intact.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let out1 = layout.monitors[0].output_id();
+    let out2 = layout.monitors[1].output_id();
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let ws_id = layout
+        .active_view(&out2)
+        .ids()
+        .first()
+        .copied()
+        .expect("out2 active view has a bookend workspace");
+    layout.set_workspace_name("ws".to_owned(), Some(WorkspaceReference::Id(ws_id.get())));
+    layout.verify_invariants();
+
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(2)]);
+    layout.verify_invariants();
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&ws_id)
+            .expect("live")
+            .output_id()
+            .cloned(),
+        Some(out2.clone()),
+        "precondition: output_id tag must remain stale at the disconnected output",
+    );
+    assert!(
+        layout.active_view(&out1).ids().contains(&ws_id),
+        "precondition: ws_id must have migrated into alpha's output-1 view",
+    );
+
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[ActivityReferenceArg::Id(beta.get())],
+        )
+        .expect("set must succeed");
+
+    assert!(
+        !layout.active_view(&out1).ids().contains(&ws_id),
+        "alpha's output-1 view must drop ws_id (today: zombie entry keyed by the stale out2 tag)",
+    );
+    let beta_out1 = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&out1)
+        .expect("beta holds an output-1 view");
+    assert!(
+        beta_out1.ids().contains(&ws_id),
+        "beta's output-1 view must gain ws_id (today: silent miss keyed by the stale out2 tag)",
+    );
+    let trailing = layout
+        .workspaces
+        .get(beta_out1.ids().last().expect("non-empty"))
+        .expect("live");
+    assert!(
+        !trailing.has_windows_or_name(),
+        "beta's output-1 view must keep a trailing-empty bookend",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn add_workspace_to_activity_empty_output_tag_patches_holding_view() {
+    // Empty-string sentinel counterpart of the stale-tag pin: a workspace minted via
+    // `Workspace::new_with_config_no_outputs` (no `open_on_output`) carries `OutputId("")`,
+    // never a real output. Spliced into alpha's real output-1 view — mirroring what
+    // `Monitor::new`'s lift loop does for an orphaned config workspace at first-monitor-attach
+    // — adding it to a fresh dormant activity must land it in that activity's output-1 view via
+    // the holding-view resolver, not the sentinel tag.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let out1 = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let orphan_cfg = jiji_config::Workspace {
+        name: jiji_config::workspace::WorkspaceName("ws_orphan".to_owned()),
+        open_on_output: None,
+        layout: None,
+        activities: vec![],
+        sticky: None,
+    };
+    let orphan = Workspace::<TestWindow>::new_with_config_no_outputs(
+        Some(orphan_cfg),
+        HashSet::from([alpha]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let ws_id = orphan.id();
+    assert_eq!(
+        orphan.output_id().map(|oid| oid.as_str()),
+        Some(""),
+        "precondition: new_with_config_no_outputs seeds the empty-string sentinel",
+    );
+    assert!(
+        layout.workspaces.insert(ws_id, orphan).is_none(),
+        "fresh id is unique",
+    );
+
+    // Splice into alpha's real output-1 view, just before the trailing-empty bookend. Named so
+    // the "non-active non-last workspaces must be empty-and-unnamed" monitor invariant does not
+    // fire at this non-bookend position.
+    let alpha_view = layout
+        .activities
+        .get_mut(alpha)
+        .expect("live")
+        .views_mut()
+        .get_mut(&out1)
+        .expect("alpha holds an output-1 view");
+    let insert_pos = alpha_view.len() - 1;
+    alpha_view.insert(insert_pos, ws_id);
+    layout.verify_invariants();
+
+    layout
+        .add_workspace_to_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("add must succeed");
+
+    let beta_out1 = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&out1)
+        .expect("beta holds an output-1 view");
+    assert!(
+        beta_out1.ids().contains(&ws_id),
+        "beta's output-1 view must gain ws_id (today: silent miss keyed by the empty-string \
+         sentinel tag)",
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn remove_workspace_from_activity_empty_output_tag_patches_holding_view() {
+    // Empty-string sentinel counterpart for the Remove path: a sentinel-tagged workspace shared
+    // by {alpha, beta}, spliced into both activities' real output-1 views. Removing beta's
+    // membership must drop the id from beta's actual view — keying by the `""` sentinel tag
+    // would silently miss (no view is ever keyed by the empty string), leaving a zombie entry.
+    let ops = [Op::AddOutput(1)];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let out1 = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let orphan_cfg = jiji_config::Workspace {
+        name: jiji_config::workspace::WorkspaceName("ws_orphan".to_owned()),
+        open_on_output: None,
+        layout: None,
+        activities: vec![],
+        sticky: None,
+    };
+    let orphan = Workspace::<TestWindow>::new_with_config_no_outputs(
+        Some(orphan_cfg),
+        HashSet::from([alpha, beta]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let ws_id = orphan.id();
+    assert_eq!(
+        orphan.output_id().map(|oid| oid.as_str()),
+        Some(""),
+        "precondition: new_with_config_no_outputs seeds the empty-string sentinel",
+    );
+    assert!(
+        layout.workspaces.insert(ws_id, orphan).is_none(),
+        "fresh id is unique",
+    );
+
+    for act_id in [alpha, beta] {
+        let view = layout
+            .activities
+            .get_mut(act_id)
+            .expect("live")
+            .views_mut()
+            .get_mut(&out1)
+            .expect("activity holds an output-1 view");
+        let insert_pos = view.len() - 1;
+        view.insert(insert_pos, ws_id);
+    }
+    layout.verify_invariants();
+
+    layout
+        .remove_workspace_from_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("remove must succeed");
+
+    let beta_out1 = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&out1)
+        .expect("beta still holds an output-1 view");
+    assert!(
+        !beta_out1.ids().contains(&ws_id),
+        "beta's output-1 view must drop ws_id (today: zombie entry keyed by the empty-string \
+         sentinel tag)",
+    );
+    assert!(!layout
+        .workspaces
+        .get(&ws_id)
+        .expect("live")
+        .activities()
+        .contains(&beta));
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn add_workspace_to_activity_bookend_repair_runs_on_stale_tag() {
+    // Under the pre-rekey code, a stale-tagged Add's patch (and therefore its bookend repair)
+    // silently skipped entirely — the tag matched no view, so the insert never ran. This pins
+    // that the repair now actually fires: a stale-tagged named workspace added to a fresh
+    // dormant activity's single-bookend view under EWAF must gain a fresh leading empty in
+    // addition to keeping the reused trailing bookend.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops_with_options(options, ops);
+    let out1 = layout.monitors[0].output_id();
+    let out2 = layout.monitors[1].output_id();
+
+    let ws_id = layout
+        .active_view(&out2)
+        .ids()
+        .first()
+        .copied()
+        .expect("out2 active view has a bookend workspace");
+    layout.set_workspace_name("ws".to_owned(), Some(WorkspaceReference::Id(ws_id.get())));
+    layout.verify_invariants();
+
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(2)]);
+    layout.verify_invariants();
+    assert_eq!(
+        layout
+            .workspaces
+            .get(&ws_id)
+            .expect("live")
+            .output_id()
+            .cloned(),
+        Some(out2.clone()),
+        "precondition: output_id tag must remain stale at the disconnected output",
+    );
+
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    let beta_out1_before = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&out1)
+        .expect("beta holds a fresh output-1 view");
+    assert_eq!(
+        beta_out1_before.len(),
+        1,
+        "precondition: fresh dormant view is a single doubling-bookend entry",
+    );
+
+    layout
+        .add_workspace_to_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("add must succeed");
+
+    let beta_out1_after = layout
+        .activities
+        .get(beta)
+        .expect("live")
+        .views()
+        .get(&out1)
+        .expect("beta holds an output-1 view");
+    assert_eq!(
+        beta_out1_after.len(),
+        3,
+        "beta view must be [fresh leading empty, ws_id, reused trailing bookend] (today: repair \
+         silently skipped, view stays len 1)",
+    );
+    assert_eq!(beta_out1_after.ids().get(1), Some(&ws_id));
+    let leading = layout
+        .workspaces
+        .get(beta_out1_after.ids().first().expect("non-empty"))
+        .expect("live");
+    assert!(
+        !leading.has_windows_or_name(),
+        "leading bookend must be a fresh empty"
+    );
+    let trailing = layout
+        .workspaces
+        .get(beta_out1_after.ids().last().expect("non-empty"))
+        .expect("live");
+    assert!(
+        !trailing.has_windows_or_name(),
+        "trailing bookend must remain empty"
+    );
+
+    layout.verify_invariants();
+}
+
+#[test]
+fn workspace_holding_output_none_only_when_fully_disconnected() {
+    // Resolver contract pin: with any monitor connected, every live pool id must resolve to
+    // `Some` holding output (pool==union guarantees a hit). `None` is legitimate only in the
+    // fully-disconnected window, where every workspace is parked in `disconnected_workspace_ids`
+    // and no activity holds any view.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+
+    // Name a workspace so it survives full disconnect: only named / windowed workspaces are
+    // parked in `disconnected_workspace_ids` — empty-unnamed ones are destroyed instead.
+    let out1 = layout.monitors[0].output_id();
+    let named_id = layout
+        .active_view(&out1)
+        .ids()
+        .first()
+        .copied()
+        .expect("out1 active view has a bookend workspace");
+    layout.set_workspace_name(
+        "keepme".to_owned(),
+        Some(WorkspaceReference::Id(named_id.get())),
+    );
+    layout.verify_invariants();
+
+    let ids: Vec<WorkspaceId> = layout.workspaces.keys().copied().collect();
+    assert!(
+        !ids.is_empty(),
+        "precondition: pool must be non-empty while connected"
+    );
+    for id in &ids {
+        assert!(
+            layout.workspace_holding_output(*id).is_some(),
+            "workspace {id:?} must resolve to a holding output while a monitor is connected",
+        );
+    }
+
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1), Op::RemoveOutput(2)]);
+    assert!(
+        layout.monitors.is_empty(),
+        "precondition: fully disconnected"
+    );
+    let disconnected_ids = layout.disconnected_workspace_ids.clone();
+    assert!(
+        !disconnected_ids.is_empty(),
+        "precondition: fully-disconnected pool must be non-empty",
+    );
+    for id in &disconnected_ids {
+        assert_eq!(
+            layout.workspace_holding_output(*id),
+            None,
+            "workspace {id:?} must have no holding output in the fully-disconnected window",
+        );
+    }
 
     layout.verify_invariants();
 }

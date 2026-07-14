@@ -3889,6 +3889,43 @@ impl<W: LayoutElement> Layout<W> {
         ws.activities().len() == 1
     }
 
+    /// Locate the output whose view currently holds `ws_id`, scanning every activity's views
+    /// (first match wins).
+    ///
+    /// `Workspace::output_id()` is a reclaim tag, not a location: after a partial disconnect it
+    /// can point at a monitor `ws_id` no longer lives on (the migration walk in
+    /// [`Self::remove_output`] preserves the tag but relocates the id — see
+    /// `Workspace::bind_output`'s rustdoc for why the tag isn't refreshed on transfer). Callers
+    /// that need to find the view actually holding `ws_id` must use this resolver instead.
+    ///
+    /// With any monitor connected, the pool==union invariant checked in
+    /// [`Self::verify_invariants`] guarantees every live pool id appears in some activity's view
+    /// — a `None` result while `self.monitors` is non-empty is therefore a membership↔view
+    /// coherence bug, not a legitimate outcome, and is surfaced via `debug_assert!` (debug-loud,
+    /// release-healable, matching [`Self::workspace_is_safe_to_reclaim`]'s philosophy). `None` is
+    /// the expected result only in the fully-disconnected window, where every workspace is parked
+    /// in `disconnected_workspace_ids` and no activity holds any view.
+    ///
+    /// First-match semantics only: when `ws_id` is shared across activities (or, transiently,
+    /// held in more than one view of the same activity by a not-yet-fixed incoherence), this
+    /// resolver does not assert that every holding view agrees on the same output — that
+    /// same-output cross-view consistency is a separate invariant, not yet enforced.
+    fn workspace_holding_output(&self, ws_id: WorkspaceId) -> Option<OutputId> {
+        let holding = self.activities.iter().find_map(|activity| {
+            activity
+                .views()
+                .iter()
+                .find_map(|(out_id, view)| view.position_of(ws_id).map(|_| out_id.clone()))
+        });
+        debug_assert!(
+            holding.is_some() || self.monitors.is_empty(),
+            "workspace_holding_output: {ws_id:?} not found in any activity's view while a \
+             monitor is connected — pool==union invariant violated (membership↔view coherence \
+             bug)",
+        );
+        holding
+    }
+
     /// Reclaim empty unnamed workspaces whose activity-membership set just
     /// shrank to a single activity, restoring the no-empty-middle invariant
     /// for their new exclusive owner.
@@ -7063,7 +7100,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     /// Add `workspace` to `activity_ref`'s membership set and, if the activity
-    /// has a view for the workspace's bound output, insert the id above the
+    /// has a view for the output currently holding the workspace, insert the id above the
     /// view's trailing-empty bookend (or append when the workspace is itself
     /// empty-unnamed, since it is a valid bookend position).
     ///
@@ -7075,11 +7112,16 @@ impl<W: LayoutElement> Layout<W> {
     /// Semantics:
     /// - No-op when the workspace's `activities` set already contains the target id (returns `Ok`,
     ///   no state touched).
-    /// - Otherwise `activity_id` is inserted into `ws.activities`. If the target activity already
-    ///   has a view for the workspace's bound output, the id is inserted above the trailing-empty
-    ///   bookend (or appended when the workspace is itself empty-unnamed). Views are not
-    ///   fabricated: a dormant activity without a view for the output gets its view rebuilt lazily
-    ///   on the next switch.
+    /// - Otherwise `activity_id` is inserted into `ws.activities`. The workspace's holding view is
+    ///   located via [`Self::workspace_holding_output`] — **not** `ws.output_id()`, which is a
+    ///   reclaim tag that can go stale after a partial disconnect. If the target activity already
+    ///   has a view for the holding output, the id is inserted above the trailing-empty bookend (or
+    ///   appended when the workspace is itself empty-unnamed). Every activity holds a view for
+    ///   every connected output eagerly (the per-activity bookend invariant), so there is no
+    ///   "dormant activity without a view" case to fabricate around. The pre-insert absence guard
+    ///   checks every view of the target activity, not just the holding-output one, so a
+    ///   pre-existing membership↔view incoherence elsewhere in the same activity can't be
+    ///   compounded by a double-install.
     ///
     /// Not gated. The insert adjusts any in-flight workspace switch on the
     /// target monitor when the active view is patched, so this is safe during
@@ -7113,10 +7155,15 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        // Resolve the holding view's output before entering the split-borrow scope below —
+        // `workspace_holding_output` takes `&self`, which cannot coexist with the
+        // `&mut self.workspaces` / `&mut self.activities` split that follows.
+        let holding_out_id = self.workspace_holding_output(ws_id);
+
         // Patch ws.activities + the target activity's view in a tight scope so
         // the split mutable borrows on `self.workspaces` / `self.activities`
         // die before the bookend mint+fixup below needs `&mut self`.
-        let out_id = {
+        {
             let pool = &mut self.workspaces;
             let activities = &mut self.activities;
             let active_id = activities.active_id();
@@ -7125,18 +7172,22 @@ impl<W: LayoutElement> Layout<W> {
                 .get_mut(&ws_id)
                 .expect("resolved ws_id must be a live pool key");
             ws.activities.insert(activity_id);
-            let out_id = ws.output_id().cloned();
 
-            if let Some(out_id_ref) = out_id.as_ref() {
+            if let Some(out_id_ref) = holding_out_id.as_ref() {
                 if let Some(activity) = activities.get_mut(activity_id) {
-                    if let Some(view) = activity.views_mut().get_mut(out_id_ref) {
-                        // Defensive: sketch uses the same `contains`
-                        // check before `insert`. Under the no-op early-exit above,
-                        // the view cannot already contain `ws_id` because
-                        // `ws.activities` didn't — the per-view uniqueness
-                        // invariant is derived from pool membership. The guard
-                        // stays as belt-and-braces for any future drift.
-                        if !view.ids().contains(&ws_id) {
+                    // Widened guard: absent from every view of the target activity, not just
+                    // the holding-output view. Under the no-op early-exit above the workspace
+                    // cannot legitimately already be in one of this activity's views (per-view
+                    // uniqueness is derived from pool membership) — this check is belt-and-
+                    // braces against a pre-existing membership↔view incoherence elsewhere in
+                    // the same activity (a separate, not-yet-fixed producer) being compounded
+                    // by a double-install.
+                    let already_present = activity
+                        .views()
+                        .values()
+                        .any(|view| view.ids().contains(&ws_id));
+                    if !already_present {
+                        if let Some(view) = activity.views_mut().get_mut(out_id_ref) {
                             let pos = Self::view_insert_above_trailing_bookend(pool, view, ws_id);
                             // A mid-view insert into the view the monitor is
                             // rendering must shift an in-flight workspace
@@ -7154,12 +7205,25 @@ impl<W: LayoutElement> Layout<W> {
                                     }
                                 }
                             }
+                        } else {
+                            // `holding_out_id` names a currently-connected output, and the
+                            // per-activity bookend invariant guarantees every activity holds a
+                            // view for every connected output — so this activity must have a
+                            // view keyed by `out_id_ref`. Reaching here means that invariant is
+                            // violated; `ws.activities.insert` above already ran, so silently
+                            // skipping the view patch would mint a membership-without-view
+                            // incoherence.
+                            debug_assert!(
+                                false,
+                                "add_workspace_to_activity: activity {activity_id:?} has no \
+                                 view for {out_id_ref:?}, a connected output — per-activity \
+                                 bookend invariant violated (membership↔view coherence bug)",
+                            );
                         }
                     }
                 }
             }
-            out_id
-        };
+        }
 
         // Per-activity bookend invariant: every (activity, connected output)
         // view must end in an empty unnamed workspace. The insert above keeps
@@ -7172,19 +7236,19 @@ impl<W: LayoutElement> Layout<W> {
         // active activity). An empty unnamed `ws_id` is itself a valid bookend
         // and the entire repair block short-circuits.
         //
-        // Silent-skip case: when `ws_id` is bound to an output that no live
-        // monitor matches (the workspace lives only in the disconnected pool),
-        // no active mint or dormant fixup runs here. The bookend rule is
-        // re-asserted on reconnect via `Monitor::new`'s materializer. Matches
-        // the `set_workspace_name` precedent — no warn!, no eager repair, no
-        // rendering happens against a disconnected output.
+        // Silent-skip case: when `ws_id` has no holding view in any activity — the
+        // fully-disconnected window, where every workspace is parked in
+        // `disconnected_workspace_ids` and no activity holds any view — no active mint or
+        // dormant fixup runs here. The bookend rule is re-asserted on reconnect via
+        // `Monitor::new`'s materializer. Matches the `set_workspace_name` precedent — no
+        // warn!, no eager repair, no rendering happens against a disconnected output.
         let ws_needs_repair = self
             .workspaces
             .get(&ws_id)
             .expect("resolved ws_id must be a live pool key")
             .has_windows_or_name();
         if ws_needs_repair {
-            if let Some(out_id) = out_id {
+            if let Some(out_id) = holding_out_id {
                 let mon_idx_opt = self.monitors.iter().position(|m| m.output_id() == out_id);
                 if let Some(mon_idx) = mon_idx_opt {
                     let active_id = self.activities.active_id();
@@ -7222,7 +7286,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     /// Remove `workspace` from `activity_ref`'s membership set and patch the
-    /// activity's view for the workspace's bound output (if any).
+    /// view actually holding the workspace within that activity (if any).
     ///
     /// Resolution order:
     /// 1. `activity_ref` → `RemoveWorkspaceFromActivityError::ActivityNotFound`.
@@ -7236,8 +7300,10 @@ impl<W: LayoutElement> Layout<W> {
     /// - Otherwise: if the active activity has an in-flight `WorkspaceSwitch::Animation` on any
     ///   monitor AND the target activity is the active one, the animation is snapped on every
     ///   monitor first (matching `switch_activity`'s snap+proceed contract). Then `activity_id` is
-    ///   removed from `ws.activities`. Finally, the activity's view for `ws.output_id()` (if
-    ///   present) is patched: if the view's single entry was `ws_id` it is dropped entirely
+    ///   removed from `ws.activities`. Finally, `activity_id`'s own views are scanned for the entry
+    ///   holding `ws_id` — **not** `ws.output_id()`, which is a reclaim tag that can go stale after
+    ///   a partial disconnect (see [`Self::workspace_holding_output`]'s rustdoc) — and the holding
+    ///   view (if any) is patched: if its single entry was `ws_id` it is dropped entirely
     ///   (mirroring `destroy_workspaces_cross_activity` behavior); otherwise
     ///   `WorkspaceView::remove_at` shifts the active / previous cursors.
     /// - Active-activity special case: when dropping the last view entry on a connected monitor's
@@ -7268,7 +7334,7 @@ impl<W: LayoutElement> Layout<W> {
 
         // Read-only inspection phase — no mutation until every error class
         // has been ruled out ( guard-before-mutate).
-        let (is_member, len_before, out_id) = {
+        let (is_member, len_before) = {
             let ws = self
                 .workspaces
                 .get(&ws_id)
@@ -7276,7 +7342,6 @@ impl<W: LayoutElement> Layout<W> {
             (
                 ws.activities().contains(&activity_id),
                 ws.activities().len(),
-                ws.output_id().cloned(),
             )
         };
 
@@ -7312,29 +7377,61 @@ impl<W: LayoutElement> Layout<W> {
             ws.activities.remove(&activity_id);
         }
 
-        // Patch the activity's view for the workspace's output (if the output is known and the
-        // activity has a view there). Track any view-entry drop on a connected monitor so the
-        // materializer can reinstate the dropped view via ensure_all_activity_views below.
+        // Patch the view actually holding `ws_id` within `activity_id` (if any). Track any
+        // view-entry drop on a connected monitor so the materializer can reinstate the dropped
+        // view via ensure_all_activity_views below.
+        //
+        // Scans `activity_id`'s own views rather than calling the layout-wide
+        // `Self::workspace_holding_output` — narrower and the correct scope here: `is_member`
+        // above guarantees `ws_id` was a member of `activity_id`, and the per-activity bookend
+        // invariant guarantees every activity holds a view for every connected output, so the
+        // workspace's holding view (if it has one at all) must be one of `activity_id`'s own
+        // views, not some other activity's.
         let mut dropped_any_view_entry = false;
-        if let Some(out_id) = out_id.as_ref() {
-            let is_connected = self.monitors.iter().any(|m| &m.output_id() == out_id);
+        let holding = {
+            let activity = self
+                .activities
+                .get(activity_id)
+                .expect("resolve_activity_ref returned a live id");
+            activity
+                .views()
+                .iter()
+                .find_map(|(out_id, view)| view.position_of(ws_id).map(|pos| (out_id.clone(), pos)))
+        };
+        // `is_member` above guarantees `ws_id` was a member of `activity_id`; the per-activity
+        // bookend invariant guarantees every activity holds a view for every connected output.
+        // With any monitor connected, `holding == None` is therefore a membership↔view
+        // coherence bug, not a legitimate outcome — mirrors `workspace_holding_output`'s own
+        // debug-loud discipline.
+        debug_assert!(
+            holding.is_some() || self.monitors.is_empty(),
+            "remove_workspace_from_activity: {ws_id:?} was a member of {activity_id:?} but no \
+             view in that activity holds it while a monitor is connected — membership↔view \
+             coherence bug",
+        );
+        if let Some((out_id, pos)) = holding {
+            // `is_connected` is always true here: every view key is a currently-connected
+            // output's OutputId — dormant activities' views for a disconnecting output are
+            // migrated away by `remove_output`'s partial-disconnect walk, so a `holding` result
+            // always names a connected output.
+            let is_connected = self.monitors.iter().any(|m| m.output_id() == out_id);
             let activity = self
                 .activities
                 .get_mut(activity_id)
                 .expect("resolve_activity_ref returned a live id");
-            if let Some(view) = activity.views_mut().get_mut(out_id) {
-                if let Some(pos) = view.position_of(ws_id) {
-                    if view.len() == 1 {
-                        // Drop the single-entry view outright — mirrors the
-                        // `destroy_workspaces_cross_activity` single-entry retain-drop path.
-                        activity.views_mut().remove(out_id);
-                        if is_connected {
-                            dropped_any_view_entry = true;
-                        }
-                    } else {
-                        view.remove_at(pos);
-                    }
+            let view = activity
+                .views_mut()
+                .get_mut(&out_id)
+                .expect("holding view was found in the shared-borrow scan above");
+            if view.len() == 1 {
+                // Drop the single-entry view outright — mirrors the
+                // `destroy_workspaces_cross_activity` single-entry retain-drop path.
+                activity.views_mut().remove(&out_id);
+                if is_connected {
+                    dropped_any_view_entry = true;
                 }
+            } else {
+                view.remove_at(pos);
             }
         }
 
@@ -7357,8 +7454,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     /// Replace the `activities` set of `workspace` with `activity_refs`,
-    /// patching every affected activity's view for the workspace's bound
-    /// output (if a view exists).
+    /// patching every affected activity's view holding the workspace (if any).
     ///
     /// Resolution order (guard-before-mutate — no mutation happens until
     /// every error class is ruled out):
@@ -7373,10 +7469,13 @@ impl<W: LayoutElement> Layout<W> {
     /// `DoActionError::SetWorkspaceActivities(SetWorkspaceActivitiesError::WorkspaceNotFound)`.
     ///
     /// Semantics:
-    /// - Symmetric diff: `to_remove = old ∖ new`, `to_add = new ∖ old`. Adds insert above the
-    ///   trailing-empty bookend in the target activity's view (or append when the workspace is
-    ///   itself empty-unnamed); removes call the same single-entry drop / `remove_at` patch as
-    ///   [`Self::remove_workspace_from_activity`].
+    /// - Symmetric diff: `to_remove = old ∖ new`, `to_add = new ∖ old`. Removes scan each removed
+    ///   activity's own views for the entry holding the workspace, then apply the same single-entry
+    ///   drop / `remove_at` patch as [`Self::remove_workspace_from_activity`]. Adds insert above
+    ///   the trailing-empty bookend in the target activity's view for the workspace's layout-wide
+    ///   holding output (via [`Self::workspace_holding_output`] — **not** `ws.output_id()`, which
+    ///   can go stale after a partial disconnect), or append when the workspace is itself
+    ///   empty-unnamed.
     /// - No-op when `new == old` — returns without mutating any state.
     /// - If the active activity id is in the symmetric diff AND any monitor has a
     ///   `WorkspaceSwitch::Animation`, the animation is snapped on every monitor before patching (
@@ -7433,14 +7532,16 @@ impl<W: LayoutElement> Layout<W> {
         }
         .ok_or(SetWorkspaceActivitiesError::WorkspaceNotFound)?;
 
-        // Snapshot old set + output binding before any mutation.
-        let (old_set, out_id) = {
-            let ws = self
-                .workspaces
-                .get(&ws_id)
-                .expect("resolved ws_id must be a live pool key");
-            (ws.activities().clone(), ws.output_id().cloned())
-        };
+        // Snapshot the old membership set before any mutation. Resolve the layout-wide holding
+        // output before the split-borrow scope below — `workspace_holding_output` takes `&self`,
+        // which cannot coexist with the `&mut self.workspaces` write that follows.
+        let old_set = self
+            .workspaces
+            .get(&ws_id)
+            .expect("resolved ws_id must be a live pool key")
+            .activities()
+            .clone();
+        let holding_out_id = self.workspace_holding_output(ws_id);
 
         let to_remove: Vec<ActivityId> = old_set.difference(&new_set).copied().collect();
         let to_add: Vec<ActivityId> = new_set.difference(&old_set).copied().collect();
@@ -7472,61 +7573,105 @@ impl<W: LayoutElement> Layout<W> {
             ws.activities = new_set.clone();
         }
 
-        // Patch each affected activity's view for the workspace's bound output. Track any
-        // view-entry drop on a connected monitor so the materializer can reinstate the dropped
-        // view via ensure_all_activity_views below.
+        // Patch each affected activity's view. Track any view-entry drop on a connected monitor
+        // so the materializer can reinstate the dropped view via ensure_all_activity_views below.
         let mut dropped_any_view_entry = false;
-        let mut bookend_mon_idx: Option<usize> = None;
-        if let Some(out_id) = out_id.as_ref() {
-            let mon_idx_opt = self.monitors.iter().position(|m| &m.output_id() == out_id);
-            let is_connected = mon_idx_opt.is_some();
 
-            // Removes first — mirrors `remove_workspace_from_activity`'s single-entry drop vs
-            // `remove_at` branch. The drop-to-zero flag fires for any activity (active or
-            // dormant) hitting the single-entry path on a connected output.
-            for act_id in &to_remove {
+        // Removes first — mirrors `remove_workspace_from_activity`'s single-entry drop vs
+        // `remove_at` branch. Each removed activity is scanned independently for its own holding
+        // view (not the layout-wide `holding_out_id`): under a stale-tag / partial-disconnect
+        // history, different activities in `to_remove` can hold `ws_id` in views keyed by
+        // different outputs. The drop-to-zero flag fires for any activity (active or dormant)
+        // hitting the single-entry path on a connected output.
+        for act_id in &to_remove {
+            let holding = {
                 let activity = self
                     .activities
-                    .get_mut(*act_id)
+                    .get(*act_id)
                     .expect("resolve_activity_ref returned a live id");
-                if let Some(view) = activity.views_mut().get_mut(out_id) {
-                    if let Some(pos) = view.position_of(ws_id) {
-                        if view.len() == 1 {
-                            activity.views_mut().remove(out_id);
-                            if is_connected {
-                                dropped_any_view_entry = true;
-                            }
-                        } else {
-                            view.remove_at(pos);
-                        }
-                    }
+                activity.views().iter().find_map(|(out_id, view)| {
+                    view.position_of(ws_id).map(|pos| (out_id.clone(), pos))
+                })
+            };
+            // `act_id` is drawn from `to_remove = old_set ∖ new_set`, so `ws_id` was a member
+            // of `*act_id` before this call; the per-activity bookend invariant guarantees every
+            // activity holds a view for every connected output. With any monitor connected,
+            // `holding == None` is therefore a membership↔view coherence bug — mirrors
+            // `workspace_holding_output`'s own debug-loud discipline.
+            debug_assert!(
+                holding.is_some() || self.monitors.is_empty(),
+                "set_workspace_activities: {ws_id:?} was a member of {act_id:?} but no view in \
+                 that activity holds it while a monitor is connected — membership↔view \
+                 coherence bug",
+            );
+            let Some((out_id, pos)) = holding else {
+                continue;
+            };
+            // is_connected is always true here: every view key is a currently-connected
+            // output's OutputId, per the connected-keyspace invariant (dormant activities'
+            // views for a disconnecting output are migrated away by `remove_output`'s
+            // partial-disconnect walk).
+            let is_connected = self.monitors.iter().any(|m| m.output_id() == out_id);
+            let activity = self
+                .activities
+                .get_mut(*act_id)
+                .expect("resolve_activity_ref returned a live id");
+            let view = activity
+                .views_mut()
+                .get_mut(&out_id)
+                .expect("holding view was found in the shared-borrow scan above");
+            if view.len() == 1 {
+                activity.views_mut().remove(&out_id);
+                if is_connected {
+                    dropped_any_view_entry = true;
                 }
+            } else {
+                view.remove_at(pos);
             }
+        }
 
-            // Adds: insert into existing views, keeping a trailing-empty
-            // bookend at the tail. Views are not fabricated — a dormant
-            // activity without a view for the output gets its view rebuilt
-            // lazily on the next switch. Defensive `contains` guard mirrors
-            // `add_workspace_to_activity`. No in-flight switch shift is
-            // needed even when the active view is patched: any switch was
-            // snapped above (the active activity is in the diff).
+        // Adds: insert into the target activity's view for the layout-wide holding output,
+        // keeping a trailing-empty bookend at the tail. Every activity holds a view for every
+        // connected output eagerly (the per-activity bookend invariant), so there is no "dormant
+        // activity without a view" case to fabricate around. Widened absence guard mirrors
+        // `add_workspace_to_activity`: absent from every view of the target activity, not just
+        // the holding-output view. No in-flight switch shift is needed even when the active view
+        // is patched: any switch was snapped above (the active activity is in the diff).
+        if let Some(out_id_ref) = holding_out_id.as_ref() {
             for act_id in &to_add {
                 let activity = self
                     .activities
                     .get_mut(*act_id)
                     .expect("resolve_activity_ref returned a live id");
-                if let Some(view) = activity.views_mut().get_mut(out_id) {
-                    if !view.ids().contains(&ws_id) {
+                let already_present = activity
+                    .views()
+                    .values()
+                    .any(|view| view.ids().contains(&ws_id));
+                if !already_present {
+                    if let Some(view) = activity.views_mut().get_mut(out_id_ref) {
                         Self::view_insert_above_trailing_bookend(&self.workspaces, view, ws_id);
+                    } else {
+                        // `holding_out_id` names a currently-connected output, and the
+                        // per-activity bookend invariant guarantees every activity holds a view
+                        // for every connected output — so this activity must have a view keyed
+                        // by `out_id_ref`. Reaching here means that invariant is violated;
+                        // `ws.activities = new_set` above already ran, so silently skipping the
+                        // view patch would mint a membership-without-view incoherence.
+                        debug_assert!(
+                            false,
+                            "set_workspace_activities: activity {act_id:?} has no view for \
+                             {out_id_ref:?}, a connected output — per-activity bookend \
+                             invariant violated (membership↔view coherence bug)",
+                        );
                     }
                 }
             }
-
-            // Stash mon_idx for the post-loop bookend repair. Done here so the
-            // shared borrow `out_id` and the `&mut self.activities` writes
-            // above stay disjoint from the `&mut self` reborrow below.
-            bookend_mon_idx = mon_idx_opt;
         }
+
+        // mon_idx for the post-loop bookend repair, keyed by the holding output.
+        let bookend_mon_idx = holding_out_id
+            .as_ref()
+            .and_then(|out_id| self.monitors.iter().position(|m| &m.output_id() == out_id));
 
         // Per-activity bookend invariant: every (activity, connected output)
         // view must end in an empty unnamed workspace. The Add loop above
@@ -7540,12 +7685,12 @@ impl<W: LayoutElement> Layout<W> {
         // An empty unnamed `ws_id` is itself a valid bookend and the entire
         // repair block short-circuits.
         //
-        // Silent-skip case: when `ws_id` is bound to an output that no live
-        // monitor matches (the workspace lives only in the disconnected pool),
-        // no active mint or dormant fixup runs here. The bookend rule is
-        // re-asserted on reconnect via `Monitor::new`'s materializer. Matches
-        // the `set_workspace_name` precedent — no warn!, no eager repair, no
-        // rendering happens against a disconnected output.
+        // Silent-skip case: when `ws_id` has no holding view in any activity — the
+        // fully-disconnected window, where every workspace is parked in
+        // `disconnected_workspace_ids` and no activity holds any view — no active mint or
+        // dormant fixup runs here. The bookend rule is re-asserted on reconnect via
+        // `Monitor::new`'s materializer. Matches the `set_workspace_name` precedent — no
+        // warn!, no eager repair, no rendering happens against a disconnected output.
         let ws_needs_repair = self
             .workspaces
             .get(&ws_id)
@@ -7553,7 +7698,9 @@ impl<W: LayoutElement> Layout<W> {
             .has_windows_or_name();
         if ws_needs_repair {
             if let Some(mon_idx) = bookend_mon_idx {
-                let out_id = out_id.as_ref().expect("bookend_mon_idx implies out_id");
+                let out_id = holding_out_id
+                    .as_ref()
+                    .expect("bookend_mon_idx is derived from holding_out_id");
                 if to_add.contains(&active_id) {
                     let ewaf = self.monitors[mon_idx]
                         .options
