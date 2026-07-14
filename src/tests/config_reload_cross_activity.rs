@@ -203,3 +203,119 @@ fn reload_config_removing_active_activity_cascades_and_recreates_names() {
         );
     }
 }
+
+#[test]
+fn reload_reassigning_workspace_activity_syncs_views_end_to_end() {
+    // A reload that neither adds nor removes an activity but *reassigns* a named
+    // workspace from the active activity (alpha) to a dormant one (beta) exercises
+    // the membership↔view sweep wired into the reload-add reconcile end-to-end:
+    // the config reset narrows `ws_m`'s membership to {beta}, leaving its view
+    // entry stranded in alpha; the sweep must install it into beta's view and
+    // drop it from alpha's. A regression that skipped the sweep would leave
+    // `ws_m` with beta membership but no beta view (and a stale alpha entry),
+    // tripping `verify_invariants`' pool==union pass.
+    let initial_kdl = "\
+        activity \"alpha\"\n\
+        activity \"beta\"\n\
+        workspace \"ws_m\" { activity \"alpha\"; }\n\
+    ";
+    let initial_config = Config::parse_mem(initial_kdl).expect("initial KDL must parse");
+    let mut f = Fixture::with_config(initial_config);
+
+    f.add_output(1, (1920, 1080));
+    f.niri_state().refresh_and_flush_clients();
+
+    let out1 = f.niri_output(1);
+    let out1_id = OutputId::new(&out1);
+
+    let (alpha_id, beta_id, ws_m_id) = {
+        let layout = &f.niri().layout;
+        let alpha_id = layout
+            .activities()
+            .iter()
+            .find(|a| a.name() == "alpha")
+            .expect("alpha config-declared")
+            .id();
+        let beta_id = layout
+            .activities()
+            .iter()
+            .find(|a| a.name() == "beta")
+            .expect("beta config-declared")
+            .id();
+        let ws_m_id = layout
+            .workspaces_all()
+            .find(|(_, ws)| ws.name() == Some(&"ws_m".to_owned()))
+            .expect("ws_m in the pool")
+            .1
+            .id();
+        (alpha_id, beta_id, ws_m_id)
+    };
+
+    // Precondition: alpha active, ws_m in alpha's view and NOT beta's.
+    {
+        let layout = &f.niri().layout;
+        assert_eq!(layout.active_activity_id(), alpha_id, "alpha seed-active");
+        assert!(
+            layout
+                .activities()
+                .get(alpha_id)
+                .expect("alpha live")
+                .views()
+                .get(&out1_id)
+                .expect("alpha view")
+                .ids()
+                .contains(&ws_m_id),
+            "precondition: ws_m sits in alpha's view",
+        );
+    }
+
+    // Reload: reassign ws_m to beta; both activities stay declared.
+    let reload_kdl = "\
+        activity \"alpha\"\n\
+        activity \"beta\"\n\
+        workspace \"ws_m\" { activity \"beta\"; }\n\
+    ";
+    let reload_config = Config::parse_mem(reload_kdl).expect("reload KDL must parse");
+    f.reload_config(reload_config);
+    f.niri_state().refresh_and_flush_clients();
+
+    let layout = &f.niri().layout;
+
+    // Membership reset to {beta}.
+    assert_eq!(
+        layout
+            .workspaces_all()
+            .find(|(_, ws)| ws.id() == ws_m_id)
+            .expect("ws_m survives")
+            .1
+            .activities(),
+        &std::collections::HashSet::from([beta_id]),
+        "config reset must narrow ws_m's membership to {{beta}}",
+    );
+
+    // Sweep installed ws_m into beta's view and dropped it from alpha's.
+    assert!(
+        layout
+            .activities()
+            .get(beta_id)
+            .expect("beta live")
+            .views()
+            .get(&out1_id)
+            .expect("beta view")
+            .ids()
+            .contains(&ws_m_id),
+        "sweep must install ws_m into beta's view",
+    );
+    assert!(
+        !layout
+            .activities()
+            .get(alpha_id)
+            .expect("alpha live")
+            .views()
+            .get(&out1_id)
+            .expect("alpha view")
+            .ids()
+            .contains(&ws_m_id),
+        "sweep must drop the stale ws_m entry from alpha's view",
+    );
+}

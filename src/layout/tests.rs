@@ -11701,6 +11701,13 @@ fn destroy_workspaces_cross_activity_patches_other_activity_views() {
     let seed_activity = layout.active_activity_id();
     let mon_output = layout.monitors[0].output.clone();
 
+    // Mint Beta while the layout is still valid — `create_activity` verifies
+    // invariants at its tail, so it must run before the deliberately-invalid
+    // middle-empty shape is seeded below. Beta's view is overridden further down.
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
     // Shape: `[W1 (active, pos 0), doomed_empty, E_bottom]` — doomed at a non-terminal
     // middle position so the retain closure takes the remove_at branch.
     let doomed_id = {
@@ -11725,13 +11732,9 @@ fn destroy_workspaces_cross_activity_patches_other_activity_views() {
     assert_eq!(layout.active_view(&mon_out).active_position(), 0);
     assert_eq!(layout.active_view(&mon_out).ids()[1], doomed_id);
 
-    // Create a second activity (Beta) and seed its view so Beta's view also
-    // contains `doomed_id` alongside a spare id. Beta's view must have at
-    // least two entries so the retain closure takes the `remove_at` branch
-    // (not the single-entry drop branch).
-    let beta_id = layout
-        .create_activity("Beta".to_owned())
-        .expect("create beta");
+    // Seed Beta's view so it also contains `doomed_id` alongside a spare id.
+    // Beta's view must have at least two entries so the retain closure takes the
+    // `remove_at` branch (not the single-entry drop branch).
     let spare_id = {
         // Add a spare workspace to the pool under Beta's membership.
         let spare = Workspace::<TestWindow>::new_no_outputs(
@@ -12114,6 +12117,13 @@ fn destroy_workspaces_cross_activity_mixed_batch_drops_only_safe_id() {
     let mon_output = layout.monitors[0].output.clone();
     let seed_activity = layout.active_activity_id();
 
+    // Mint Beta while the layout is still valid — `create_activity` verifies
+    // invariants at its tail, so it must run before the deliberately-invalid
+    // middle-empty shape is seeded below.
+    let beta_id = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
     // Two spares, both seeded into Alpha's view between W1 and E_bottom:
     // `[W1 (active, pos 0), shared, doomed, E_bottom]`. `shared` is named so
     // that `has_windows_or_name()` returns `true`, clearing the
@@ -12163,9 +12173,6 @@ fn destroy_workspaces_cross_activity_mixed_batch_drops_only_safe_id() {
     // `doomed_id` exclusive to Alpha so the guard clears it. Beta does not
     // need a view entry on this output — cross-activity view patching is
     // covered by `destroy_workspaces_cross_activity_patches_other_activity_views`.
-    let beta_id = layout
-        .create_activity("Beta".to_owned())
-        .expect("create beta");
     layout
         .workspaces
         .get_mut(&shared_id)
@@ -13936,27 +13943,44 @@ fn reload_adds_new_config_activity_preserves_views_and_assignments_on_promotion(
         "precondition: Work has a populated views map from the switch",
     );
 
-    // Stamp a workspace so its `activities` set includes `work_id`. The
-    // workspace is unnamed (dynamic), so the reload's workspace-reset step
-    // will leave it alone.
-    let dyn_ws_id: WorkspaceId = *layout
-        .workspaces
-        .iter()
-        .find(|(_, ws)| ws.name().is_none())
-        .expect("at least one dynamic workspace present")
-        .0;
-    layout
-        .workspaces
-        .get_mut(&dyn_ws_id)
-        .unwrap()
+    // Pick a dynamic (unnamed) workspace that already lives in Work's view and
+    // carries `work_id`. Selection is deterministic (Work's view is ordered)
+    // rather than HashMap-iteration order, and the in-view choice keeps the
+    // workspace's membership coherent — the reload sweep only heals
+    // membership↔view *divergences*, so an already-in-view member is left
+    // untouched, keeping the "promotion must not touch views" assertion below a
+    // meaningful pin rather than one the sweep would legitimately break.
+    let work_out = layout.monitors[0].output_id();
+    let dyn_ws_id: WorkspaceId = layout
         .activities
-        .insert(work_id);
+        .get(work_id)
+        .expect("work must exist")
+        .views()
+        .get(&work_out)
+        .expect("work holds a view on the connected monitor")
+        .ids()
+        .iter()
+        .copied()
+        .find(|id| {
+            layout
+                .workspaces
+                .get(id)
+                .is_some_and(|ws| ws.name().is_none())
+        })
+        .expect("Work's view holds an unnamed bookend");
+    // The workspace is unnamed (dynamic), so the reload's workspace-reset step
+    // (which only touches config-declared named workspaces) must leave its
+    // `activities` set alone.
     let dyn_set_before = layout
         .workspaces
         .get(&dyn_ws_id)
         .unwrap()
         .activities()
         .clone();
+    assert!(
+        dyn_set_before.contains(&work_id),
+        "precondition: the in-view dynamic workspace carries work_id",
+    );
 
     // Simulate the State::reload_config prewalk: clear the name off any
     // workspace whose name is absent from config_workspaces. "ws1" is not in
@@ -14479,6 +14503,616 @@ fn reload_adds_new_config_activity_materializes_bookend_for_dormant_survivor_on_
         "existing activity must still hold its view after reload_add",
     );
 
+    layout.verify_invariants();
+}
+
+// --- Membership↔view bidirectional sweep (`reconcile_views_with_membership`) ---
+//
+// These tests exercise the repair sweep that installs a view entry for every
+// (activity, workspace) membership lacking one and removes every view entry whose
+// workspace no longer carries that activity, plus the shared all-empty exclusive
+// EWAF len-2 collapse helper.
+
+#[test]
+fn reconcile_installs_view_entry_for_membership_without_view() {
+    // A named workspace carries membership in a dormant activity but is absent
+    // from every one of that activity's views (the incoherence the reload and
+    // creation paths can transiently produce). The sweep must install a view
+    // entry at the workspace's holding output.
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ]);
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name().is_some())
+        .expect("named workspace present")
+        .id();
+    // Inject beta membership WITHOUT touching beta's view — exactly the
+    // membership-without-view divergence.
+    layout
+        .workspaces
+        .get_mut(&ws_id)
+        .expect("named ws in pool")
+        .activities
+        .insert(beta);
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .and_then(|v| v.position_of(ws_id))
+            .is_none(),
+        "precondition: beta's view does not yet hold the workspace",
+    );
+
+    layout.reconcile_views_with_membership();
+
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .position_of(ws_id)
+            .is_some(),
+        "sweep must install the membership-without-view workspace into beta's view",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_removes_view_entry_without_membership() {
+    // A dormant activity's multi-entry view holds a named workspace whose
+    // `activities` set no longer names that activity. The sweep must drop the
+    // stale entry via `remove_at` (multi-entry view, not a whole-view drop).
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // Two named workspaces shared into beta so beta's view is multi-entry.
+    let mk_named = |layout: &mut Layout<TestWindow>, name: usize| {
+        Op::AddNamedWorkspace {
+            ws_name: name,
+            output_name: None,
+            layout_config: None,
+        }
+        .apply(layout);
+        layout
+            .workspaces
+            .values()
+            .find(|ws| ws.name() == Some(&format!("ws{name}")))
+            .expect("just-added named workspace present")
+            .id()
+    };
+    let ws1 = mk_named(&mut layout, 1);
+    let ws2 = mk_named(&mut layout, 2);
+    for id in [ws1, ws2] {
+        layout
+            .set_workspace_activities(
+                Some(WorkspaceReference::Id(id.get())),
+                &[
+                    ActivityReferenceArg::Id(alpha.get()),
+                    ActivityReferenceArg::Id(beta.get()),
+                ],
+            )
+            .expect("share into beta");
+    }
+    layout.verify_invariants();
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .position_of(ws1)
+            .is_some(),
+        "precondition: beta's view holds ws1",
+    );
+
+    // Narrow ws1 back to alpha WITHOUT patching beta's view.
+    layout
+        .workspaces
+        .get_mut(&ws1)
+        .expect("ws1 in pool")
+        .activities = HashSet::from([alpha]);
+
+    layout.reconcile_views_with_membership();
+
+    let beta_view = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view")
+        .clone();
+    assert!(
+        beta_view.position_of(ws1).is_none(),
+        "sweep must drop the stale ws1 entry from beta's view",
+    );
+    assert!(
+        beta_view.position_of(ws2).is_some(),
+        "ws2 (still a beta member) must remain in beta's view",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn reload_add_move_between_activities_lands_on_holding_output() {
+    // Install-before-remove ordering pin. A named workspace moved wholesale from
+    // activity L to activity A (membership now {A}) but whose view entry still
+    // sits in L must resolve its holding output through L's surviving view when
+    // the install runs, THEN lose its L entry. Reversing the order would strand
+    // the workspace in no view before the resolver runs — minting the very
+    // membership-without-view incoherence the sweep exists to close.
+    //
+    // Counterfactual (sabotage-verified): swapping the install/remove loops in
+    // `reconcile_views_with_membership` makes this test fail — the removal strips
+    // L's entry first, `workspace_holding_output` then returns None (debug-loud),
+    // and A never receives the install.
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ]);
+    let mon_out = layout.monitors[0].output_id();
+    let l_id = layout.create_activity("L".to_owned()).expect("create L");
+    let a_id = layout.create_activity("A".to_owned()).expect("create A");
+
+    let ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name().is_some())
+        .expect("named workspace present")
+        .id();
+    // Move the named workspace wholesale into L (removes the seed-active owner,
+    // installs into L's dormant view at the holding output).
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[ActivityReferenceArg::Id(l_id.get())],
+        )
+        .expect("move into L");
+    assert!(
+        layout
+            .activities
+            .get(l_id)
+            .expect("L live")
+            .views()
+            .get(&mon_out)
+            .expect("L view")
+            .position_of(ws_id)
+            .is_some(),
+        "precondition: L's view holds the workspace",
+    );
+
+    // Retag membership to A only, leaving the view entry stranded in L.
+    layout
+        .workspaces
+        .get_mut(&ws_id)
+        .expect("ws in pool")
+        .activities = HashSet::from([a_id]);
+    assert!(
+        layout
+            .activities
+            .get(a_id)
+            .expect("A live")
+            .views()
+            .get(&mon_out)
+            .expect("A view")
+            .position_of(ws_id)
+            .is_none(),
+        "precondition: A's view does not yet hold the workspace",
+    );
+
+    layout.reconcile_views_with_membership();
+
+    assert!(
+        layout
+            .activities
+            .get(a_id)
+            .expect("A live")
+            .views()
+            .get(&mon_out)
+            .expect("A view")
+            .position_of(ws_id)
+            .is_some(),
+        "install-before-remove: A's view must receive the workspace",
+    );
+    assert!(
+        layout
+            .activities
+            .get(l_id)
+            .expect("L live")
+            .views()
+            .get(&mon_out)
+            .expect("L view")
+            .position_of(ws_id)
+            .is_none(),
+        "the stale L entry must be removed after the install resolved through it",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn reconcile_noop_when_no_monitors() {
+    // With every output disconnected, views are empty and workspaces are parked
+    // in `disconnected_workspace_ids`. The sweep must early-return without panic
+    // and without disturbing the parked set.
+    let mut layout = check_ops([Op::AddOutput(1), Op::RemoveOutput(1)]);
+    assert!(layout.monitors.is_empty(), "precondition: no monitors");
+    let parked_before = layout.disconnected_workspace_ids.clone();
+
+    layout.reconcile_views_with_membership();
+
+    assert_eq!(
+        layout.disconnected_workspace_ids, parked_before,
+        "no-monitor sweep must leave the parked set untouched",
+    );
+}
+
+#[test]
+fn reconcile_collapses_empty_exclusive_ewaf_len2_after_removal() {
+    // Under EWAF a dormant view holding a single named workspace has the shape
+    // [leading-bookend, ws, trailing-bookend]. Removing the workspace (via
+    // membership retag + sweep) yields [leading, trailing] — an all-empty
+    // exclusive len-2 view that `assert_view_bookends` rejects. The sweep's
+    // collapse must cull the exclusive second bookend back to a single bookend.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut layout = check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddNamedWorkspace {
+                ws_name: 1,
+                output_name: None,
+                layout_config: None,
+            },
+        ],
+    );
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name().is_some())
+        .expect("named workspace present")
+        .id();
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("share into beta");
+    layout.verify_invariants();
+    let beta_len_before = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view")
+        .len();
+    assert!(
+        beta_len_before >= 2
+            && layout
+                .activities
+                .get(beta)
+                .unwrap()
+                .views()
+                .get(&mon_out)
+                .unwrap()
+                .position_of(ws_id)
+                .is_some(),
+        "precondition: beta's dormant EWAF view holds the named workspace amid bookends",
+    );
+
+    // Retag ws back to alpha, leaving beta's view holding the stale entry.
+    layout
+        .workspaces
+        .get_mut(&ws_id)
+        .expect("ws in pool")
+        .activities = HashSet::from([alpha]);
+
+    layout.reconcile_views_with_membership();
+
+    assert_eq!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .len(),
+        1,
+        "collapse must reduce the all-empty exclusive EWAF len-2 view to a single bookend",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn collapse_empty_exclusive_ewaf_len2_view_shared_second_is_noop() {
+    // A len-2 view whose second entry is SHARED across activities is the legal
+    // minimal EWAF shape (`assert_view_bookends`' "unless second shared" clause).
+    // The collapse must leave it alone.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut layout = check_ops_with_options(options, [Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    // Forge beta's view into the legal minimal EWAF len-2 shape [lead, shared]:
+    // `lead` is beta's own empty bookend; `shared` is alpha's trailing empty
+    // bookend, tagged into beta as well so it is not beta-exclusive.
+    let lead = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view")
+        .ids()[0];
+    let shared = layout
+        .active_view(&mon_out)
+        .ids()
+        .last()
+        .copied()
+        .expect("alpha view has a trailing bookend");
+    layout
+        .workspaces
+        .get_mut(&shared)
+        .expect("shared bookend in pool")
+        .activities
+        .insert(beta);
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![lead, shared], 0),
+    );
+
+    layout.collapse_empty_exclusive_ewaf_len2_view(beta, &mon_out);
+
+    let beta_view = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view");
+    assert_eq!(
+        (beta_view.len(), beta_view.ids()[0], beta_view.ids()[1]),
+        (2, lead, shared),
+        "collapse must not touch a len-2 view whose second entry is shared",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn collapse_empty_exclusive_ewaf_len2_view_non_ewaf_is_noop() {
+    // The collapse is EWAF-gated: without `empty_workspace_above_first` a len-2
+    // dormant view is not the shape the collapse normalizes, so it early-returns.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let len_before = layout
+        .activities
+        .get(beta)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view")
+        .len();
+
+    layout.collapse_empty_exclusive_ewaf_len2_view(beta, &mon_out);
+
+    assert_eq!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .len(),
+        len_before,
+        "non-EWAF layout: collapse must be a no-op",
+    );
+}
+
+#[test]
+fn create_activity_installs_sticky_workspace_into_new_activity_view() {
+    // `create_activity` unions the new id into every sticky workspace's
+    // membership, then materializes + sweeps. A sticky named workspace must
+    // therefore appear in the newly-created activity's view.
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ]);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+
+    let ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name().is_some())
+        .expect("named workspace present")
+        .id();
+    {
+        let ws = layout.workspaces.get_mut(&ws_id).expect("named ws in pool");
+        ws.is_sticky = true;
+        ws.activities = HashSet::from([alpha]);
+    }
+
+    let work = layout.create_activity("Work".to_owned()).expect("create");
+
+    assert!(
+        layout
+            .workspaces
+            .get(&ws_id)
+            .unwrap()
+            .activities()
+            .contains(&work),
+        "sticky membership must expand to include the new activity",
+    );
+    assert!(
+        layout
+            .activities
+            .get(work)
+            .expect("work live")
+            .views()
+            .get(&mon_out)
+            .expect("work view")
+            .position_of(ws_id)
+            .is_some(),
+        "the sticky workspace must be present in the new activity's view",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn ensure_named_workspace_dormant_only_member_leaves_active_view_untouched() {
+    // A config-declared named workspace whose activities set names only a dormant
+    // activity must install into that dormant activity's view and NEVER appear in
+    // the active activity's view.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+
+    let active_ids_before: Vec<WorkspaceId> = layout.active_view(&mon_out).ids().to_vec();
+
+    let ws_config = WorkspaceConfig {
+        name: WorkspaceName("dorm".to_owned()),
+        open_on_output: None,
+        layout: None,
+        activities: vec!["Beta".to_owned()],
+        sticky: None,
+    };
+    layout.ensure_named_workspace(&ws_config);
+
+    let new_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"dorm".to_owned()))
+        .expect("named workspace created")
+        .id();
+    assert_eq!(
+        layout.workspaces.get(&new_id).unwrap().activities(),
+        &HashSet::from([beta]),
+        "workspace membership must be exactly the declared dormant activity",
+    );
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .position_of(new_id)
+            .is_some(),
+        "the dormant member's view must hold the new workspace",
+    );
+    assert!(
+        !layout.active_view(&mon_out).ids().contains(&new_id),
+        "the active view must never receive a dormant-only workspace",
+    );
+    // The active view's existing entries are undisturbed.
+    assert_eq!(
+        &layout.active_view(&mon_out).ids()[..active_ids_before.len()],
+        &active_ids_before[..],
+        "active view's prior entries stay intact",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn ensure_named_workspace_multi_member_installs_into_dormant_member_view() {
+    // A named workspace declared for {active, dormant} must land in the active
+    // view (top-of-strip) AND in every dormant member's view.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let beta = layout.create_activity("Beta".to_owned()).expect("create");
+    let alpha_name = layout
+        .activities
+        .get(alpha)
+        .expect("alpha live")
+        .name()
+        .to_owned();
+
+    let ws_config = WorkspaceConfig {
+        name: WorkspaceName("both".to_owned()),
+        open_on_output: None,
+        layout: None,
+        activities: vec![alpha_name, "Beta".to_owned()],
+        sticky: None,
+    };
+    layout.ensure_named_workspace(&ws_config);
+
+    let new_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name() == Some(&"both".to_owned()))
+        .expect("named workspace created")
+        .id();
+    assert!(
+        layout.active_view(&mon_out).ids().contains(&new_id),
+        "the active view must receive the workspace declared for the active activity",
+    );
+    assert!(
+        layout
+            .activities
+            .get(beta)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .position_of(new_id)
+            .is_some(),
+        "the dormant member's view must also receive the workspace",
+    );
     layout.verify_invariants();
 }
 
