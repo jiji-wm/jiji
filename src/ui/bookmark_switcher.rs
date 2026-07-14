@@ -81,15 +81,12 @@ use std::mem;
 
 use jiji_config::{Key, Modifiers, Trigger};
 use ordered_float::NotNan;
-use pangocairo::cairo::{self, ImageSurface};
-use pangocairo::pango::FontDescription;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
 use smithay::backend::renderer::element::Kind;
 use smithay::desktop::Window;
 use smithay::input::keyboard::Keysym;
 use smithay::output::Output;
-use smithay::reexports::gbm::Format as Fourcc;
-use smithay::utils::{Logical, Point, Transform};
+use smithay::utils::{Logical, Point};
 
 use crate::ipc::server::role_title_to_tag_and_clean;
 use crate::layout::{Layout, LayoutElement};
@@ -97,8 +94,9 @@ use crate::niri_render_elements;
 use crate::render_helpers::memory::MemoryBuffer;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::text::{rasterize, TextBoxStyle};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
-use crate::utils::{output_size, to_physical_precise_round, with_toplevel_role};
+use crate::utils::{output_size, with_toplevel_role};
 use crate::window::Mapped;
 
 const PADDING: i32 = 8;
@@ -1597,59 +1595,17 @@ fn render_boxed(
 ) -> anyhow::Result<MemoryBuffer> {
     let _span = tracy_client::span!("bookmark_switcher::render_boxed");
 
-    let padding: i32 = to_physical_precise_round(scale, PADDING);
-
-    let mut font = FontDescription::from_string(FONT);
-    font.set_absolute_size(to_physical_precise_round(scale, font.size()));
-
-    let surface = ImageSurface::create(cairo::Format::ARgb32, 0, 0)?;
-    let cr = cairo::Context::new(&surface)?;
-    let layout = pangocairo::functions::create_layout(&cr);
-    layout.context().set_round_glyph_positions(false);
-    layout.set_font_description(Some(&font));
-    set_content(&layout);
-
-    let (mut width, mut height) = layout.pixel_size();
-    width += padding * 2;
-    height += padding * 2;
-
-    let surface = ImageSurface::create(cairo::Format::ARgb32, width, height)?;
-    let cr = cairo::Context::new(&surface)?;
-    cr.set_source_rgb(0.1, 0.1, 0.1);
-    cr.paint()?;
-
-    cr.move_to(padding.into(), padding.into());
-    let layout = pangocairo::functions::create_layout(&cr);
-    layout.context().set_round_glyph_positions(false);
-    layout.set_font_description(Some(&font));
-    set_content(&layout);
-
-    cr.set_source_rgb(1., 1., 1.);
-    pangocairo::functions::show_layout(&cr, &layout);
-
-    cr.move_to(0., 0.);
-    cr.line_to(width.into(), 0.);
-    cr.line_to(width.into(), height.into());
-    cr.line_to(0., height.into());
-    cr.line_to(0., 0.);
-    cr.set_source_rgb(0.9, 0.6, 0.1);
-    // Keep the border width even to avoid blurry edges.
-    cr.set_line_width((f64::from(BORDER) / 2. * scale).round() * 2.);
-    cr.stroke()?;
-    drop(cr);
-
-    let data = surface
-        .take_data()
-        .expect("surface data is owned and unique");
-    let buffer = MemoryBuffer::new(
-        data.to_vec(),
-        Fourcc::Argb8888,
-        (width, height),
+    rasterize(
         scale,
-        Transform::Normal,
-    );
-
-    Ok(buffer)
+        FONT,
+        Some(TextBoxStyle {
+            padding: PADDING,
+            border_width: BORDER,
+            border_color: [0.9, 0.6, 0.1],
+        }),
+        None,
+        set_content,
+    )
 }
 
 /// Rasterises pango **markup** into the shared box. Callers must pass trusted

@@ -1,18 +1,13 @@
 use std::cell::RefCell;
-use std::cmp::min;
 use std::collections::HashMap;
 use std::mem;
 use std::rc::Rc;
 use std::time::Duration;
 
-use anyhow::ensure;
 use jiji_config::{
     Action, Bind, Color, Config, CornerRadius, GradientInterpolation, Key, Modifiers, MruDirection,
     MruFilter, MruScope, Trigger,
 };
-use pango::FontDescription;
-use pangocairo::cairo::{self, ImageSurface};
-use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::utils::{
     Relocate, RelocateRenderElement, RescaleRenderElement,
 };
@@ -21,7 +16,7 @@ use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::Color32F;
 use smithay::input::keyboard::Keysym;
 use smithay::output::Output;
-use smithay::utils::{Logical, Point, Rectangle, Scale, Size, Transform};
+use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
 
 use crate::animation::{Animation, Clock};
 use crate::layout::focus_ring::{FocusRing, FocusRingRenderElement};
@@ -35,11 +30,11 @@ use crate::render_helpers::offscreen::{OffscreenBuffer, OffscreenRenderElement};
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
+use crate::render_helpers::text::{rasterize, TextBoxStyle};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::render_helpers::RenderCtx;
 use crate::utils::{
-    baba_is_float_offset, output_size, round_logical_in_physical, to_physical_precise_round,
-    with_toplevel_role,
+    baba_is_float_offset, output_size, round_logical_in_physical, with_toplevel_role,
 };
 use crate::window::mapped::MappedId;
 use crate::window::Mapped;
@@ -1661,45 +1656,21 @@ fn generate_title_texture(
 ) -> anyhow::Result<MruTexture> {
     let _span = tracy_client::span!("mru::generate_title_texture");
 
-    let mut font = FontDescription::from_string(FONT);
-    font.set_absolute_size(to_physical_precise_round(scale, font.size()));
-
-    let surface = ImageSurface::create(cairo::Format::ARgb32, 0, 0)?;
-    let cr = cairo::Context::new(&surface)?;
-    let layout = pangocairo::functions::create_layout(&cr);
-    layout.context().set_round_glyph_positions(false);
-    // On Window CSD, line breaks are either stripped or replaced with the linebreak symbol anyway.
-    // No use rendering it as multiple lines.
-    layout.set_single_paragraph_mode(true);
-    layout.set_font_description(Some(&font));
-    layout.set_text(title);
-
-    let (width, height) = layout.pixel_size();
-    ensure!(width > 0 && height > 0);
-
-    // Guard against overly long window titles.
-    let width = min(width, 16383);
-    let height = min(height, 16383);
-
-    let surface = ImageSurface::create(cairo::Format::ARgb32, width, height)?;
-    let cr = cairo::Context::new(&surface)?;
-    cr.set_source_rgb(1., 1., 1.);
-    pangocairo::functions::show_layout(&cr, &layout);
-
-    drop(cr);
-    let data = surface.take_data().unwrap();
-    let buffer = TextureBuffer::from_memory(
-        renderer,
-        &data,
-        Fourcc::Argb8888,
-        (width, height),
-        false,
+    let buffer = rasterize(
         scale,
-        Transform::Normal,
-        Vec::new(),
+        FONT,
+        None,
+        // Guard against overly long window titles.
+        Some(16383),
+        |layout| {
+            // On Window CSD, line breaks are either stripped or replaced with the linebreak
+            // symbol anyway. No use rendering it as multiple lines.
+            layout.set_single_paragraph_mode(true);
+            layout.set_text(title);
+        },
     )?;
 
-    Ok(buffer)
+    Ok(TextureBuffer::from_memory_buffer(renderer, &buffer)?)
 }
 
 impl ScopePanel {
@@ -1765,63 +1736,19 @@ fn generate_scope_panels(
 fn render_panel(renderer: &mut GlesRenderer, scale: f64, text: &str) -> anyhow::Result<MruTexture> {
     let _span = tracy_client::span!("mru::render_panel");
 
-    let mut font = FontDescription::from_string(FONT);
-    font.set_absolute_size(to_physical_precise_round(scale, font.size()));
-
-    let padding: i32 = to_physical_precise_round(scale, PANEL_PADDING);
-    // Keep the border width even to avoid blurry edges.
-    // Render to a dummy surface to determine the size.
-    let surface = ImageSurface::create(cairo::Format::ARgb32, 0, 0)?;
-    let cr = cairo::Context::new(&surface)?;
-    let layout = pangocairo::functions::create_layout(&cr);
-    layout.context().set_round_glyph_positions(false);
-    layout.set_font_description(Some(&font));
-    layout.set_markup(text);
-    let (mut width, mut height) = layout.pixel_size();
-
-    width += padding * 2;
-    height += padding * 2;
-
-    let surface = ImageSurface::create(cairo::Format::ARgb32, width, height)?;
-    let cr = cairo::Context::new(&surface)?;
-    cr.set_source_rgb(0.1, 0.1, 0.1);
-    cr.paint()?;
-
-    let padding = f64::from(padding);
-
-    cr.move_to(padding, padding);
-
-    let layout = pangocairo::functions::create_layout(&cr);
-    layout.context().set_round_glyph_positions(false);
-    layout.set_font_description(Some(&font));
-    layout.set_markup(text);
-
-    cr.set_source_rgb(1., 1., 1.);
-    pangocairo::functions::show_layout(&cr, &layout);
-
-    cr.move_to(0., 0.);
-    cr.line_to(width.into(), 0.);
-    cr.line_to(width.into(), height.into());
-    cr.line_to(0., height.into());
-    cr.line_to(0., 0.);
-    cr.set_source_rgb(0.5, 0.5, 0.5);
-    cr.set_line_width((f64::from(PANEL_BORDER) / 2. * scale).round() * 2.);
-    cr.stroke()?;
-
-    drop(cr);
-    let data = surface.take_data().unwrap();
-    let buffer = TextureBuffer::from_memory(
-        renderer,
-        &data,
-        Fourcc::Argb8888,
-        (width, height),
-        false,
+    let buffer = rasterize(
         scale,
-        Transform::Normal,
-        Vec::new(),
+        FONT,
+        Some(TextBoxStyle {
+            padding: PANEL_PADDING,
+            border_width: PANEL_BORDER,
+            border_color: [0.5, 0.5, 0.5],
+        }),
+        None,
+        |layout| layout.set_markup(text),
     )?;
 
-    Ok(buffer)
+    Ok(TextureBuffer::from_memory_buffer(renderer, &buffer)?)
 }
 
 /// Returns key bindings available when the MRU UI is open.

@@ -5,13 +5,11 @@ use std::sync::Mutex;
 
 use jiji_config::Config;
 use ordered_float::NotNan;
-use pangocairo::cairo::{self, ImageSurface};
-use pangocairo::pango::{Alignment, FontDescription};
+use pangocairo::pango::Alignment;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
 use smithay::backend::renderer::element::Kind;
 use smithay::output::Output;
-use smithay::reexports::gbm::Format as Fourcc;
-use smithay::utils::{Point, Transform};
+use smithay::utils::Point;
 
 use crate::animation::{Animation, Clock};
 use crate::niri_render_elements;
@@ -19,8 +17,9 @@ use crate::render_helpers::memory::MemoryBuffer;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
+use crate::render_helpers::text::{rasterize, TextBoxStyle};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
-use crate::utils::{output_size, to_physical_precise_round};
+use crate::utils::output_size;
 
 const KEY_NAME: &str = "Enter";
 const PADDING: i32 = 16;
@@ -320,59 +319,20 @@ fn render(kind: ConfirmKind, scale: f64) -> anyhow::Result<MemoryBuffer> {
 
     let markup = text(kind, true);
 
-    let padding: i32 = to_physical_precise_round(scale, PADDING);
-
-    let mut font = FontDescription::from_string(FONT);
-    font.set_absolute_size(to_physical_precise_round(scale, font.size()));
-
-    let surface = ImageSurface::create(cairo::Format::ARgb32, 0, 0)?;
-    let cr = cairo::Context::new(&surface)?;
-    let layout = pangocairo::functions::create_layout(&cr);
-    layout.context().set_round_glyph_positions(false);
-    layout.set_font_description(Some(&font));
-    layout.set_alignment(Alignment::Center);
-    layout.set_markup(&markup);
-
-    let (mut width, mut height) = layout.pixel_size();
-    width += padding * 2;
-    height += padding * 2;
-
-    let surface = ImageSurface::create(cairo::Format::ARgb32, width, height)?;
-    let cr = cairo::Context::new(&surface)?;
-    cr.set_source_rgb(0.1, 0.1, 0.1);
-    cr.paint()?;
-
-    cr.move_to(padding.into(), padding.into());
-    let layout = pangocairo::functions::create_layout(&cr);
-    layout.context().set_round_glyph_positions(false);
-    layout.set_font_description(Some(&font));
-    layout.set_alignment(Alignment::Center);
-    layout.set_markup(&markup);
-
-    cr.set_source_rgb(1., 1., 1.);
-    pangocairo::functions::show_layout(&cr, &layout);
-
-    cr.move_to(0., 0.);
-    cr.line_to(width.into(), 0.);
-    cr.line_to(width.into(), height.into());
-    cr.line_to(0., height.into());
-    cr.line_to(0., 0.);
-    cr.set_source_rgb(1., 0.3, 0.3);
-    // Keep the border width even to avoid blurry edges.
-    cr.set_line_width((f64::from(BORDER) / 2. * scale).round() * 2.);
-    cr.stroke()?;
-    drop(cr);
-
-    let data = surface.take_data().unwrap();
-    let buffer = MemoryBuffer::new(
-        data.to_vec(),
-        Fourcc::Argb8888,
-        (width, height),
+    rasterize(
         scale,
-        Transform::Normal,
-    );
-
-    Ok(buffer)
+        FONT,
+        Some(TextBoxStyle {
+            padding: PADDING,
+            border_width: BORDER,
+            border_color: [1., 0.3, 0.3],
+        }),
+        None,
+        |layout| {
+            layout.set_alignment(Alignment::Center);
+            layout.set_markup(&markup);
+        },
+    )
 }
 
 fn text(kind: ConfirmKind, markup: bool) -> String {
