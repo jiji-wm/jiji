@@ -579,6 +579,78 @@ pub enum KeyboardFocus {
     BookmarkSwitcher,
 }
 
+/// A modal overlay that can exclusively own keyboard focus and/or block
+/// pointer or workspace interaction with the layout underneath it.
+///
+/// # Priority order
+///
+/// Highest to lowest: [`ModalKind::ConfirmDialog`], then
+/// [`ModalKind::LockScreen`], then [`ModalKind::ScreenshotUi`], then
+/// [`ModalKind::Mru`], then [`ModalKind::BookmarkSwitcher`]. This is the
+/// order `update_keyboard_focus` has always resolved focus in; it is pinned
+/// as `ModalKind::PRIORITY` and exercised by
+/// `active_modal_prefers_highest_priority_open_modal`.
+///
+/// # Per-gate membership
+///
+/// | Gate | Members |
+/// | --- | --- |
+/// | `update_keyboard_focus` focus chain | all five, in priority order |
+/// | `window_under` (via `Niri::modal_blocks_pointer_activation`) | ConfirmDialog, LockScreen, ScreenshotUi, Mru |
+/// | `workspace_under` | ConfirmDialog, LockScreen, ScreenshotUi |
+/// | `refresh_pointer_contents` | ConfirmDialog, LockScreen, ScreenshotUi |
+/// | `contents_under` | ConfirmDialog, LockScreen, ScreenshotUi, Mru (BookmarkSwitcher and no-modal both fall through to the layout) |
+/// | `Niri::modal_overlay_blocks_bookmark_overlay` | ConfirmDialog, LockScreen, ScreenshotUi, Mru |
+///
+/// `BookmarkSwitcher` is deliberately absent from the `window_under` row: a
+/// pointer press activates the window underneath *and* dismisses the
+/// switcher via `should_hide_bookmark_switcher` -> `bookmark_switcher.close()`
+/// in `src/input/mod.rs` (a pointer press or other pointer/touch/gesture
+/// input dismisses it there), so the switcher is pointer-transparent by
+/// design, not by oversight.
+///
+/// # Preserved asymmetries
+///
+/// These are transcribed exactly as found in the pre-existing gates, not
+/// endorsed as an intended design:
+///
+/// - `Mru` blocks `window_under` but not `workspace_under`.
+/// - `handle_focus_follows_mouse` checks `window_mru_ui.is_open()` directly (membership of one, not
+///   a priority-ordered set) rather than going through [`Niri::active_modal`]: converting it would
+///   change behavior when a higher-priority modal is open concurrently.
+/// - `Niri::open_screenshot_ui`'s own guard refuses opening under `{LockScreen, ScreenshotUi}` but
+///   not `ConfirmDialog`.
+/// - `crate::handlers::xdg_shell::grab` walks a `{ConfirmDialog, LockScreen, ScreenshotUi}`
+///   priority prefix independently of this table, with no `Mru`/`BookmarkSwitcher` arms.
+///
+/// # Not a `ModalKind`
+///
+/// The hotkey overlay never takes keyboard focus, so it has no row above; it
+/// participates only in the hide-on-input handling in `src/input/mod.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModalKind {
+    ConfirmDialog,
+    LockScreen,
+    ScreenshotUi,
+    Mru,
+    BookmarkSwitcher,
+}
+
+/// Snapshot of which modal overlays are currently open.
+///
+/// Named fields rather than a `HashSet<ModalKind>` so the single
+/// construction site, `Niri::modal_flags`, makes the kind -> open/locked
+/// mapping visible for review at a glance instead of hiding it behind
+/// generic insertion calls.
+#[derive(Clone, Copy)]
+struct ModalFlags {
+    confirm_dialog: bool,
+    lock_screen: bool,
+    screenshot_ui: bool,
+    mru: bool,
+    bookmark_switcher: bool,
+}
+
 #[derive(Default, Clone, PartialEq)]
 pub struct PointContents {
     // Output under point.
@@ -1154,10 +1226,10 @@ impl State {
         let pointer = &self.niri.seat.get_pointer().unwrap();
         let location = pointer.current_location();
 
-        if !self.niri.confirm_dialog.is_open()
-            && !self.niri.is_locked()
-            && !self.niri.screenshot_ui.is_open()
-        {
+        if !matches!(
+            self.niri.active_modal(),
+            Some(ModalKind::ConfirmDialog | ModalKind::LockScreen | ModalKind::ScreenshotUi)
+        ) {
             // Don't refresh cursor focus during transitions.
             if let Some((output, _)) = self.niri.output_under(location) {
                 let layout = &self.niri.layout;
@@ -1265,118 +1337,120 @@ impl State {
         }
 
         // Compute the current focus.
-        let focus = if self.niri.confirm_dialog.is_open() {
-            KeyboardFocus::ConfirmDialog
-        } else if self.niri.is_locked() {
-            KeyboardFocus::LockScreen {
+        let focus = match self.niri.active_modal() {
+            Some(ModalKind::ConfirmDialog) => KeyboardFocus::ConfirmDialog,
+            Some(ModalKind::LockScreen) => KeyboardFocus::LockScreen {
                 surface: self.niri.lock_surface_focus(),
-            }
-        } else if self.niri.screenshot_ui.is_open() {
-            KeyboardFocus::ScreenshotUi
-        } else if self.niri.window_mru_ui.is_open() {
-            KeyboardFocus::Mru
-        } else if self.niri.bookmark_switcher.is_open() {
-            KeyboardFocus::BookmarkSwitcher
-        } else if let Some(output) = self.niri.layout.active_output() {
-            let mon = self.niri.layout.monitor_for_output(output).unwrap();
-            let ctx_ = self.niri.layout.ctx_for(mon);
-            let layers = layer_map_for_output(output);
+            },
+            Some(ModalKind::ScreenshotUi) => KeyboardFocus::ScreenshotUi,
+            Some(ModalKind::Mru) => KeyboardFocus::Mru,
+            Some(ModalKind::BookmarkSwitcher) => KeyboardFocus::BookmarkSwitcher,
+            None => {
+                if let Some(output) = self.niri.layout.active_output() {
+                    let mon = self.niri.layout.monitor_for_output(output).unwrap();
+                    let ctx_ = self.niri.layout.ctx_for(mon);
+                    let layers = layer_map_for_output(output);
 
-            // Explicitly check for layer-shell popup grabs here, our keyboard focus will stay on
-            // the root layer surface while it has grabs.
-            let layer_grab = self.niri.popup_grab.as_ref().and_then(|g| {
-                layers
-                    .layer_for_surface(&g.root, WindowSurfaceType::TOPLEVEL)
-                    .and_then(|l| l.can_receive_keyboard_focus().then(|| (&g.root, l.layer())))
-            });
-            let grab_on_layer = |layer: Layer| {
-                layer_grab
-                    .and_then(move |(s, l)| if l == layer { Some(s.clone()) } else { None })
-                    .map(|surface| KeyboardFocus::LayerShell { surface })
-            };
+                    // Explicitly check for layer-shell popup grabs here, our keyboard focus will
+                    // stay on the root layer surface while it has grabs.
+                    let layer_grab = self.niri.popup_grab.as_ref().and_then(|g| {
+                        layers
+                            .layer_for_surface(&g.root, WindowSurfaceType::TOPLEVEL)
+                            .and_then(|l| {
+                                l.can_receive_keyboard_focus().then(|| (&g.root, l.layer()))
+                            })
+                    });
+                    let grab_on_layer = |layer: Layer| {
+                        layer_grab
+                            .and_then(move |(s, l)| if l == layer { Some(s.clone()) } else { None })
+                            .map(|surface| KeyboardFocus::LayerShell { surface })
+                    };
 
-            let layout_focus = || {
-                self.niri
-                    .layout
-                    .focus()
-                    .map(|win| win.toplevel().wl_surface().clone())
-                    .map(|surface| KeyboardFocus::Layout {
-                        surface: Some(surface),
-                    })
-            };
+                    let layout_focus = || {
+                        self.niri
+                            .layout
+                            .focus()
+                            .map(|win| win.toplevel().wl_surface().clone())
+                            .map(|surface| KeyboardFocus::Layout {
+                                surface: Some(surface),
+                            })
+                    };
 
-            let excl_focus_on_layer = |layer| {
-                layers.layers_on(layer).find_map(|surface| {
-                    if surface.cached_state().keyboard_interactivity
-                        != wlr_layer::KeyboardInteractivity::Exclusive
-                    {
-                        return None;
+                    let excl_focus_on_layer = |layer| {
+                        layers.layers_on(layer).find_map(|surface| {
+                            if surface.cached_state().keyboard_interactivity
+                                != wlr_layer::KeyboardInteractivity::Exclusive
+                            {
+                                return None;
+                            }
+
+                            let mapped = self.niri.mapped_layer_surfaces.get(surface)?;
+                            if mapped.place_within_backdrop() {
+                                return None;
+                            }
+
+                            let surface = surface.wl_surface().clone();
+                            Some(KeyboardFocus::LayerShell { surface })
+                        })
+                    };
+
+                    let on_d_focus_on_layer = |layer| {
+                        layers.layers_on(layer).find_map(|surface| {
+                            let is_on_demand_surface =
+                                Some(surface) == self.niri.layer_shell_on_demand_focus.as_ref();
+                            is_on_demand_surface
+                                .then(|| surface.wl_surface().clone())
+                                .map(|surface| KeyboardFocus::LayerShell { surface })
+                        })
+                    };
+
+                    // Prefer exclusive focus on a layer, then check on-demand focus.
+                    let focus_on_layer =
+                        |layer| excl_focus_on_layer(layer).or_else(|| on_d_focus_on_layer(layer));
+
+                    let is_overview_open = self.niri.layout.is_overview_open();
+
+                    let mut surface = grab_on_layer(Layer::Overlay);
+                    // FIXME: we shouldn't prioritize the top layer grabs over regular overlay input
+                    // or a fullscreen layout window. This will need tracking in
+                    // grab() to avoid handing it out in the first place. Or a
+                    // better way to structure this code.
+                    surface = surface.or_else(|| grab_on_layer(Layer::Top));
+
+                    if !is_overview_open {
+                        surface = surface.or_else(|| grab_on_layer(Layer::Bottom));
+                        surface = surface.or_else(|| grab_on_layer(Layer::Background));
                     }
 
-                    let mapped = self.niri.mapped_layer_surfaces.get(surface)?;
-                    if mapped.place_within_backdrop() {
-                        return None;
+                    surface = surface.or_else(|| focus_on_layer(Layer::Overlay));
+
+                    if mon.render_above_top_layer(ctx_) {
+                        surface = surface.or_else(layout_focus);
+                        surface = surface.or_else(|| focus_on_layer(Layer::Top));
+                        surface = surface.or_else(|| focus_on_layer(Layer::Bottom));
+                        surface = surface.or_else(|| focus_on_layer(Layer::Background));
+                    } else {
+                        surface = surface.or_else(|| focus_on_layer(Layer::Top));
+
+                        if is_overview_open {
+                            surface = Some(surface.unwrap_or(KeyboardFocus::Overview));
+                        }
+
+                        surface = surface.or_else(|| on_d_focus_on_layer(Layer::Bottom));
+                        surface = surface.or_else(|| on_d_focus_on_layer(Layer::Background));
+                        surface = surface.or_else(layout_focus);
+
+                        // Bottom and background layers can only receive exclusive focus when there
+                        // are no layout windows.
+                        surface = surface.or_else(|| excl_focus_on_layer(Layer::Bottom));
+                        surface = surface.or_else(|| excl_focus_on_layer(Layer::Background));
                     }
 
-                    let surface = surface.wl_surface().clone();
-                    Some(KeyboardFocus::LayerShell { surface })
-                })
-            };
-
-            let on_d_focus_on_layer = |layer| {
-                layers.layers_on(layer).find_map(|surface| {
-                    let is_on_demand_surface =
-                        Some(surface) == self.niri.layer_shell_on_demand_focus.as_ref();
-                    is_on_demand_surface
-                        .then(|| surface.wl_surface().clone())
-                        .map(|surface| KeyboardFocus::LayerShell { surface })
-                })
-            };
-
-            // Prefer exclusive focus on a layer, then check on-demand focus.
-            let focus_on_layer =
-                |layer| excl_focus_on_layer(layer).or_else(|| on_d_focus_on_layer(layer));
-
-            let is_overview_open = self.niri.layout.is_overview_open();
-
-            let mut surface = grab_on_layer(Layer::Overlay);
-            // FIXME: we shouldn't prioritize the top layer grabs over regular overlay input or a
-            // fullscreen layout window. This will need tracking in grab() to avoid handing it out
-            // in the first place. Or a better way to structure this code.
-            surface = surface.or_else(|| grab_on_layer(Layer::Top));
-
-            if !is_overview_open {
-                surface = surface.or_else(|| grab_on_layer(Layer::Bottom));
-                surface = surface.or_else(|| grab_on_layer(Layer::Background));
-            }
-
-            surface = surface.or_else(|| focus_on_layer(Layer::Overlay));
-
-            if mon.render_above_top_layer(ctx_) {
-                surface = surface.or_else(layout_focus);
-                surface = surface.or_else(|| focus_on_layer(Layer::Top));
-                surface = surface.or_else(|| focus_on_layer(Layer::Bottom));
-                surface = surface.or_else(|| focus_on_layer(Layer::Background));
-            } else {
-                surface = surface.or_else(|| focus_on_layer(Layer::Top));
-
-                if is_overview_open {
-                    surface = Some(surface.unwrap_or(KeyboardFocus::Overview));
+                    surface.unwrap_or(KeyboardFocus::Layout { surface: None })
+                } else {
+                    KeyboardFocus::Layout { surface: None }
                 }
-
-                surface = surface.or_else(|| on_d_focus_on_layer(Layer::Bottom));
-                surface = surface.or_else(|| on_d_focus_on_layer(Layer::Background));
-                surface = surface.or_else(layout_focus);
-
-                // Bottom and background layers can only receive exclusive focus when there are no
-                // layout windows.
-                surface = surface.or_else(|| excl_focus_on_layer(Layer::Bottom));
-                surface = surface.or_else(|| excl_focus_on_layer(Layer::Background));
             }
-
-            surface.unwrap_or(KeyboardFocus::Layout { surface: None })
-        } else {
-            KeyboardFocus::Layout { surface: None }
         };
 
         let keyboard = self.niri.seat.get_keyboard().unwrap();
@@ -3414,7 +3488,13 @@ impl Niri {
         extended_bounds: bool,
         pos: Point<f64, Logical>,
     ) -> Option<(Output, &Workspace<Mapped>)> {
-        if self.confirm_dialog.is_open() || self.is_locked() || self.screenshot_ui.is_open() {
+        // No named predicate here: this {ConfirmDialog, LockScreen,
+        // ScreenshotUi} trio has no ratified semantic identity of its own.
+        // See the `ModalKind` table.
+        if matches!(
+            self.active_modal(),
+            Some(ModalKind::ConfirmDialog | ModalKind::LockScreen | ModalKind::ScreenshotUi)
+        ) {
             return None;
         }
 
@@ -3447,11 +3527,7 @@ impl Niri {
     /// The cursor may be inside the window's activation region, but not within the window's input
     /// region.
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<&Mapped> {
-        if self.confirm_dialog.is_open()
-            || self.is_locked()
-            || self.screenshot_ui.is_open()
-            || self.window_mru_ui.is_open()
-        {
+        if self.modal_blocks_pointer_activation() {
             return None;
         }
 
@@ -3503,35 +3579,34 @@ impl Niri {
         // The ordering here must be consistent with the ordering in render() so that input is
         // consistent with the visuals.
 
-        if self.confirm_dialog.is_open() {
-            return rv;
-        } else if self.is_locked() {
-            let Some(state) = self.output_state.get(output) else {
-                return rv;
-            };
-            let Some(surface) = state.lock_surface.as_ref() else {
-                return rv;
-            };
+        match self.active_modal() {
+            Some(ModalKind::ConfirmDialog) => return rv,
+            Some(ModalKind::LockScreen) => {
+                let Some(state) = self.output_state.get(output) else {
+                    return rv;
+                };
+                let Some(surface) = state.lock_surface.as_ref() else {
+                    return rv;
+                };
 
-            rv.surface = under_from_surface_tree(
-                surface.wl_surface(),
-                pos_within_output,
-                // We put lock surfaces at (0, 0).
-                (0, 0),
-                WindowSurfaceType::ALL,
-            )
-            .map(|(surface, pos_within_output)| {
-                (
-                    surface,
-                    (pos_within_output + output_pos_in_global_space).to_f64(),
+                rv.surface = under_from_surface_tree(
+                    surface.wl_surface(),
+                    pos_within_output,
+                    // We put lock surfaces at (0, 0).
+                    (0, 0),
+                    WindowSurfaceType::ALL,
                 )
-            });
+                .map(|(surface, pos_within_output)| {
+                    (
+                        surface,
+                        (pos_within_output + output_pos_in_global_space).to_f64(),
+                    )
+                });
 
-            return rv;
-        }
-
-        if self.screenshot_ui.is_open() || self.window_mru_ui.is_open() {
-            return rv;
+                return rv;
+            }
+            Some(ModalKind::ScreenshotUi | ModalKind::Mru) => return rv,
+            Some(ModalKind::BookmarkSwitcher) | None => {}
         }
 
         let layers = layer_map_for_output(output);
@@ -6148,6 +6223,79 @@ impl Niri {
             LockState::Locking(_) | LockState::Locked(_) => true,
         }
     }
+}
+
+impl ModalKind {
+    /// Priority order, highest first. See the [`ModalKind`] table.
+    const PRIORITY: [ModalKind; 5] = [
+        ModalKind::ConfirmDialog,
+        ModalKind::LockScreen,
+        ModalKind::ScreenshotUi,
+        ModalKind::Mru,
+        ModalKind::BookmarkSwitcher,
+    ];
+
+    /// Whether this kind is open according to `flags`.
+    ///
+    /// Exhaustive with no wildcard arm: a new [`ModalKind`] variant must get
+    /// an explicit membership decision here before it compiles, mirroring
+    /// `crate::layout::DoActionError::disposition`'s no-wildcard discipline.
+    fn open_in(self, flags: &ModalFlags) -> bool {
+        match self {
+            ModalKind::ConfirmDialog => flags.confirm_dialog,
+            ModalKind::LockScreen => flags.lock_screen,
+            ModalKind::ScreenshotUi => flags.screenshot_ui,
+            ModalKind::Mru => flags.mru,
+            ModalKind::BookmarkSwitcher => flags.bookmark_switcher,
+        }
+    }
+}
+
+/// Highest-priority open modal recorded in `flags`, or `None` if none are
+/// open.
+///
+/// Pure function over a snapshot rather than a `&Niri` method, so it is
+/// unit-testable without constructing any live overlay state.
+fn active_modal_from(flags: ModalFlags) -> Option<ModalKind> {
+    ModalKind::PRIORITY.into_iter().find(|k| k.open_in(&flags))
+}
+
+impl Niri {
+    /// The one place that maps each [`ModalKind`] to its live open/locked
+    /// state. Every other modal-overlay gate goes through
+    /// [`Niri::active_modal`] instead of reading these fields directly.
+    fn modal_flags(&self) -> ModalFlags {
+        ModalFlags {
+            confirm_dialog: self.confirm_dialog.is_open(),
+            lock_screen: self.is_locked(),
+            screenshot_ui: self.screenshot_ui.is_open(),
+            mru: self.window_mru_ui.is_open(),
+            bookmark_switcher: self.bookmark_switcher.is_open(),
+        }
+    }
+
+    /// The highest-priority modal overlay currently open, if any. See the
+    /// [`ModalKind`] table for priority order and per-gate membership.
+    pub fn active_modal(&self) -> Option<ModalKind> {
+        active_modal_from(self.modal_flags())
+    }
+
+    /// Whether a modal overlay currently blocks pointer-driven window
+    /// activation. Sole caller: `window_under`.
+    ///
+    /// `BookmarkSwitcher` is deliberately not a member — see the
+    /// [`ModalKind`] table's pointer-transparency note.
+    pub fn modal_blocks_pointer_activation(&self) -> bool {
+        matches!(
+            self.active_modal(),
+            Some(
+                ModalKind::ConfirmDialog
+                    | ModalKind::LockScreen
+                    | ModalKind::ScreenshotUi
+                    | ModalKind::Mru
+            )
+        )
+    }
 
     /// Whether another modal overlay currently owns keyboard focus, so
     /// opening (or reopening) the bookmark switcher must be refused: the
@@ -6155,11 +6303,20 @@ impl Niri {
     /// switcher. Shared by `OpenBookmarkSwitcher`, `EnterBookmarkMode`, and
     /// the sticky-mode reopen continuation in `src/input/mod.rs` so the four
     /// checks cannot drift apart.
+    ///
+    /// Its membership coincides with [`Niri::modal_blocks_pointer_activation`]
+    /// today, but the two gates are independent decisions on independent
+    /// call sites — do not merge them.
     pub fn modal_overlay_blocks_bookmark_overlay(&self) -> bool {
-        self.confirm_dialog.is_open()
-            || self.is_locked()
-            || self.screenshot_ui.is_open()
-            || self.window_mru_ui.is_open()
+        matches!(
+            self.active_modal(),
+            Some(
+                ModalKind::ConfirmDialog
+                    | ModalKind::LockScreen
+                    | ModalKind::ScreenshotUi
+                    | ModalKind::Mru
+            )
+        )
     }
 
     pub fn lock(&mut self, confirmation: SessionLocker) {
@@ -6615,6 +6772,9 @@ impl Niri {
             return;
         }
 
+        // Membership of one, not a priority-ordered set: `active_modal() ==
+        // Some(ModalKind::Mru)` would go false whenever a higher-priority
+        // modal is also open, which is a behavior change. See `ModalKind`.
         if self.window_mru_ui.is_open() {
             return;
         }
@@ -6973,5 +7133,113 @@ niri_render_elements! {
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One-hot `ModalFlags` for `kind`, built via an exhaustive match with no
+    /// wildcard arm: a future `ModalKind` variant fails to compile here
+    /// until this helper is given an explicit one-hot mapping for it. Note
+    /// this only forces `flags_with_only` (and, in production, `open_in`)
+    /// to be kept exhaustive — it does not by itself force `PRIORITY` to
+    /// list the new variant; see `priority_contains_every_modal_kind` below
+    /// for that check.
+    fn flags_with_only(kind: ModalKind) -> ModalFlags {
+        let mut flags = ModalFlags {
+            confirm_dialog: false,
+            lock_screen: false,
+            screenshot_ui: false,
+            mru: false,
+            bookmark_switcher: false,
+        };
+
+        match kind {
+            ModalKind::ConfirmDialog => flags.confirm_dialog = true,
+            ModalKind::LockScreen => flags.lock_screen = true,
+            ModalKind::ScreenshotUi => flags.screenshot_ui = true,
+            ModalKind::Mru => flags.mru = true,
+            ModalKind::BookmarkSwitcher => flags.bookmark_switcher = true,
+        }
+
+        flags
+    }
+
+    #[test]
+    fn active_modal_prefers_highest_priority_open_modal() {
+        let mut flags = ModalFlags {
+            confirm_dialog: true,
+            lock_screen: true,
+            screenshot_ui: true,
+            mru: true,
+            bookmark_switcher: true,
+        };
+        assert_eq!(active_modal_from(flags), Some(ModalKind::ConfirmDialog));
+
+        flags.confirm_dialog = false;
+        assert_eq!(active_modal_from(flags), Some(ModalKind::LockScreen));
+
+        flags.lock_screen = false;
+        assert_eq!(active_modal_from(flags), Some(ModalKind::ScreenshotUi));
+
+        flags.screenshot_ui = false;
+        assert_eq!(active_modal_from(flags), Some(ModalKind::Mru));
+
+        flags.mru = false;
+        assert_eq!(active_modal_from(flags), Some(ModalKind::BookmarkSwitcher));
+
+        flags.bookmark_switcher = false;
+        assert_eq!(active_modal_from(flags), None);
+    }
+
+    #[test]
+    fn active_modal_maps_each_flag_to_its_kind() {
+        assert_eq!(
+            active_modal_from(flags_with_only(ModalKind::ConfirmDialog)),
+            Some(ModalKind::ConfirmDialog)
+        );
+        assert_eq!(
+            active_modal_from(flags_with_only(ModalKind::LockScreen)),
+            Some(ModalKind::LockScreen)
+        );
+        assert_eq!(
+            active_modal_from(flags_with_only(ModalKind::ScreenshotUi)),
+            Some(ModalKind::ScreenshotUi)
+        );
+        assert_eq!(
+            active_modal_from(flags_with_only(ModalKind::Mru)),
+            Some(ModalKind::Mru)
+        );
+        assert_eq!(
+            active_modal_from(flags_with_only(ModalKind::BookmarkSwitcher)),
+            Some(ModalKind::BookmarkSwitcher)
+        );
+    }
+
+    /// Regression coverage for the gap `PRIORITY`'s fixed-length array
+    /// literal leaves open on its own: unlike `open_in` and
+    /// `flags_with_only`, nothing about `PRIORITY`'s definition forces it to
+    /// grow when `ModalKind` does, so a variant silently dropped from (or
+    /// never added to) `PRIORITY` would compile clean and just never
+    /// activate via [`Niri::active_modal`]. This test hardcodes the variant
+    /// list (kept in sync by hand, same as the `ModalFlags` literals above)
+    /// and asserts each one is a member of `PRIORITY`, so an omission fails
+    /// the suite instead of silently disabling that modal.
+    #[test]
+    fn priority_contains_every_modal_kind() {
+        for kind in [
+            ModalKind::ConfirmDialog,
+            ModalKind::LockScreen,
+            ModalKind::ScreenshotUi,
+            ModalKind::Mru,
+            ModalKind::BookmarkSwitcher,
+        ] {
+            assert!(
+                ModalKind::PRIORITY.contains(&kind),
+                "{kind:?} is missing from ModalKind::PRIORITY"
+            );
+        }
     }
 }

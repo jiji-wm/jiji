@@ -158,6 +158,11 @@ impl State {
             self.niri.reset_pointer_inactivity_timer();
         }
 
+        // Each pair below couples its own event predicate; there is no
+        // priority ordering or shared membership list to collapse through
+        // `crate::niri::Niri::active_modal` here, and the hotkey overlay
+        // isn't a `crate::niri::ModalKind` at all. See that type for the
+        // modal-overlay priority/membership table.
         let hide_hotkey_overlay =
             self.niri.hotkey_overlay.is_open() && should_hide_hotkey_overlay(&event);
 
