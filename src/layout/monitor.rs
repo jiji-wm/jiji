@@ -2022,13 +2022,12 @@ impl<W: LayoutElement> Monitor<W> {
 
 /// Per-view bookend invariant: trailing workspace empty + unnamed, and (under EWAF) leading
 /// workspace empty + unnamed plus the length rule (1, or 3+, or 2 when the second entry is a
-/// shared workspace pinned by another activity). Shared between
-/// `Monitor::verify_invariants` (called per activity-view of a connected monitor) and
-/// `Layout::verify_invariants` (called for views on outputs that are no longer connected).
+/// shared workspace pinned by another activity). Called by `Monitor::verify_invariants` for
+/// every activity-view of a connected monitor.
 ///
-/// Callers pass the EWAF flag explicitly because the source-of-truth differs by call site:
-/// connected monitors use their per-monitor merged options; disconnected outputs use the
-/// layout-root options (matching what `ensure_all_activity_views` uses when materializing).
+/// Callers pass the EWAF flag explicitly rather than reading it off a `self` field because this
+/// is a free function with no `Monitor` receiver — the flag's source-of-truth is the calling
+/// monitor's merged options, matching what `ensure_all_activity_views` uses when materializing.
 ///
 /// The optional `ctx` parameter is appended to each assertion message to identify which
 /// `(activity_id, output_id)` pair tripped the invariant, aiding proptest failure diagnosis.

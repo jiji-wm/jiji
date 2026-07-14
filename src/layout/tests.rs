@@ -1790,7 +1790,22 @@ fn check_ops_on_layout(layout: &mut Layout<TestWindow>, ops: impl IntoIterator<I
         op.apply(layout);
         layout.verify_invariants();
         verify_output_bindings(layout);
+        assert_normalize_sweep_noop(layout);
     }
+}
+
+/// Asserts `Layout::normalize_view_bookends` is a no-op immediately after an invariant-clean
+/// layout. Runs after every `Op` in `check_ops_on_layout` so `check_ops` proptest sequences (in
+/// particular `random_operations_dont_panic`) stand as the harness-wide guarantee that the
+/// sweep's repair predicate never drifts from `assert_view_bookends`, the invariant
+/// `verify_invariants` just checked above.
+#[track_caller]
+fn assert_normalize_sweep_noop(layout: &mut Layout<TestWindow>) {
+    assert_eq!(
+        layout.normalize_view_bookends(),
+        0,
+        "normalize_view_bookends must be a no-op on an already invariant-clean layout",
+    );
 }
 
 /// Asserts the bind/unbind symmetry contract from `Workspace::bind_output`: every window is
@@ -2050,12 +2065,15 @@ fn operations_dont_panic() {
                 first.clone().apply(&mut layout);
                 layout.verify_invariants();
                 verify_output_bindings(&layout);
+                assert_normalize_sweep_noop(&mut layout);
                 second.clone().apply(&mut layout);
                 layout.verify_invariants();
                 verify_output_bindings(&layout);
+                assert_normalize_sweep_noop(&mut layout);
                 third.clone().apply(&mut layout);
                 layout.verify_invariants();
                 verify_output_bindings(&layout);
+                assert_normalize_sweep_noop(&mut layout);
             }
         }
     }
@@ -2241,12 +2259,15 @@ fn operations_from_starting_state_dont_panic() {
                 first.clone().apply(&mut layout);
                 layout.verify_invariants();
                 verify_output_bindings(&layout);
+                assert_normalize_sweep_noop(&mut layout);
                 second.clone().apply(&mut layout);
                 layout.verify_invariants();
                 verify_output_bindings(&layout);
+                assert_normalize_sweep_noop(&mut layout);
                 third.clone().apply(&mut layout);
                 layout.verify_invariants();
                 verify_output_bindings(&layout);
+                assert_normalize_sweep_noop(&mut layout);
             }
         }
     }
@@ -7904,6 +7925,525 @@ fn dormant_view_bookend_fixup_len1_ewaf_mints_both_bookends() {
     );
 
     layout.verify_invariants();
+}
+
+// ── `Layout::normalize_view_bookends` ──────────────────────────────────────
+
+#[test]
+fn normalize_sweep_repairs_missing_trailing_bookend_in_dormant_view() {
+    // Share a windowed workspace into a dormant activity through the production
+    // `set_workspace_activities` path, then directly delete the dormant view's trailing empty
+    // bookend from both the view and the pool — removing only from the view would leave the
+    // deleted id orphaned in the pool, tripping the pool-keys union assertion for the wrong
+    // reason.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let w_src_id = layout.active_view(&mon_out).ids()[0];
+    assert!(
+        layout.workspaces.get(&w_src_id).unwrap().has_windows(),
+        "fixture precondition: w_src is the windowed workspace",
+    );
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(w_src_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    let beta_ids_before: Vec<WorkspaceId> = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap()
+        .ids()
+        .to_vec();
+    assert_eq!(
+        beta_ids_before.len(),
+        2,
+        "fixture precondition: beta's view is [w_src, fresh trailing empty]",
+    );
+    let trailing_id = *beta_ids_before.last().unwrap();
+    assert!(!layout
+        .workspaces
+        .get(&trailing_id)
+        .unwrap()
+        .has_windows_or_name());
+    layout.verify_invariants();
+
+    layout
+        .activities
+        .get_mut(beta)
+        .unwrap()
+        .views_mut()
+        .get_mut(&mon_out)
+        .unwrap()
+        .remove_at(beta_ids_before.len() - 1);
+    layout.workspaces.remove(&trailing_id);
+
+    assert_eq!(
+        layout.normalize_view_bookends(),
+        1,
+        "sweep must mint exactly the missing trailing empty",
+    );
+
+    let beta_view_after = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap();
+    let fresh_tail_id = *beta_view_after.ids().last().unwrap();
+    let fresh_tail = layout.workspaces.get(&fresh_tail_id).unwrap();
+    assert!(
+        !fresh_tail.has_windows_or_name(),
+        "fresh mint must be empty and unnamed",
+    );
+    assert_eq!(
+        fresh_tail.activities(),
+        &HashSet::from([beta]),
+        "fresh mint must be seeded to beta, the owning activity — never alpha",
+    );
+
+    layout.verify_invariants();
+    assert_eq!(
+        layout.normalize_view_bookends(),
+        0,
+        "sweep must be idempotent",
+    );
+}
+
+#[test]
+fn normalize_sweep_repairs_missing_ewaf_leading_bookend() {
+    // Mirror of the trailing-bookend repair test, on the EWAF leading slot: the production
+    // insert path (via `dormant_view_bookend_fixup`'s leading branch) mints a correct leading
+    // empty, which is then directly deleted from both the view and the pool.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let w_src_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .iter()
+        .copied()
+        .find(|id| layout.workspaces.get(id).unwrap().has_windows())
+        .expect("alpha's EWAF view has a windowed workspace");
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(w_src_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    let beta_ids_before: Vec<WorkspaceId> = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap()
+        .ids()
+        .to_vec();
+    assert_eq!(
+        beta_ids_before.len(),
+        3,
+        "fixture precondition: beta's view is [fresh leading empty, w_src, fresh trailing empty]",
+    );
+    let leading_id = beta_ids_before[0];
+    assert!(!layout
+        .workspaces
+        .get(&leading_id)
+        .unwrap()
+        .has_windows_or_name());
+    layout.verify_invariants();
+
+    layout
+        .activities
+        .get_mut(beta)
+        .unwrap()
+        .views_mut()
+        .get_mut(&mon_out)
+        .unwrap()
+        .remove_at(0);
+    layout.workspaces.remove(&leading_id);
+
+    assert_eq!(
+        layout.normalize_view_bookends(),
+        1,
+        "sweep must mint exactly the missing EWAF leading empty",
+    );
+
+    let beta_view_after = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap();
+    let fresh_head_id = *beta_view_after.ids().first().unwrap();
+    let fresh_head = layout.workspaces.get(&fresh_head_id).unwrap();
+    assert!(
+        !fresh_head.has_windows_or_name(),
+        "fresh mint must be empty and unnamed",
+    );
+    assert_eq!(
+        fresh_head.activities(),
+        &HashSet::from([beta]),
+        "fresh mint must be seeded to beta, the owning activity — never alpha",
+    );
+
+    layout.verify_invariants();
+    assert_eq!(
+        layout.normalize_view_bookends(),
+        0,
+        "sweep must be idempotent",
+    );
+}
+
+#[test]
+fn normalize_sweep_len1_windowed_view_mints_both_bookends() {
+    // A dormant EWAF view holding a single windowed workspace is simultaneously missing its
+    // leading and trailing bookend (position 0 is both first and last). Hand-roll this
+    // singleton directly — going through the production insert path would immediately
+    // split-mint bookends around it, leaving nothing for the sweep to repair.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let w_src_id = layout
+        .active_view(&mon_out)
+        .ids()
+        .iter()
+        .copied()
+        .find(|id| layout.workspaces.get(id).unwrap().has_windows())
+        .expect("alpha's EWAF view has a windowed workspace");
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    layout
+        .workspaces
+        .get_mut(&w_src_id)
+        .expect("w_src live")
+        .activities = [alpha, beta].into_iter().collect();
+    test_override_activity_view(
+        &mut layout,
+        beta,
+        mon_out.clone(),
+        WorkspaceView::new(vec![w_src_id], 0),
+    );
+
+    assert_eq!(
+        layout.normalize_view_bookends(),
+        2,
+        "a len-1 windowed dormant view needs both a leading and a trailing mint",
+    );
+
+    let beta_view = layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap();
+    assert_eq!(
+        beta_view.len(),
+        3,
+        "view must grow to [fresh empty, w_src, fresh empty]",
+    );
+    assert_eq!(
+        beta_view.ids()[1],
+        w_src_id,
+        "w_src stays sandwiched in the middle"
+    );
+    assert!(!layout
+        .workspaces
+        .get(&beta_view.ids()[0])
+        .unwrap()
+        .has_windows_or_name());
+    assert!(!layout
+        .workspaces
+        .get(&beta_view.ids()[2])
+        .unwrap()
+        .has_windows_or_name());
+
+    layout.verify_invariants();
+    assert_eq!(
+        layout.normalize_view_bookends(),
+        0,
+        "sweep must be idempotent",
+    );
+}
+
+#[test]
+fn normalize_sweep_repairs_active_view_and_offsets_inflight_switch() {
+    // Corrupt the active view's EWAF leading bookend, then put a workspace switch in flight
+    // against the already-corrupted (but structurally simple) view, so the switch's indices
+    // are meaningful for the view the sweep is about to mutate. The sweep must apply
+    // `add_workspace_at_on`'s exact live-switch guard when it prepends.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+    let mon_out = layout.monitors[0].output_id();
+
+    let leading_id = layout.active_view(&mon_out).ids()[0];
+    assert!(!layout
+        .workspaces
+        .get(&leading_id)
+        .unwrap()
+        .has_windows_or_name());
+    layout.verify_invariants();
+
+    layout.active_view_mut(&mon_out).remove_at(0);
+    layout.workspaces.remove(&leading_id);
+
+    layout.switch_workspace_down();
+    let mon_idx = 0;
+    let target_before = match &layout.monitors[mon_idx].workspace_switch {
+        Some(switch) => switch.target_idx(),
+        None => panic!("switch_workspace_down must leave an in-flight animation"),
+    };
+
+    assert_eq!(
+        layout.normalize_view_bookends(),
+        1,
+        "sweep must mint exactly the missing EWAF leading empty",
+    );
+
+    let target_after = match &layout.monitors[mon_idx].workspace_switch {
+        Some(switch) => switch.target_idx(),
+        None => panic!("sweep must not clear an in-flight animation"),
+    };
+    assert_eq!(
+        target_after,
+        target_before + 1.0,
+        "prepending a fresh leading empty must shift the in-flight switch's target by one",
+    );
+
+    let active_view_after = layout.active_view(&mon_out);
+    assert_eq!(active_view_after.len(), 3);
+    assert!(!layout
+        .workspaces
+        .get(&active_view_after.ids()[0])
+        .unwrap()
+        .has_windows_or_name());
+
+    layout.verify_invariants();
+    assert_eq!(
+        layout.normalize_view_bookends(),
+        0,
+        "sweep must be idempotent",
+    );
+}
+
+#[test]
+fn normalize_sweep_noop_on_clean_state() {
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+    let alpha = layout.active_activity_id();
+    let mon_out1 = layout.monitors[0].output_id();
+    let w_src_id = layout
+        .active_view(&mon_out1)
+        .ids()
+        .iter()
+        .copied()
+        .find(|id| layout.workspaces.get(id).unwrap().has_windows())
+        .expect("alpha's out1 view has a windowed workspace");
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(w_src_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    layout.verify_invariants();
+    assert_eq!(
+        layout.normalize_view_bookends(),
+        0,
+        "sweep must be a no-op on an already invariant-clean layout",
+    );
+}
+
+#[test]
+fn normalize_sweep_accumulates_repairs_across_distinct_activities() {
+    // Share w_src into two dormant activities (beta, gamma) in one call — each already holds
+    // its own distinct trailing-empty bookend from `create_activity`'s eager materialization, so
+    // the shared insert leaves beta and gamma with separate bookend workspace ids, not a single
+    // shared one. Corrupt both trailing bookends directly (view + pool, mirroring the corruption
+    // idiom above), then check the sweep's single-pass `needs_repair: Vec` collects both
+    // violations rather than only the last one scanned.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let alpha = layout.active_activity_id();
+    let mon_out = layout.monitors[0].output_id();
+    let w_src_id = layout.active_view(&mon_out).ids()[0];
+    assert!(
+        layout.workspaces.get(&w_src_id).unwrap().has_windows(),
+        "fixture precondition: w_src is the windowed workspace",
+    );
+
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+    let gamma = layout
+        .create_activity("Gamma".to_owned())
+        .expect("create gamma");
+    layout
+        .set_workspace_activities(
+            Some(WorkspaceReference::Id(w_src_id.get())),
+            &[
+                ActivityReferenceArg::Id(alpha.get()),
+                ActivityReferenceArg::Id(beta.get()),
+                ActivityReferenceArg::Id(gamma.get()),
+            ],
+        )
+        .expect("set must succeed");
+
+    let beta_trailing_id = *layout
+        .activities
+        .get(beta)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap()
+        .ids()
+        .last()
+        .unwrap();
+    let gamma_trailing_id = *layout
+        .activities
+        .get(gamma)
+        .unwrap()
+        .views()
+        .get(&mon_out)
+        .unwrap()
+        .ids()
+        .last()
+        .unwrap();
+    assert_ne!(
+        beta_trailing_id, gamma_trailing_id,
+        "fixture precondition: beta and gamma each mint their own distinct bookend",
+    );
+    layout.verify_invariants();
+
+    layout
+        .activities
+        .get_mut(beta)
+        .unwrap()
+        .views_mut()
+        .get_mut(&mon_out)
+        .unwrap()
+        .remove_at(1);
+    layout.workspaces.remove(&beta_trailing_id);
+    layout
+        .activities
+        .get_mut(gamma)
+        .unwrap()
+        .views_mut()
+        .get_mut(&mon_out)
+        .unwrap()
+        .remove_at(1);
+    layout.workspaces.remove(&gamma_trailing_id);
+
+    assert_eq!(
+        layout.normalize_view_bookends(),
+        2,
+        "sweep must mint the missing trailing empty in both beta's and gamma's views, not just \
+         the last activity scanned",
+    );
+
+    layout.verify_invariants();
+    assert_eq!(
+        layout.normalize_view_bookends(),
+        0,
+        "sweep must be idempotent",
+    );
 }
 
 #[test]

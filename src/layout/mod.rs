@@ -2059,6 +2059,162 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Repairs a violated trailing (or, under EWAF, leading) bookend in every activity's view of
+    /// every connected monitor's output, minting and inserting a fresh empty workspace at each
+    /// violated slot.
+    ///
+    /// The state-based counterpart of `assert_view_bookends`: where that assertion panics on a
+    /// bookend slot occupied by a windowed-or-named entry, this sweep repairs it — the repair
+    /// predicate mirrors the negation of that assertion's two trailing/leading presence clauses,
+    /// so a view is touched here if and only if one of those two clauses would trip. It does not
+    /// enforce the EWAF length-2 rule (a len-2 EWAF view is illegal unless its second entry is a
+    /// shared workspace pinning the trailing slot) — that shape needs a workspace *removed*, not
+    /// minted, and stays with the subtractive collapse/reclaim helpers. Idempotent: each repair
+    /// leaves the slot it just touched trivially satisfying the presence clause that flagged it,
+    /// so an immediate second call structurally returns 0 regardless of caller; `verify_invariants`
+    /// running after every public entry point additionally confirms no violation survives a
+    /// completed call. Additive-only — never removes, renames, or reassigns a workspace — and
+    /// scoped to views keyed by currently-connected monitor outputs; by the connected-keyspace
+    /// invariant (every activity's `views` map is purged of a disconnecting output's entry —
+    /// see `remove_output`, enforced by `Layout::verify_invariants`), there is no
+    /// disconnected-output keyspace left to visit.
+    ///
+    /// Unlike [`Self::dormant_view_bookend_fixup`], which patches only the dormant activities
+    /// sharing a single caller-designated `ws_id`, this sweep examines every activity's view —
+    /// active included — independent of which workspace a caller just touched.
+    ///
+    /// Returns the number of workspaces minted.
+    #[allow(dead_code)] // sweep lands unwired; no production call site converted onto it yet
+    fn normalize_view_bookends(&mut self) -> usize {
+        let mut minted = 0;
+        let active_id = self.activities.active_id();
+
+        let known_monitors: Vec<(usize, Output, Rc<Options>, OutputId, bool)> = self
+            .monitors
+            .iter()
+            .enumerate()
+            .map(|(mon_idx, mon)| {
+                let ewaf = mon.options.layout.empty_workspace_above_first;
+                (
+                    mon_idx,
+                    mon.output.clone(),
+                    mon.options.clone(),
+                    mon.output_id(),
+                    ewaf,
+                )
+            })
+            .collect();
+
+        for (mon_idx, mon_output, mon_options, mon_out_id, ewaf) in known_monitors {
+            let clock = self.clock.clone();
+
+            // Scan every activity's view of this output for a violated bookend — the negation of
+            // the two presence clauses `assert_view_bookends` checks — before mutating anything,
+            // mirroring the classify-then-mutate split in `reseat_bookend_active_boot`.
+            let mut needs_repair: Vec<(ActivityId, bool, bool)> = Vec::new();
+            for a in self.activities.iter() {
+                let Some(view) = a.views().get(&mon_out_id) else {
+                    debug_assert!(
+                        false,
+                        "normalize_view_bookends: activity {:?} has no view for connected \
+                         output {mon_out_id:?} — per-activity bookend invariant violated \
+                         (membership↔view coherence bug)",
+                        a.id(),
+                    );
+                    continue;
+                };
+                let last_id = *view.ids().last().expect("view non-empty by construction");
+                let first_id = *view.ids().first().expect("view non-empty by construction");
+                let needs_trailing = self
+                    .workspaces
+                    .get(&last_id)
+                    .expect("view id must be a key in the pool")
+                    .has_windows_or_name();
+                let needs_leading = ewaf
+                    && self
+                        .workspaces
+                        .get(&first_id)
+                        .expect("view id must be a key in the pool")
+                        .has_windows_or_name();
+                if needs_trailing || needs_leading {
+                    needs_repair.push((a.id(), needs_trailing, needs_leading));
+                }
+            }
+
+            for (act_id, needs_trailing, needs_leading) in needs_repair {
+                if needs_trailing {
+                    let ws = Workspace::new(
+                        &mon_output,
+                        HashSet::from([act_id]),
+                        clock.clone(),
+                        mon_options.clone(),
+                    );
+                    let id = ws.id();
+                    assert!(
+                        self.workspaces.insert(id, ws).is_none(),
+                        "fresh id must be unique",
+                    );
+                    let view = self
+                        .activities
+                        .get_mut(act_id)
+                        .expect("act_id sourced from activities.iter()")
+                        .views_mut()
+                        .get_mut(&mon_out_id)
+                        .expect("view existed at scan time");
+                    let idx = view.len();
+                    view.insert(idx, id);
+                    minted += 1;
+
+                    if act_id == active_id {
+                        if let Some(switch) = &mut self.monitors[mon_idx].workspace_switch {
+                            // idx is the pre-mutation view's length, always beyond target_idx's
+                            // valid range, so this guard is structurally a no-op on the trailing
+                            // arm — kept verbatim for symmetry with the leading arm below and
+                            // fidelity to `add_workspace_at_on`'s mint site.
+                            if idx as f64 <= switch.target_idx() {
+                                switch.offset(1);
+                            }
+                        }
+                    }
+                }
+
+                if needs_leading {
+                    let ws = Workspace::new(
+                        &mon_output,
+                        HashSet::from([act_id]),
+                        clock.clone(),
+                        mon_options.clone(),
+                    );
+                    let id = ws.id();
+                    assert!(
+                        self.workspaces.insert(id, ws).is_none(),
+                        "fresh id must be unique",
+                    );
+                    let view = self
+                        .activities
+                        .get_mut(act_id)
+                        .expect("act_id sourced from activities.iter()")
+                        .views_mut()
+                        .get_mut(&mon_out_id)
+                        .expect("view existed at scan time");
+                    let idx = 0;
+                    view.insert(idx, id);
+                    minted += 1;
+
+                    if act_id == active_id {
+                        if let Some(switch) = &mut self.monitors[mon_idx].workspace_switch {
+                            if idx as f64 <= switch.target_idx() {
+                                switch.offset(1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        minted
+    }
+
     /// Install every drained workspace into each member activity's boot-output view that does not
     /// already hold it, then mint the bookends those inserts require.
     ///
