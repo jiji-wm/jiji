@@ -4129,10 +4129,17 @@ impl<W: LayoutElement> Layout<W> {
     /// the expected result only in the fully-disconnected window, where every workspace is parked
     /// in `disconnected_workspace_ids` and no activity holds any view.
     ///
-    /// First-match semantics only: when `ws_id` is shared across activities (or, transiently,
-    /// held in more than one view of the same activity by a not-yet-fixed incoherence), this
-    /// resolver does not assert that every holding view agrees on the same output — that
-    /// same-output cross-view consistency is a separate invariant, not yet enforced.
+    /// First-match semantics only: when `ws_id` is shared across activities, this resolver does
+    /// not assert that every holding view agrees on the same output. A shared workspace held
+    /// under *different* outputs in different activities is a legal, production-reachable steady
+    /// state after a partial disconnect — pinned by
+    /// `remove_workspace_from_activity_scopes_to_own_activity_view_after_divergent_partial_disconnect`
+    /// and its `set_workspace_activities` sibling in `tests.rs` — so same-output cross-view
+    /// agreement is deliberately not asserted anywhere. Separately, `ws_id` held in more than one
+    /// view of the *same* activity (across different outputs) is a distinct, not-yet-fixed
+    /// incoherence: `verify_invariants`'s per-view uniqueness check only dedupes within a single
+    /// `WorkspaceView`, not across an activity's per-output views, so this case remains
+    /// unenforced.
     fn workspace_holding_output(&self, ws_id: WorkspaceId) -> Option<OutputId> {
         let holding = self.activities.iter().find_map(|activity| {
             activity
@@ -9097,8 +9104,19 @@ impl<W: LayoutElement> Layout<W> {
         // legitimately appear in multiple views (e.g. sticky workspaces, future
         // `activities = {A, B}` membership), so cross-view duplicates fold into the HashSet
         // without assertion; per-view uniqueness is still enforced by a local set below.
+        //
+        // The same walk also pins membership↔view coherence in both directions: every id held
+        // by a view must carry that activity in its own `activities` set (view→membership), and
+        // — via the `per_activity_ids` accumulator checked further below — every id that carries
+        // an activity in `activities` must be held by some view of that activity
+        // (membership→view). `reconcile_views_with_membership` is the runtime repair dual that
+        // restores this coherence after a membership-mutating pass; these asserts are what pin
+        // that it actually does.
         let mut expected_keys: HashSet<WorkspaceId> = HashSet::new();
+        let mut per_activity_ids: HashMap<ActivityId, HashSet<WorkspaceId>> = HashMap::new();
         for activity in self.activities.iter() {
+            let act_id = activity.id();
+            let ids_for_activity = per_activity_ids.entry(act_id).or_default();
             for view in activity.views().values() {
                 let mut per_view: HashSet<WorkspaceId> = HashSet::new();
                 for id in view.ids() {
@@ -9110,9 +9128,14 @@ impl<W: LayoutElement> Layout<W> {
                     // legitimately produce the same `WorkspaceId` in multiple views; per-view
                     // uniqueness is enforced separately above.
                     expected_keys.insert(*id);
+                    ids_for_activity.insert(*id);
+                    let ws = pool
+                        .get(id)
+                        .expect("every view id must be in the pool — no zombies");
                     assert!(
-                        pool.contains_key(id),
-                        "every view id must be in the pool — no zombies",
+                        ws.activities().contains(&act_id),
+                        "workspace {id:?} is held by activity {act_id:?}'s view, but the \
+                         workspace's activities set lacks that activity",
                     );
                 }
             }
@@ -9132,6 +9155,32 @@ impl<W: LayoutElement> Layout<W> {
             expected_keys, pool_keys,
             "pool keys must equal the union of every activity's views over all outputs plus disconnected_workspace_ids",
         );
+
+        // Membership→view: every pool workspace's `activities` set must be backed by a view of
+        // each of those activities holding it. Unscoped — checked for the whole pool regardless
+        // of monitor connectivity, except for ids parked in `disconnected_workspace_ids`, which
+        // by definition sit outside every activity's views while disconnected (mirrors the
+        // `disconnected` guard in `reconcile_views_with_membership`). In the fully-disconnected
+        // window every pool id is in `disconnected_workspace_ids`, so this walk is vacuous there
+        // by construction; with any monitor connected the list is asserted empty below, so
+        // nothing is exempted.
+        let disconnected: HashSet<WorkspaceId> =
+            self.disconnected_workspace_ids.iter().copied().collect();
+        for (ws_id, ws) in pool.iter() {
+            if disconnected.contains(ws_id) {
+                continue;
+            }
+            for act_id in ws.activities() {
+                let ids_for_activity = per_activity_ids
+                    .get(act_id)
+                    .expect("every live activity got an entry above, even with zero views");
+                assert!(
+                    ids_for_activity.contains(ws_id),
+                    "workspace {ws_id:?} carries activity {act_id:?} in its activities set, but \
+                     no view of that activity holds it",
+                );
+            }
+        }
 
         if self.monitors.is_empty() {
             assert!(

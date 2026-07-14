@@ -12171,6 +12171,89 @@ fn workspace_is_safe_to_reclaim_false_for_shared_membership() {
     // without a matching Beta view entry.
 }
 
+// Membership→view coherence: widening a workspace's `activities` set directly (bypassing
+// `add_workspace_to_activity`/`set_workspace_activities`, which would also install a view entry)
+// must be caught by `verify_invariants` — the new activity has no view holding the workspace.
+#[test]
+#[should_panic(expected = "no view of that activity holds it")]
+fn verify_invariants_panics_on_membership_without_view() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    let ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name().is_some())
+        .expect("named workspace present")
+        .id();
+
+    // Corrupt: widen membership to Beta without installing a matching Beta view entry.
+    layout
+        .workspaces
+        .get_mut(&ws_id)
+        .expect("named workspace in pool")
+        .activities
+        .insert(beta);
+
+    layout.verify_invariants();
+}
+
+// View→membership coherence: dropping an activity out of a workspace's `activities` set while
+// a view of that activity still holds the workspace (bypassing the production removal path,
+// which would also evict the view entry) must be caught by `verify_invariants`.
+#[test]
+#[should_panic(expected = "but the workspace's activities set lacks that activity")]
+fn verify_invariants_panics_on_view_without_membership() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: None,
+        },
+    ];
+    let mut layout = check_ops(ops);
+    let beta = layout
+        .create_activity("Beta".to_owned())
+        .expect("create beta");
+
+    let ws_id = layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name().is_some())
+        .expect("named workspace present")
+        .id();
+
+    layout
+        .add_workspace_to_activity(
+            Some(WorkspaceReference::Id(ws_id.get())),
+            &ActivityReferenceArg::Id(beta.get()),
+        )
+        .expect("share into beta");
+    layout.verify_invariants();
+
+    // Corrupt: drop Beta from the workspace's activities set while Beta's view still holds it.
+    // Alpha stays in the set, so it remains non-empty — the earlier non-empty assert cannot fire.
+    layout
+        .workspaces
+        .get_mut(&ws_id)
+        .expect("shared workspace in pool")
+        .activities
+        .remove(&beta);
+
+    layout.verify_invariants();
+}
+
 // Absent-id debug path: in debug builds the debug_assert! fires to surface
 // caller bugs early. In release builds the predicate stays total (returns
 // false), but that branch is not testable here: this module's pervasive use
