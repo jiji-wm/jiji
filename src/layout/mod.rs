@@ -1627,18 +1627,15 @@ impl<W: LayoutElement> Layout<W> {
                         .workspaces
                         .get_mut(&ws_id)
                         .expect("dormant view id must be a live pool key");
-                    // Normalize: a workspace whose output_id is the empty-string sentinel
+                    // A named or windowed workspace whose output_id is the empty-string sentinel
                     // (produced by `new_with_config_no_outputs` without an explicit
-                    // `open_on_output`) was never bound to any real output and must not land
-                    // in the disconnected pool (where a future `Monitor::new` reclaim-bind
-                    // could latch onto it). Treat it as doomed instead.
-                    let is_sentinel_output_id =
-                        ws.output_id().is_some_and(|id| id.as_str().is_empty());
-                    if is_sentinel_output_id {
-                        doomed_ids.push(ws_id);
-                        already_doomed.insert(ws_id);
-                        continue;
-                    }
+                    // `open_on_output`) is parked like any other kept dormant id — it is legal in
+                    // the disconnected pool. `bind_output` never latches the sentinel
+                    // (`OutputName::matches("")` is false for every real connector), so a parked
+                    // sentinel's `output_id` stays a pure reconnect-routing hint that the
+                    // first-monitor drain re-installs by activity membership, not by tag. Empty
+                    // unnamed sentinels still doom via the generic `!has_windows_or_name()` arm
+                    // below.
                     if ws.has_windows_or_name() {
                         // Fire output_leave for all windows on this workspace before it joins
                         // the disconnected pool; mirrors the unbind done for active-view kept ids
@@ -1739,16 +1736,11 @@ impl<W: LayoutElement> Layout<W> {
                     .workspaces
                     .get(&ws_id)
                     .expect("dormant view id must be a live pool key");
-                // Normalize the sentinel-output-id case (mirrors the full-disconnect walk):
-                // a workspace whose output_id is the empty-string sentinel (produced by
-                // `new_with_config_no_outputs` without an explicit `open_on_output`) was
-                // never bound to any real output — destroy it rather than migrate.
-                let is_sentinel_output_id = ws.output_id().is_some_and(|id| id.as_str().is_empty());
-                if is_sentinel_output_id {
-                    doomed_ids.push(ws_id);
-                    already_doomed.insert(ws_id);
-                    continue;
-                }
+                // A named / windowed workspace whose output_id is the empty-string sentinel
+                // migrates to primary like any other kept dormant id (mirrors the full-disconnect
+                // walk). `bind_output(&primary)` below never re-tags a non-matching id, so the
+                // sentinel survives as a pure reconnect-routing hint; the migration assert accepts
+                // it. Empty unnamed workspaces still doom.
                 if !ws.has_windows_or_name() {
                     doomed_ids.push(ws_id);
                     already_doomed.insert(ws_id);
@@ -1769,11 +1761,18 @@ impl<W: LayoutElement> Layout<W> {
                 .workspaces
                 .get_mut(&ws_id)
                 .expect("workspace id must be a key in the pool");
-            assert_eq!(
-                ws.output_id().cloned(),
-                Some(OutputId::new(&monitor.output)),
-                "dormant view migration: workspace output_id must reference the disconnecting \
-                 output before bind_output(&primary) preserves it",
+            // Binding, not the tag, is what migration relies on: residency in a view keyed by the
+            // disconnecting output implies the workspace is bound to it (every view-install path
+            // binds), so the unbind/bind pair below is correct regardless of `output_id`. The tag
+            // is a pure reconnect-routing hint and legitimately takes any `Some` shape here: the
+            // disconnecting output's id (homed here), the empty-string sentinel (never pinned), or
+            // a foreign connector (pinned to a disconnected/other output, displayed here by the
+            // membership-routed drain). `None` alone is incoherent — every pool workspace is
+            // constructed with a hint or has it patched at mint time.
+            debug_assert!(
+                ws.output_id().is_some(),
+                "dormant view migration: view-resident workspace {ws_id:?} carries no output_id \
+                 routing hint at all — hint must be a real output id or the sentinel",
             );
             ws.unbind_output(&monitor.output);
             ws.bind_output(&primary_output);

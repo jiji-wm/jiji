@@ -20514,9 +20514,11 @@ fn partial_disconnect_of_primary_migrates_dormant_views_to_new_primary() {
 
 #[test]
 fn partial_disconnect_dooms_sentinel_output_id_dormant_workspace() {
-    // A dormant activity's workspace whose output_id is the empty-string sentinel (produced
-    // by `new_with_config_no_outputs`) must be doomed by the partial-disconnect walk rather
-    // than migrated. Mirrors the sentinel coverage in the full-disconnect branch.
+    // An EMPTY UNNAMED dormant workspace whose output_id is the empty-string sentinel (produced
+    // by `new_with_config_no_outputs`) must be doomed by the partial-disconnect walk — via the
+    // generic `!has_windows_or_name()` arm, not any sentinel-specific rule. Named / windowed
+    // sentinel workspaces are instead migrated to primary (see
+    // `partial_disconnect_migrates_named_sentinel_dormant_workspace_to_primary`).
     let ops = [Op::AddOutput(1), Op::AddOutput(2)];
     let mut layout = check_ops(ops);
     let seed_id = layout.active_activity_id();
@@ -20574,6 +20576,212 @@ fn partial_disconnect_dooms_sentinel_output_id_dormant_workspace() {
         "sentinel-output-id workspace must be destroyed by the partial-disconnect walk",
     );
 
+    layout.verify_invariants();
+}
+
+/// Splice a named workspace carrying the empty-string sentinel `OutputId` into `act_id`'s
+/// dormant view for `mon_out`, just before the trailing bookend. Returns the new id. The
+/// workspace is tagged exactly `activities`; `open_on_output` is left unset so the ctor seeds
+/// the `""` sentinel.
+#[track_caller]
+fn splice_named_sentinel_into_view(
+    layout: &mut Layout<TestWindow>,
+    name: &str,
+    activities: HashSet<ActivityId>,
+    config_activity_names: Vec<String>,
+    view_owner: ActivityId,
+    mon_out: &OutputId,
+) -> WorkspaceId {
+    let ws = Workspace::<TestWindow>::new_with_config_no_outputs(
+        Some(jiji_config::Workspace {
+            name: jiji_config::workspace::WorkspaceName(name.to_owned()),
+            open_on_output: None,
+            layout: None,
+            activities: config_activity_names,
+            sticky: None,
+        }),
+        activities,
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let id = ws.id();
+    assert_eq!(
+        ws.output_id().map(|oid| oid.as_str()),
+        Some(""),
+        "precondition: new_with_config_no_outputs seeds the empty-string sentinel",
+    );
+    assert!(ws.name().is_some(), "precondition: workspace is named");
+    assert!(
+        layout.workspaces.insert(id, ws).is_none(),
+        "fresh id must be unique",
+    );
+    let view = layout
+        .activities
+        .get_mut(view_owner)
+        .expect("view owner activity must be live")
+        .views_mut()
+        .get_mut(mon_out)
+        .expect("view owner must hold a materialized view on the connected output");
+    let insert_pos = view.len() - 1;
+    view.insert(insert_pos, id);
+    id
+}
+
+#[test]
+fn full_disconnect_parks_named_sentinel_dormant_workspace() {
+    // A NAMED workspace whose output_id is the empty-string sentinel, sitting in a dormant
+    // activity's view, must be PARKED (not doomed) on full disconnect. It is legal in the
+    // disconnected pool because bind_output never latches the sentinel; the first-monitor drain
+    // re-installs it by membership on reconnect.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let out1 = layout.monitors[0].output_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+
+    let sentinel_id = splice_named_sentinel_into_view(
+        &mut layout,
+        "dorm",
+        HashSet::from([beta_id]),
+        vec!["beta".to_owned()],
+        beta_id,
+        &out1,
+    );
+    layout.verify_invariants();
+
+    // Only one output → full disconnect.
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
+
+    assert!(
+        layout.disconnected_workspace_ids.contains(&sentinel_id),
+        "named sentinel workspace must be parked in the disconnected pool",
+    );
+    assert!(
+        layout.workspaces.contains_key(&sentinel_id),
+        "named sentinel workspace must survive in the pool",
+    );
+    layout.verify_invariants();
+
+    // Reconnect: the workspace re-appears, routed by beta membership.
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+    assert!(
+        layout.workspaces.contains_key(&sentinel_id),
+        "named sentinel workspace must survive reconnect",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn partial_disconnect_migrates_named_sentinel_dormant_workspace_to_primary() {
+    // Counterfactual to the empty-unnamed doom test above: a NAMED sentinel dormant workspace
+    // migrates to primary on partial disconnect like any other kept dormant id. The old doom
+    // clause destroyed it. This pins the relaxed migration assert.
+    let ops = [Op::AddOutput(1), Op::AddOutput(2)];
+    let mut layout = check_ops(ops);
+    let seed_id = layout.active_activity_id();
+    let out1 = layout.monitors[0].output_id();
+    let out2 = layout.monitors[1].output_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+    layout.switch_activity(beta_id);
+    layout.verify_invariants();
+    layout.switch_activity(seed_id);
+    layout.verify_invariants();
+
+    let sentinel_id = splice_named_sentinel_into_view(
+        &mut layout,
+        "dorm",
+        HashSet::from([beta_id]),
+        vec!["beta".to_owned()],
+        beta_id,
+        &out1,
+    );
+    layout.verify_invariants();
+
+    // Disconnect out1 (the primary). primary_idx saturates to 0 = out2.
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
+
+    assert!(
+        layout.workspaces.contains_key(&sentinel_id),
+        "named sentinel workspace must survive the partial disconnect",
+    );
+    let beta_after = layout.activities.get(beta_id).expect("beta live");
+    assert!(
+        !beta_after.views().contains_key(&out1),
+        "beta must not hold a view keyed by the disconnected output",
+    );
+    assert!(
+        beta_after
+            .views()
+            .get(&out2)
+            .expect("beta must hold a view for the new primary (out2)")
+            .ids()
+            .contains(&sentinel_id),
+        "named sentinel workspace must migrate into beta's view for the new primary (out2)",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn full_disconnect_parks_shared_named_sentinel_not_pool_orphaned() {
+    // A named sentinel workspace shared across two dormant activities must be parked on full
+    // disconnect. Pre-fix it was classed as doomed, but destroy_workspaces_cross_activity's
+    // shared-id guard skipped the pool removal, leaving it orphaned (in the pool but in no view)
+    // — a pool==union violation. The kept leg parks it instead.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let out1 = layout.monitors[0].output_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+    let gamma = super::activity::Activity::new_runtime("gamma".to_owned());
+    let gamma_id = gamma.id();
+    test_insert_activity(&mut layout, gamma);
+
+    // Mint once, splice into both dormant activities' views (shared).
+    let ws = Workspace::<TestWindow>::new_with_config_no_outputs(
+        Some(jiji_config::Workspace {
+            name: jiji_config::workspace::WorkspaceName("shared".to_owned()),
+            open_on_output: None,
+            layout: None,
+            activities: vec!["beta".to_owned(), "gamma".to_owned()],
+            sticky: None,
+        }),
+        HashSet::from([beta_id, gamma_id]),
+        layout.clock.clone(),
+        layout.options.clone(),
+    );
+    let sentinel_id = ws.id();
+    assert!(
+        layout.workspaces.insert(sentinel_id, ws).is_none(),
+        "fresh id must be unique",
+    );
+    for act_id in [beta_id, gamma_id] {
+        let view = layout
+            .activities
+            .get_mut(act_id)
+            .expect("live")
+            .views_mut()
+            .get_mut(&out1)
+            .expect("materialized view");
+        let pos = view.len() - 1;
+        view.insert(pos, sentinel_id);
+    }
+    layout.verify_invariants();
+
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
+
+    assert!(
+        layout.disconnected_workspace_ids.contains(&sentinel_id),
+        "shared named sentinel must be parked, not pool-orphaned",
+    );
+    assert!(
+        layout.workspaces.contains_key(&sentinel_id),
+        "shared named sentinel must survive in the pool",
+    );
     layout.verify_invariants();
 }
 
