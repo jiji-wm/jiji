@@ -979,12 +979,17 @@ impl State {
     /// Silent-drop wrapper over [`Self::do_action_inner`].
     ///
     /// Keybinding-triggered actions (and other internal callers like switch
-    /// events) inherit the contract: both error arms of
-    /// [`DoActionError`] — `ActivitySwitchBlocked` (hard-block) and
-    /// `WindowNotFound` (stale id) — are dropped here on purpose. The
-    /// keypress is discarded, not queued, and no error is surfaced to the
-    /// user. Callers that can surface the `Err` to a client (e.g., the IPC
-    /// `Request::Action` dispatch) call `do_action_inner` directly.
+    /// events) inherit the contract: every [`DoActionError`] is dropped here
+    /// on purpose, whatever its [`crate::layout::Disposition`] —
+    /// [`crate::layout::Disposition::Park`] and
+    /// [`crate::layout::Disposition::Terminal`] alike. The disposition
+    /// classification only matters to the IPC drain-walk, which parks `Park`
+    /// errors on a per-connection waiter queue and signals `Terminal` ones
+    /// immediately; a keybinding-triggered call has no such waiter to park or
+    /// signal. The keypress is discarded, not queued, and no error is
+    /// surfaced to the user. Callers that can surface the `Err` to a client
+    /// (e.g., the IPC `Request::Action` dispatch) call `do_action_inner`
+    /// directly.
     ///
     /// The successful [`DoActionOutcome`] payload (`Handled` and `NoOp(reason)`
     /// alike) is also dropped here. A `NoOp(...)` breadcrumb produced via a
