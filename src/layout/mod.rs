@@ -1379,16 +1379,34 @@ impl<W: LayoutElement> Layout<W> {
     pub fn add_output(&mut self, output: Output, layout_config: Option<LayoutPart>) {
         let seed_activity = self.activities.active_id();
         if self.monitors.is_empty() {
-            // Reconnecting from a fully-disconnected state: the first monitor takes over all
-            // workspaces that were parked in `disconnected_workspace_ids` in their saved order.
-            let workspace_ids = mem::take(&mut self.disconnected_workspace_ids);
-            let ws_id_to_activate = self.last_active_workspace_id.remove(&output.name());
+            // Reconnecting from a fully-disconnected state: partition the parked workspaces by
+            // membership in the seed-active activity. Members populate the seed monitor's view
+            // (in their saved order); non-members are bound to the output and routed into their
+            // own activities' views by the materializer's real-tag lift and the membership
+            // residue pass below — a dormant-declared workspace boots into its activity's view
+            // rather than being adopted wholesale by the active view.
+            let drained = mem::take(&mut self.disconnected_workspace_ids);
+            let active_id = seed_activity;
+            let (members, non_members): (Vec<WorkspaceId>, Vec<WorkspaceId>) =
+                drained.iter().copied().partition(|id| {
+                    self.workspaces
+                        .get(id)
+                        .expect("parked id must be a live pool key")
+                        .activities()
+                        .contains(&active_id)
+                });
+
+            // Pass the remembered active workspace unfiltered: Monitor::new's list-match makes
+            // member-filtering implicit — a non-member remembered id matches no member, so the
+            // seed view falls back to its default activation (first member, or the bookend when
+            // there are no members).
+            let remembered = self.last_active_workspace_id.remove(&output.name());
             let output_id = OutputId::new(&output);
 
             let (mut monitor, view) = Monitor::new(
                 output,
-                workspace_ids,
-                ws_id_to_activate,
+                members,
+                remembered,
                 &mut self.workspaces,
                 self.clock.clone(),
                 self.options.clone(),
@@ -1411,9 +1429,94 @@ impl<W: LayoutElement> Layout<W> {
             self.primary_idx = 0;
             self.active_monitor_idx = 0;
 
-            // First-monitor bootstrap: every dormant activity needs a view for this output now
-            // so the per-activity bookend invariant holds at the next debug refresh.
+            // Bind the non-member parked workspaces to the new output before the materializer
+            // runs, mirroring Monitor::new's member loop. This preserves today's window
+            // output_enter semantics (a dormant-view workspace on a connected output is bound —
+            // switch_activity never binds/unbinds) and refreshes real connector-form tags to the
+            // make/model/serial form so the materializer's real-tag lift filter can match by `==`.
+            let mon_output = self.monitors[0].output.clone();
+            let mon_options = self.monitors[0].options.clone();
+            for id in &non_members {
+                let ws = self
+                    .workspaces
+                    .get_mut(id)
+                    .expect("parked id must be a live pool key");
+                ws.bind_output(&mon_output);
+                ws.update_config(mon_options.clone());
+            }
+
+            // Materialize a view for every activity on the new output. The lift branch pulls
+            // real-tagged workspaces (members and non-members alike) into their member activities'
+            // views; the source-side dedup is per-activity, so cross-activity sharing survives.
             self.ensure_all_activity_views();
+
+            // Residue install: any drained id the materializer could not lift (sentinel-tagged, or
+            // tagged for a different output, or shared into a member whose view the lift skipped)
+            // is installed into every member activity's boot-output view by membership.
+            self.install_drained_by_membership(&drained, 0);
+
+            // Reseat: a residue install lands above a fresh trailing bookend without moving the
+            // view's id-keyed active cursor, leaving the bookend active. Reseat every non-active
+            // boot-output view whose active is an empty bookend onto its first real workspace so
+            // the two install mechanisms (lift vs. residue) do not diverge by tag shape.
+            self.reseat_bookend_active_boot(0, active_id);
+
+            // Remembered-nonmember fallback: when the remembered active workspace is a live
+            // non-member, Monitor::new activated the seed default instead. Reseat each of its
+            // member activities' boot-output views onto it so reconnect restores the workspace the
+            // user last had focused, even though it belongs to a dormant activity now.
+            match remembered {
+                Some(r) if !self.workspaces.contains_key(&r) => {
+                    trace!(
+                        "add_output: remembered active workspace {r:?} is no longer a live pool \
+                         key; no remembered-nonmember fallback",
+                    );
+                }
+                Some(r) => {
+                    let is_nonmember = self
+                        .workspaces
+                        .get(&r)
+                        .is_some_and(|ws| !ws.activities().contains(&active_id));
+                    if is_nonmember {
+                        let boot_out_id = self.monitors[0].output_id();
+                        let member_acts: Vec<ActivityId> = {
+                            let r_acts = self
+                                .workspaces
+                                .get(&r)
+                                .expect("checked live above")
+                                .activities()
+                                .clone();
+                            self.activities
+                                .iter()
+                                .filter(|a| r_acts.contains(&a.id()))
+                                .map(|a| a.id())
+                                .collect()
+                        };
+                        for act_id in member_acts {
+                            let view = self
+                                .activities
+                                .get_mut(act_id)
+                                .expect("act_id sourced from activities.iter()")
+                                .views_mut()
+                                .get_mut(&boot_out_id)
+                                .expect("member activity holds a boot-output view");
+                            let pos = view.position_of(r);
+                            debug_assert!(
+                                pos.is_some(),
+                                "remembered non-member fallback: {r:?} must be present in member \
+                                 activity {act_id:?}'s boot-output view — the residue pass \
+                                 guarantees presence",
+                            );
+                            if let Some(pos) = pos {
+                                view.set_active_at(pos);
+                            }
+                        }
+                    }
+                    // A remembered live member is already activated by the seed view — no action.
+                }
+                None => {}
+            }
+
             return;
         }
 
@@ -1952,6 +2055,123 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Install every drained workspace into each member activity's boot-output view that does not
+    /// already hold it, then mint the bookends those inserts require.
+    ///
+    /// Runs after the first-monitor materializer to cover the drained ids the materializer's
+    /// real-tag lift cannot reach: sentinel- or wrong-output-tagged non-members, and the
+    /// shared-member gap where a workspace was lifted into one member's view but not another's.
+    /// Iterates activities in declaration order and tests membership, so a dead membership id on a
+    /// workspace is naturally ignored. A member activity lacking a boot-output view after the
+    /// materializer is a structurally-impossible miss (the per-activity bookend invariant
+    /// guarantees the view) — `debug_assert!` + skip, mirroring the discipline in
+    /// [`Self::reconcile_views_with_membership`], never a silent `continue`.
+    ///
+    /// Called outside any `(monitors, pool, view)` split-borrow scope so `&mut self` is available
+    /// for the trailing/EWAF-leading bookend fixup, like the post-split flushes in
+    /// [`Self::add_output`] / [`Self::remove_output`].
+    fn install_drained_by_membership(&mut self, drained: &[WorkspaceId], mon_idx: usize) {
+        let boot_out_id = self.monitors[mon_idx].output_id();
+        for &ws_id in drained {
+            let ws_acts = match self.workspaces.get(&ws_id) {
+                Some(ws) => ws.activities().clone(),
+                None => {
+                    debug_assert!(
+                        false,
+                        "install_drained_by_membership: drained id {ws_id:?} is not a live pool \
+                         key",
+                    );
+                    continue;
+                }
+            };
+            let member_acts: Vec<ActivityId> = self
+                .activities
+                .iter()
+                .filter(|a| ws_acts.contains(&a.id()))
+                .map(|a| a.id())
+                .collect();
+            let mut installed_any = false;
+            for act_id in member_acts {
+                let pool = &mut self.workspaces;
+                let activities = &mut self.activities;
+                let activity = activities
+                    .get_mut(act_id)
+                    .expect("act_id sourced from activities.iter()");
+                let Some(view) = activity.views_mut().get_mut(&boot_out_id) else {
+                    debug_assert!(
+                        false,
+                        "install_drained_by_membership: member activity {act_id:?} has no view \
+                         for the boot output {boot_out_id:?} after the materializer — \
+                         per-activity bookend invariant violated (membership↔view coherence bug)",
+                    );
+                    continue;
+                };
+                if view.position_of(ws_id).is_some() {
+                    continue;
+                }
+                Self::view_insert_above_trailing_bookend(pool, view, ws_id);
+                installed_any = true;
+            }
+            if installed_any {
+                self.dormant_view_bookend_fixup(ws_id, mon_idx);
+            }
+        }
+    }
+
+    /// Reseat every non-active boot-output view whose active id resolves to an empty unnamed
+    /// bookend onto the first windowed-or-named entry it holds.
+    ///
+    /// A [`WorkspaceView`]'s active is an id, so a residue install above a fresh trailing bookend
+    /// leaves the bookend active. The lift branch of [`Self::ensure_view_for`] instead activates
+    /// the first lifted body, so without this reseat two dormant views holding the same workspaces
+    /// would open differently depending on whether the workspaces were lifted (real tag) or
+    /// residue-installed (sentinel tag). Scoped to the fresh first-monitor views — all boot-output
+    /// views are freshly built here — so no in-flight animation can be snapped; do not generalize
+    /// into a sweep.
+    fn reseat_bookend_active_boot(&mut self, mon_idx: usize, active_id: ActivityId) {
+        let boot_out_id = self.monitors[mon_idx].output_id();
+        let mut reseats: Vec<(ActivityId, usize)> = Vec::new();
+        for a in self.activities.iter() {
+            if a.id() == active_id {
+                continue;
+            }
+            let Some(view) = a.views().get(&boot_out_id) else {
+                debug_assert!(
+                    false,
+                    "reseat_bookend_active_boot: activity {:?} has no view for the boot output \
+                     {boot_out_id:?} after ensure_all_activity_views — per-activity bookend \
+                     invariant violated (view-materialization coherence bug)",
+                    a.id(),
+                );
+                continue;
+            };
+            let active_is_bookend = self
+                .workspaces
+                .get(&view.active())
+                .is_some_and(|ws| !ws.has_windows_or_name());
+            if !active_is_bookend {
+                continue;
+            }
+            let first_body = view.ids().iter().position(|id| {
+                self.workspaces
+                    .get(id)
+                    .is_some_and(|ws| ws.has_windows_or_name())
+            });
+            if let Some(pos) = first_body {
+                reseats.push((a.id(), pos));
+            }
+        }
+        for (act_id, pos) in reseats {
+            self.activities
+                .get_mut(act_id)
+                .expect("act_id sourced from activities.iter()")
+                .views_mut()
+                .get_mut(&boot_out_id)
+                .expect("view existed at scan time")
+                .set_active_at(pos);
+        }
+    }
+
     /// Adds a new window to the layout.
     ///
     /// Returns an output that the window was added to, if there were any outputs.
@@ -2282,19 +2502,23 @@ impl<W: LayoutElement> Layout<W> {
             .get(&ws_id)
             .expect("AddWindowTarget::Workspace must name a live pool key")
             .output_id()
-            .cloned()?;
-        // Resolve the monitor owning this workspace. If the workspace is unbound
-        // (output_id == Some(OutputId(""))) or the named output is not currently
-        // connected, there is no monitor to add to; returning None signals the
-        // caller to drop the window normally (avoids an orphan tile in the pool).
-        // In practice this is unreachable for the `open-on-activity` path because
-        // `Monitor::new` reclaim-binds pre-tagged workspaces to the output on
-        // first connect, so a workspace whose id was returned by the
-        // configure-time `view_in_activity_or_materialize` call is always bound.
-        let mon_idx = self
-            .monitors
-            .iter()
-            .position(|mon| mon.output_id() == ws_output_id)?;
+            .cloned();
+        // Resolve the monitor displaying this workspace. A bound workspace resolves by its real
+        // `output_id`. A workspace routed into a dormant view by activity membership carries the
+        // empty-string sentinel `output_id` (a config workspace with no `open-on-output` keeps it
+        // until it is reclaim-bound), so it matches no monitor by tag; fall back to the view that
+        // currently holds it. If neither resolves — the workspace is on no connected monitor —
+        // return None so the caller drops the window normally rather than orphaning a tile in the
+        // pool.
+        let mon_idx = ws_output_id
+            .as_ref()
+            .and_then(|oid| self.monitors.iter().position(|mon| mon.output_id() == *oid))
+            .or_else(|| {
+                let holding = self.workspace_holding_output(ws_id)?;
+                self.monitors
+                    .iter()
+                    .position(|mon| mon.output_id() == holding)
+            })?;
 
         let mon_output = self.monitors[mon_idx].output.clone();
         let ws = self
@@ -9890,23 +10114,25 @@ impl<W: LayoutElement> Layout<W> {
         // latter misses the mixed-tag case and would leave the workspace
         // unanchored after the remove pass prunes the activity memberships.
         //
-        // Background on how an orphan reaches us: named config workspaces
+        // Background on how an orphan can reach us: named config workspaces
         // seeded via `Workspace::new_with_config_no_outputs` carry the
         // empty-string sentinel from `unwrap_or_default()` on `open_on_output`,
         // and `Workspace::bind_output` only refreshes `output_id` when
         // `matches(output)` is already true (reclaim semantic of
         // `Workspace::bind_output`'s guard). The sentinel matches no real
-        // output, so it survives `add_output`'s lift loop. `Monitor::new`
-        // then pulls every disconnected workspace into the seed-active
-        // activity's view at first-monitor-attach regardless of each
-        // workspace's own `activities` tagging. On reload-drop-active, the
-        // cascade target's `ensure_all_activity_views` cannot reclaim such an
-        // orphan (its `output_id` is the sentinel, not the real output), so
-        // without this rebind the orphan loses its only anchoring view.
+        // output. The first-monitor drain routes parked workspaces into their
+        // member activities' views by membership, so a well-formed boot no
+        // longer strands a sentinel-tagged workspace in a non-member activity's
+        // view. This rebind remains as defense for orphan shapes produced by
+        // paths that are not yet coherence-guaranteed — a workspace present in a
+        // removed activity's view but anchored by no surviving activity's view
+        // on that output. On reload-drop-active, the cascade target's
+        // `ensure_all_activity_views` cannot reclaim such an orphan (its
+        // `output_id` is the sentinel, not the real output), so without this
+        // rebind the orphan would lose its only anchoring view.
         //
         // We rebind here rather than fixing the sentinel at its source: that
-        // upstream fix touches `bind_output`'s reclaim semantic and
-        // `Monitor::new`'s lift-loop activity-tagging filter — both deferred.
+        // upstream fix touches `bind_output`'s reclaim semantic — deferred.
         // Cascade-time rebind is the lowest-ripple choice.
         let cascade_target_id = self.activities.active_id();
 

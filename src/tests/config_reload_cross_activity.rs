@@ -4,17 +4,17 @@
 //!
 //! Two load-bearing properties this test pins:
 //!
-//! 1. **The orphan-rebind production path** (`Layout::reconcile_activities_on_reload_remove`
-//!    orphan-rebind leg). Without it, `Workspace::new_with_config_no_outputs` seeds named config
-//!    workspaces with the empty-string `OutputId` sentinel, `Monitor::new`'s lift loop pulls every
-//!    disconnected workspace into the seed-active activity's view at first-monitor-attach
-//!    regardless of `activities` tagging, and the cascade target's `ensure_all_activity_views`
-//!    cannot reclaim such an orphan (sentinel ≠ real output id). On reload-drop-active the orphan's
-//!    only anchoring view evaporates with `self.activities.remove`, and
-//!    `Layout::verify_invariants`' pool-keys-equal-union check would panic. The named `ws_a`
-//!    workspace declared under the dropped alpha is what drives the prewalk → `unname_workspace` →
-//!    reconcile-add precondition assert; replacing it with an unnamed runtime workspace silently
-//!    drops that leg. Review-stop on any change that swaps `ws_a` out for an unnamed substitute.
+//! 1. **The end-to-end cascade under membership-routed boot.** The first-monitor drain routes each
+//!    parked workspace into its member activities' views by membership, so `ws_b` (declared for
+//!    beta) boots into beta's view anchored by a survivor — this fixture no longer naturally
+//!    produces the sentinel-orphan shape the orphan-rebind leg exists to repair. That leg
+//!    (`Layout::reconcile_activities_on_reload_remove` orphan-rebind) is genuinely pinned, with a
+//!    directly-constructed orphan, by the layout-unit test
+//!    `reconcile_remove_rebinds_orphan_workspace_into_cascade_target_view` (which sabotage-fails
+//!    when the rebind is removed). Here the named `ws_a` workspace declared under the dropped alpha
+//!    still drives the prewalk → `unname_workspace` → reconcile-add precondition assert; replacing
+//!    it with an unnamed runtime workspace silently drops that leg. Review-stop on any change that
+//!    swaps `ws_a` out for an unnamed substitute.
 //!
 //! 2. **The cascade-target arm exercised**: `previous_id == None` → first-declaration-order
 //!    non-remove-set survivor (= beta), per the cascade-target resolution in

@@ -15790,9 +15790,9 @@ fn reconcile_remove_rebinds_orphan_workspace_into_cascade_target_view() {
     // `active = alpha`, `previous = Default`. Mint a sentinel workspace via
     // `Workspace::new_no_outputs` (carries `OutputId("")`), tag it as
     // exclusively beta's, and splice it into alpha's view of monitor 1 just
-    // before the trailing-empty bookend — mirroring what `Monitor::new`'s
-    // lift loop does on first-monitor-attach when an orphan sits in
-    // `disconnected_workspace_ids`.
+    // before the trailing-empty bookend — the runtime orphan shape a
+    // sentinel-tagged config workspace can reach in a non-member activity's
+    // view when a path not yet coherence-guaranteed leaves it there.
     //
     // Reload drops `Default` and `alpha`, keeps `beta`. Both `active=alpha`
     // and `previous=Default` are in remove_set, so the cascade falls through
@@ -15843,10 +15843,9 @@ fn reconcile_remove_rebinds_orphan_workspace_into_cascade_target_view() {
     // Mint the orphan with the empty-string sentinel. Named so the Monitor
     // invariant "non-active non-last workspaces must be empty-and-unnamed"
     // does not fire: an unnamed empty workspace at a non-last position would
-    // violate it. This matches the production scenario the surface-C panic
-    // reproduces from — a config-named workspace tagged to a non-active
-    // activity, lifted by `Monitor::new` into the seed-active activity's
-    // view at first-monitor-attach.
+    // violate it. This constructs the runtime orphan shape — a config-named
+    // workspace tagged to a non-active activity, sitting in a non-member
+    // activity's view where a path not yet coherence-guaranteed left it.
     let orphan_cfg = jiji_config::Workspace {
         name: jiji_config::workspace::WorkspaceName("ws_b".to_owned()),
         open_on_output: None,
@@ -16203,9 +16202,9 @@ fn reconcile_remove_rebinds_orphan_when_workspace_tagged_to_both_removed_and_sur
         "fresh id is unique",
     );
 
-    // Splice the orphan into alpha's view of mon_out (the sentinel-lift path),
-    // but NOT into gamma's view. This is the precondition that exposes the bug:
-    // gamma is a surviving activity but its view on mon_out does not contain
+    // Splice the orphan into alpha's view of mon_out (the runtime sentinel-in-
+    // non-member-view shape), but NOT into gamma's view. This is the precondition that exposes the
+    // bug: gamma is a surviving activity but its view on mon_out does not contain
     // the orphan, so the orphan is unanchored after the remove pass.
     {
         let alpha_view = layout
@@ -20726,6 +20725,128 @@ fn partial_disconnect_migrates_named_sentinel_dormant_workspace_to_primary() {
 }
 
 #[test]
+fn partial_disconnect_migrates_foreign_tagged_dormant_resident_without_panic() {
+    // Reachable release-mode panic regression: a config workspace pinned to a dormant
+    // activity with `open-on-output` naming a real connector that never connects lands, via
+    // the membership-routed drain's residue install, in a dormant view WITHOUT being
+    // retagged — it keeps the foreign output_id (the real-tag lift only reaches workspaces
+    // whose tag equals a *connected* output's canonical form; residue install is the
+    // fallback for everything the lift can't place, and it does not retag). A later partial
+    // disconnect of the boot output reaches the dormant-view migration walk, which must not
+    // assume the tag names either the disconnecting output or the empty sentinel: a foreign
+    // tag is a legitimate reconnect-routing hint here, not evidence of corruption.
+    let mut layout = Layout::<TestWindow>::new(
+        Clock::with_time(Duration::ZERO),
+        &cross_activity_config(&[], &[("beta-ws", Some("output3"))]),
+    );
+    let beta_id = layout.activities().find_by_name("beta").unwrap().id();
+
+    // Boot on output1. output3 (the pinned tag) is never connected in this test.
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+    let out1 = layout.monitors[0].output_id();
+
+    let beta_ws_id = layout
+        .find_workspace_in_activity_by_name("beta-ws", beta_id)
+        .expect("beta-ws must be present in pool")
+        .id();
+
+    // Preconditions: absent from the active (alpha) strip; present in beta's out1 view;
+    // still carries the foreign output3 tag rather than out1's id — the residue install
+    // path routed it by membership without retagging.
+    assert!(
+        !layout.active_view(&out1).ids().contains(&beta_ws_id),
+        "foreign-tagged dormant workspace must not surface in the active strip",
+    );
+    let beta_out1 = layout
+        .activities()
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&out1)
+        .expect("beta must hold a materialized view for out1");
+    assert!(
+        beta_out1.ids().contains(&beta_ws_id),
+        "beta-ws must be routed into beta's out1 view by membership",
+    );
+    let ws_out_id = layout
+        .workspaces
+        .get(&beta_ws_id)
+        .expect("live")
+        .output_id()
+        .cloned();
+    assert_eq!(
+        ws_out_id.as_ref().map(|id| id.as_str()),
+        Some("output3"),
+        "residue install must not retag the workspace — it keeps its pinned output3 hint",
+    );
+    assert_ne!(
+        ws_out_id,
+        Some(out1.clone()),
+        "precondition: the foreign tag must not equal the boot output's id",
+    );
+
+    // Add a window so windows-intact + output_enter/leave symmetry are exercised across the
+    // migration (precedent:
+    // `add_window_to_hidden_activity_workspace_via_add_window_target_workspace`).
+    let window = TestWindow::new(TestWindowParams::new(0));
+    layout.add_window(
+        window,
+        AddWindowTarget::Workspace(beta_ws_id),
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::No,
+    );
+    layout.verify_invariants();
+
+    // Second monitor, then drop the boot output: the partial-disconnect dormant walk hits
+    // the migrate branch for beta's foreign-tagged resident.
+    check_ops_on_layout(&mut layout, [Op::AddOutput(2)]);
+    let out2 = layout.monitors[1].output_id();
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
+
+    // No panic (the assertion above this comment is itself proof: `check_ops_on_layout`
+    // would have aborted the test process on an assert failure). Assert post-migration state.
+    let beta_after = layout
+        .activities
+        .get(beta_id)
+        .expect("beta must remain live");
+    assert!(
+        !beta_after.views().contains_key(&out1),
+        "no activity may hold a view keyed by the disconnected output",
+    );
+    let beta_out2 = beta_after
+        .views()
+        .get(&out2)
+        .expect("beta must hold a view for the new primary (out2)");
+    let pos = beta_out2
+        .position_of(beta_ws_id)
+        .expect("beta-ws must migrate into beta's view for the new primary (out2)");
+    assert!(
+        pos < beta_out2.len() - 1,
+        "beta-ws must sit above the trailing bookend, not be the bookend itself",
+    );
+    let ws = layout
+        .workspaces
+        .get(&beta_ws_id)
+        .expect("migrated workspace must remain a pool key");
+    assert!(
+        ws.has_window(&0),
+        "window must survive the migration intact",
+    );
+    assert_eq!(
+        ws.output_id().map(|id| id.as_str()),
+        Some("output3"),
+        "the foreign tag survives migration untouched — bind_output(&primary) never latches \
+         a non-matching id, so it stays a pure reconnect-routing hint",
+    );
+
+    layout.verify_invariants();
+    verify_output_bindings(&layout);
+}
+
+#[test]
 fn full_disconnect_parks_shared_named_sentinel_not_pool_orphaned() {
     // A named sentinel workspace shared across two dormant activities must be parked on full
     // disconnect. Pre-fix it was classed as doomed, but destroy_workspaces_cross_activity's
@@ -20783,6 +20904,425 @@ fn full_disconnect_parks_shared_named_sentinel_not_pool_orphaned() {
         "shared named sentinel must survive in the pool",
     );
     layout.verify_invariants();
+}
+
+// --- First-monitor drain: membership routing --------------------------------
+//
+// The first monitor to connect drains `disconnected_workspace_ids` by activity membership: the
+// seed-active activity's members populate its view; non-members are routed into their own
+// activities' views (via the materializer's real-tag lift or the membership residue pass). A
+// dormant-declared config workspace therefore boots into its activity's view, never the active
+// strip.
+
+#[track_caller]
+fn find_ws_id_by_name(layout: &Layout<TestWindow>, name: &str) -> WorkspaceId {
+    layout
+        .workspaces
+        .values()
+        .find(|ws| ws.name().map(String::as_str) == Some(name))
+        .unwrap_or_else(|| panic!("named workspace {name:?} must exist"))
+        .id()
+}
+
+#[test]
+fn boot_dormant_sentinel_config_workspace_lands_in_member_view_not_active_strip() {
+    // A config workspace declared for a dormant activity only, with no open-on-output
+    // (OutputId ""), boots into that activity's view — never the active strip — with a fresh
+    // trailing bookend and the workspace activated (reseated off the bookend).
+    let mut layout = Layout::<TestWindow>::default();
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+
+    layout.ensure_named_workspace(&WorkspaceConfig {
+        name: WorkspaceName("dorm".to_owned()),
+        open_on_output: None,
+        layout: None,
+        activities: vec!["beta".to_owned()],
+        sticky: None,
+    });
+    let dorm_id = find_ws_id_by_name(&layout, "dorm");
+    assert!(
+        layout.disconnected_workspace_ids.contains(&dorm_id),
+        "dormant config workspace parks while no monitor is connected",
+    );
+
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+
+    assert!(
+        !layout.active_view(&mon_out).ids().contains(&dorm_id),
+        "dormant-only workspace must not appear in the active strip",
+    );
+    let beta_view = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view materialized on boot");
+    assert_eq!(beta_view.ids().len(), 2, "body + trailing bookend");
+    assert_eq!(beta_view.ids()[0], dorm_id, "workspace is the body entry");
+    assert_eq!(
+        beta_view.active(),
+        dorm_id,
+        "the workspace, not the bookend, is active",
+    );
+    assert!(
+        !layout
+            .workspaces
+            .get(&beta_view.ids()[1])
+            .expect("live")
+            .has_windows_or_name(),
+        "trailing entry is an empty unnamed bookend",
+    );
+    layout.verify_invariants();
+    verify_output_bindings(&layout);
+}
+
+#[test]
+fn boot_dormant_real_tagged_config_workspace_lands_in_member_view_via_lift() {
+    // Same end state as the sentinel case, reached via the materializer's real-tag lift: the
+    // config workspace declares open-on-output, so the non-member bind loop refreshes its tag to
+    // the canonical form and `ensure_all_activity_views` lifts it into the member view.
+    let mut layout = Layout::<TestWindow>::default();
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+
+    layout.ensure_named_workspace(&WorkspaceConfig {
+        name: WorkspaceName("dorm".to_owned()),
+        open_on_output: Some("output1".to_owned()),
+        layout: None,
+        activities: vec!["beta".to_owned()],
+        sticky: None,
+    });
+    let dorm_id = find_ws_id_by_name(&layout, "dorm");
+
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+
+    assert!(
+        !layout.active_view(&mon_out).ids().contains(&dorm_id),
+        "dormant-only workspace must not appear in the active strip",
+    );
+    let beta_view = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view");
+    assert_eq!(beta_view.ids()[0], dorm_id, "workspace is the body entry");
+    assert_eq!(beta_view.active(), dorm_id, "the workspace is active");
+    layout.verify_invariants();
+    verify_output_bindings(&layout);
+}
+
+#[test]
+fn boot_shared_sentinel_config_workspace_in_seed_and_dormant_views() {
+    // A config workspace declared for {active, dormant} with no open-on-output boots into the
+    // active seed view AND the dormant member's view. The member-inclusive residue pass is what
+    // reaches the dormant view (the sentinel-tag lift would miss it).
+    let mut layout = Layout::<TestWindow>::default();
+    let alpha = layout.active_activity_id();
+    let alpha_name = layout
+        .activities
+        .get(alpha)
+        .expect("live")
+        .name()
+        .to_owned();
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+
+    layout.ensure_named_workspace(&WorkspaceConfig {
+        name: WorkspaceName("both".to_owned()),
+        open_on_output: None,
+        layout: None,
+        activities: vec![alpha_name, "beta".to_owned()],
+        sticky: None,
+    });
+    let both_id = find_ws_id_by_name(&layout, "both");
+
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+
+    assert!(
+        layout.active_view(&mon_out).ids().contains(&both_id),
+        "shared workspace must appear in the active (alpha) seed view",
+    );
+    assert!(
+        layout
+            .activities
+            .get(beta_id)
+            .expect("beta live")
+            .views()
+            .get(&mon_out)
+            .expect("beta view")
+            .ids()
+            .contains(&both_id),
+        "shared workspace must also appear in the dormant member's (beta) view",
+    );
+    layout.verify_invariants();
+    verify_output_bindings(&layout);
+}
+
+#[test]
+fn boot_ewaf_dormant_sentinel_config_workspace_lands_with_leading_bookend() {
+    // EWAF mirror: a dormant sentinel config workspace boots into [lead, ws, trailing] with the
+    // workspace (not either bookend) active.
+    let options = Options {
+        layout: jiji_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut layout = Layout::<TestWindow>::with_options(Clock::with_time(Duration::ZERO), options);
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+
+    layout.ensure_named_workspace(&WorkspaceConfig {
+        name: WorkspaceName("dorm".to_owned()),
+        open_on_output: None,
+        layout: None,
+        activities: vec!["beta".to_owned()],
+        sticky: None,
+    });
+    let dorm_id = find_ws_id_by_name(&layout, "dorm");
+
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta_view = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view");
+    assert_eq!(
+        beta_view.ids().len(),
+        3,
+        "leading + body + trailing under EWAF"
+    );
+    assert_eq!(
+        beta_view.ids()[1],
+        dorm_id,
+        "workspace is the middle body entry"
+    );
+    assert_eq!(beta_view.active(), dorm_id, "the workspace is active");
+    for pos in [0usize, 2] {
+        assert!(
+            !layout
+                .workspaces
+                .get(&beta_view.ids()[pos])
+                .expect("live")
+                .has_windows_or_name(),
+            "bookend at position {pos} is empty unnamed",
+        );
+    }
+    layout.verify_invariants();
+    verify_output_bindings(&layout);
+}
+
+#[test]
+fn boot_member_only_config_workspace_lands_in_active_view() {
+    // Regression pin: a config workspace declared for the active activity boots into the active
+    // view in saved order, activated by the default rule — the member path is unchanged.
+    let mut layout = Layout::<TestWindow>::default();
+    layout.ensure_named_workspace(&WorkspaceConfig {
+        name: WorkspaceName("am".to_owned()),
+        open_on_output: None,
+        layout: None,
+        activities: Vec::new(),
+        sticky: None,
+    });
+    let am_id = find_ws_id_by_name(&layout, "am");
+
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+
+    assert!(
+        layout.active_view(&mon_out).ids().contains(&am_id),
+        "member config workspace lands in the active view",
+    );
+    assert_eq!(
+        layout.active_view(&mon_out).active(),
+        am_id,
+        "the sole member workspace is activated (no remembered override)",
+    );
+    layout.verify_invariants();
+    verify_output_bindings(&layout);
+}
+
+#[test]
+fn full_reconnect_remembered_member_activates_in_seed_view() {
+    // Full-reconnect existing-behavior pin: a remembered member workspace is activated by the
+    // seed view on reconnect.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    layout.ensure_named_workspace(&WorkspaceConfig {
+        name: WorkspaceName("m".to_owned()),
+        open_on_output: None,
+        layout: None,
+        activities: Vec::new(),
+        sticky: None,
+    });
+    let m_id = find_ws_id_by_name(&layout, "m");
+
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
+    assert!(layout.disconnected_workspace_ids.contains(&m_id));
+    layout
+        .last_active_workspace_id
+        .insert("output1".to_owned(), m_id);
+
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+    assert_eq!(
+        layout.active_view(&mon_out).active(),
+        m_id,
+        "remembered member workspace is activated in the seed view",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn full_reconnect_remembered_nonmember_activates_in_member_view() {
+    // Full-reconnect remembered non-member: the active workspace at disconnect belongs to alpha,
+    // then the activity switches to beta while dark. On reconnect the seed (beta) view activates
+    // its default, and the remembered workspace is reseated active in ALPHA's boot-output view by
+    // the remembered-nonmember fallback. Two alpha workspaces make the counterfactual sharp: the
+    // lift activates the first (w1), so only the fallback lands active on the remembered w2.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let alpha = layout.active_activity_id();
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+
+    for name in ["w1", "w2"] {
+        layout.ensure_named_workspace(&WorkspaceConfig {
+            name: WorkspaceName(name.to_owned()),
+            open_on_output: None,
+            layout: None,
+            activities: Vec::new(),
+            sticky: None,
+        });
+    }
+    let w1_id = find_ws_id_by_name(&layout, "w1");
+    let w2_id = find_ws_id_by_name(&layout, "w2");
+    assert!(
+        w1_id.get() < w2_id.get(),
+        "w1 sorts before w2 by creation order"
+    );
+
+    check_ops_on_layout(&mut layout, [Op::RemoveOutput(1)]);
+    assert!(layout.disconnected_workspace_ids.contains(&w1_id));
+    assert!(layout.disconnected_workspace_ids.contains(&w2_id));
+    // Remember w2 as the last active, then switch to beta while dark.
+    layout
+        .last_active_workspace_id
+        .insert("output1".to_owned(), w2_id);
+    layout.switch_activity(beta_id);
+
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+
+    let alpha_view = layout
+        .activities
+        .get(alpha)
+        .expect("alpha live")
+        .views()
+        .get(&mon_out)
+        .expect("alpha view");
+    assert!(
+        alpha_view.ids().contains(&w1_id) && alpha_view.ids().contains(&w2_id),
+        "both alpha workspaces boot into alpha's view",
+    );
+    assert_eq!(
+        alpha_view.active(),
+        w2_id,
+        "the remembered non-member is activated by the fallback (not the lift's first body w1)",
+    );
+    let beta_view = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta seed view");
+    assert!(
+        !layout
+            .workspaces
+            .get(&beta_view.active())
+            .expect("live")
+            .has_windows_or_name(),
+        "seed (beta) view activates its default empty bookend",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
+fn boot_dormant_view_with_residue_installs_opens_on_first_workspace_not_bookend() {
+    // Reseat pin: a dormant view that receives only residue installs (two sentinel config
+    // workspaces) opens on its first real workspace, not the fresh trailing bookend that stays
+    // id-active after the inserts.
+    let mut layout = Layout::<TestWindow>::default();
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+
+    for name in ["s1", "s2"] {
+        layout.ensure_named_workspace(&WorkspaceConfig {
+            name: WorkspaceName(name.to_owned()),
+            open_on_output: None,
+            layout: None,
+            activities: vec!["beta".to_owned()],
+            sticky: None,
+        });
+    }
+    let s1_id = find_ws_id_by_name(&layout, "s1");
+    let s2_id = find_ws_id_by_name(&layout, "s2");
+
+    check_ops_on_layout(&mut layout, [Op::AddOutput(1)]);
+    let mon_out = layout.monitors[0].output_id();
+
+    let beta_view = layout
+        .activities
+        .get(beta_id)
+        .expect("beta live")
+        .views()
+        .get(&mon_out)
+        .expect("beta view");
+    assert!(
+        beta_view.ids().contains(&s1_id) && beta_view.ids().contains(&s2_id),
+        "both residue-installed workspaces are present",
+    );
+    assert!(
+        layout
+            .workspaces
+            .get(&beta_view.active())
+            .expect("live")
+            .has_windows_or_name(),
+        "active is a real workspace, not the empty bookend",
+    );
+    assert_eq!(
+        beta_view.active(),
+        *beta_view.ids().first().expect("non-empty"),
+        "active is the first (body) entry after reseat",
+    );
+    let last_id = *beta_view.ids().last().expect("non-empty");
+    assert!(
+        !layout
+            .workspaces
+            .get(&last_id)
+            .expect("live")
+            .has_windows_or_name(),
+        "trailing entry stays an empty unnamed bookend",
+    );
+    layout.verify_invariants();
+    verify_output_bindings(&layout);
 }
 
 // --- Activity-add Add-branch trailing-empty bookend placement -----------------
@@ -22258,12 +22798,59 @@ fn set_workspace_activities_stale_tag_add_and_remove() {
 }
 
 #[test]
+fn add_window_to_unbound_dormant_workspace_resolves_monitor_by_holding_view() {
+    // A sentinel-tagged workspace (OutputId "") living in a DORMANT activity's view is a valid
+    // window target: opening a window onto it (the open-on-activity + open-on-workspace hidden
+    // path) must land the window, resolving the monitor by the view that holds the workspace
+    // rather than by the unbound tag. Without the holding-view fallback the monitor lookup by tag
+    // misses and the window is dropped.
+    let mut layout = check_ops([Op::AddOutput(1)]);
+    let out1 = layout.monitors[0].output_id();
+
+    let beta = super::activity::Activity::new_runtime("beta".to_owned());
+    let beta_id = beta.id();
+    test_insert_activity(&mut layout, beta);
+
+    let sentinel_id = splice_named_sentinel_into_view(
+        &mut layout,
+        "beta-ws",
+        HashSet::from([beta_id]),
+        vec!["beta".to_owned()],
+        beta_id,
+        &out1,
+    );
+    layout.verify_invariants();
+
+    let win_id = 41usize;
+    let win = TestWindow::new(TestWindowParams::new(win_id));
+    layout.add_window(
+        win,
+        AddWindowTarget::Workspace(sentinel_id),
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::Smart,
+    );
+
+    assert!(
+        layout
+            .workspaces
+            .get(&sentinel_id)
+            .expect("sentinel workspace live")
+            .has_window(&win_id),
+        "window must land on the unbound dormant workspace via the holding-view fallback",
+    );
+    layout.verify_invariants();
+}
+
+#[test]
 fn add_workspace_to_activity_empty_output_tag_patches_holding_view() {
     // Empty-string sentinel counterpart of the stale-tag pin: a workspace minted via
     // `Workspace::new_with_config_no_outputs` (no `open_on_output`) carries `OutputId("")`,
-    // never a real output. Spliced into alpha's real output-1 view — mirroring what
-    // `Monitor::new`'s lift loop does for an orphaned config workspace at first-monitor-attach
-    // — adding it to a fresh dormant activity must land it in that activity's output-1 view via
+    // never a real output. Spliced into alpha's real output-1 view — the runtime shape where a
+    // config workspace's sentinel tag leaves it in a real-output view it does not tag-match —
+    // adding it to a fresh dormant activity must land it in that activity's output-1 view via
     // the holding-view resolver, not the sentinel tag.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);

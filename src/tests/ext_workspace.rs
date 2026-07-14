@@ -115,14 +115,12 @@ fn refresh_narrows_on_activity_switch() {
         .workspaces_snapshot();
     assert!(
         s0.contains(&ws_a_id),
-        "baseline snapshot under alpha must contain ws_a (single-output startup binds \
-         every disconnected workspace to the new monitor and alpha's view adopts them \
-         as-is)",
+        "baseline snapshot under alpha must contain ws_a (alpha's own member workspace)",
     );
     assert!(
-        s0.contains(&ws_b_id),
-        "baseline snapshot under alpha must contain ws_b (startup single-output binding \
-         adopts every disconnected workspace)",
+        !s0.contains(&ws_b_id),
+        "baseline snapshot under alpha must NOT contain ws_b: the first-monitor drain routes it \
+         into beta's dormant view by membership, so it is not in alpha's active view",
     );
 
     let beta_id = activity_id_by_name(&mut f, "beta");
@@ -135,16 +133,14 @@ fn refresh_narrows_on_activity_switch() {
         .ext_workspace_state
         .workspaces_snapshot();
 
-    // Note: we deliberately do not assert `s1.contains(&ws_b_id)`. A config
-    // workspace declared without `open-on-output` is seeded with OutputId("")
-    // (workspace.rs:329-334), and `bind_output` does not re-tag it on
-    // first-monitor-attach (workspace.rs:575-588, reclaim design). On activity
-    // switch, `ensure_all_activity_views` (mod.rs:3894-3901) filters pool candidates
-    // by output_id equality and does not rediscover ws_b; beta's view is built
-    // with a fresh trailing-empty instead. This asymmetry between Monitor::new
-    // (unfiltered parked-id load at Layout::add_output, mod.rs:858-890) and
-    // ensure_all_activity_views (output_id-filtered) is orthogonal to the projection
-    // contract — this asymmetry is not yet addressed.
+    // ws_b is declared without `open-on-output`, so it carries the OutputId("") sentinel and
+    // `bind_output` never re-tags it. The membership residue pass installs it into beta's view at
+    // boot regardless of the tag, so switching to beta surfaces it — the positive assertion the
+    // narrowing contract now supports.
+    assert!(
+        s1.contains(&ws_b_id),
+        "post-switch snapshot must contain ws_b (beta's view holds it after the boot drain)",
+    );
     assert!(
         !s1.contains(&ws_a_id),
         "post-switch snapshot must not contain ws_a (alpha's view is dormant)",
