@@ -485,7 +485,7 @@ impl XdgShellHandler for State {
                     let ws = mon
                         .map(|mon| {
                             let view = layout.active_view(&mon.output_id());
-                            mon.active_workspace_ref(layout.workspace_pool(), view)
+                            view.active_workspace_ref(layout.workspace_pool())
                         })
                         .or_else(|| layout.active_workspace());
 
@@ -610,13 +610,13 @@ impl XdgShellHandler for State {
                             // and gets nothing if it doesn't exist.
                             mon.map(|mon| {
                                 let view = layout.active_view(&mon.output_id());
-                                mon.find_named_workspace(layout.workspace_pool(), view, name)
+                                view.find_named_workspace(layout.workspace_pool(), name)
                             })
                         })
                         .unwrap_or_else(|| {
                             mon.map(|mon| {
                                 let view = layout.active_view(&mon.output_id());
-                                mon.active_workspace_ref(layout.workspace_pool(), view)
+                                view.active_workspace_ref(layout.workspace_pool())
                             })
                             .or_else(|| layout.active_workspace())
                         });
@@ -761,7 +761,7 @@ impl XdgShellHandler for State {
                     let ws = mon
                         .map(|mon| {
                             let view = layout.active_view(&mon.output_id());
-                            mon.active_workspace_ref(layout.workspace_pool(), view)
+                            view.active_workspace_ref(layout.workspace_pool())
                         })
                         .or_else(|| layout.active_workspace());
 
@@ -882,13 +882,13 @@ impl XdgShellHandler for State {
                             // workspace fallback below.
                             mon.map(|mon| {
                                 let view = layout.active_view(&mon.output_id());
-                                mon.find_named_workspace(layout.workspace_pool(), view, name)
+                                view.find_named_workspace(layout.workspace_pool(), name)
                             })
                         })
                         .unwrap_or_else(|| {
                             mon.map(|mon| {
                                 let view = layout.active_view(&mon.output_id());
-                                mon.active_workspace_ref(layout.workspace_pool(), view)
+                                view.active_workspace_ref(layout.workspace_pool())
                             })
                             .or_else(|| layout.active_workspace())
                         });
@@ -1348,7 +1348,7 @@ impl State {
             }
             by_name.or_else(|| {
                 mon.zip(view_for_mon)
-                    .map(|(mon, view)| mon.active_workspace_ref(layout.workspace_pool(), view))
+                    .map(|(_, view)| view.active_workspace_ref(layout.workspace_pool()))
                     .or_else(|| layout.active_workspace())
             })
         } else {
@@ -1359,13 +1359,12 @@ impl State {
                 .open_on_workspace
                 .as_deref()
                 .and_then(|name| {
-                    mon.zip(view_for_mon).map(|(mon, view)| {
-                        mon.find_named_workspace(layout.workspace_pool(), view, name)
-                    })
+                    mon.zip(view_for_mon)
+                        .map(|(_, view)| view.find_named_workspace(layout.workspace_pool(), name))
                 })
                 .unwrap_or_else(|| {
                     mon.zip(view_for_mon)
-                        .map(|(mon, view)| mon.active_workspace_ref(layout.workspace_pool(), view))
+                        .map(|(_, view)| view.active_workspace_ref(layout.workspace_pool()))
                         .or_else(|| layout.active_workspace())
                 })
         };

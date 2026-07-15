@@ -195,6 +195,87 @@ impl WorkspaceView {
         );
         self.ids.insert(new_pos, id);
     }
+
+    /// Borrow the workspace at position `pos` in this view.
+    ///
+    /// Panics if `pos` is out of bounds for `self.ids()` or if the id is absent from `pool`;
+    /// both indicate a broken pool/view invariant, not user error.
+    pub fn workspace_at<'a, W: LayoutElement>(
+        &self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        pos: usize,
+    ) -> &'a Workspace<W> {
+        let id = self.ids()[pos];
+        pool.get(&id).expect("view id must be a key in the pool")
+    }
+
+    /// Mutably borrow the workspace at position `pos` in this view.
+    ///
+    /// Panics on the same conditions as [`workspace_at`](Self::workspace_at).
+    pub fn workspace_at_mut<'a, W: LayoutElement>(
+        &self,
+        pool: &'a mut HashMap<WorkspaceId, Workspace<W>>,
+        pos: usize,
+    ) -> &'a mut Workspace<W> {
+        let id = self.ids()[pos];
+        pool.get_mut(&id)
+            .expect("view id must be a key in the pool")
+    }
+
+    pub fn active_workspace_ref<'a, W: LayoutElement>(
+        &self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+    ) -> &'a Workspace<W> {
+        self.workspace_at(pool, self.active_position())
+    }
+
+    /// Finds the workspace in this view whose name matches `workspace_name`, case-insensitively
+    /// (`str::eq_ignore_ascii_case`).
+    pub fn find_named_workspace<'a, W: LayoutElement>(
+        &self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+        workspace_name: &str,
+    ) -> Option<&'a Workspace<W>> {
+        self.ids().iter().find_map(|id| {
+            let ws = pool.get(id).expect("view id must be a key in the pool");
+            ws.name
+                .as_ref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
+                .then_some(ws)
+        })
+    }
+
+    pub fn active_workspace<'a, W: LayoutElement>(
+        &self,
+        pool: &'a mut HashMap<WorkspaceId, Workspace<W>>,
+    ) -> &'a mut Workspace<W> {
+        self.workspace_at_mut(pool, self.active_position())
+    }
+
+    pub fn windows<'a, W: LayoutElement>(
+        &'a self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+    ) -> impl Iterator<Item = &'a W> + 'a {
+        self.ids()
+            .iter()
+            .map(move |id| pool.get(id).expect("view id must be a key in the pool"))
+            .flat_map(|ws| ws.windows())
+    }
+
+    pub fn has_window<W: LayoutElement>(
+        &self,
+        pool: &HashMap<WorkspaceId, Workspace<W>>,
+        window: &W::Id,
+    ) -> bool {
+        self.windows(pool).any(|win| win.id() == window)
+    }
+
+    pub fn active_window<'a, W: LayoutElement>(
+        &self,
+        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
+    ) -> Option<&'a W> {
+        self.active_workspace_ref(pool).active_window()
+    }
 }
 
 static ACTIVITY_ID_COUNTER: IdCounter = IdCounter::new();

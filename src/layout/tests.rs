@@ -2391,9 +2391,7 @@ fn move_to_workspace_by_idx_does_not_leave_empty_workspaces() {
 
     let mon_out = layout.monitors[0].output_id();
     let view = layout.active_view(&mon_out);
-    assert!(layout.monitors[0]
-        .workspace_at(layout.workspace_pool(), view, 1)
-        .has_windows());
+    assert!(view.workspace_at(layout.workspace_pool(), 1).has_windows());
 }
 
 #[test]
@@ -2628,13 +2626,12 @@ fn move_workspace_to_output() {
     let view1 = layout.active_view(&mon1_out).clone();
 
     let pool = layout.workspace_pool();
-    let monitors = &layout.monitors;
     assert_eq!(active_monitor_idx, 1);
     assert_eq!(view0.len(), 1);
-    assert!(!monitors[0].workspace_at(pool, &view0, 0).has_windows());
+    assert!(!view0.workspace_at(pool, 0).has_windows());
     assert_eq!(view1.active_position(), 0);
     assert_eq!(view1.len(), 2);
-    assert!(monitors[1].workspace_at(pool, &view1, 0).has_windows());
+    assert!(view1.workspace_at(pool, 0).has_windows());
 }
 
 #[test]
@@ -2659,18 +2656,14 @@ fn open_right_of_on_different_workspace() {
     let mon_out = layout.monitors[0].output_id();
     let view = layout.active_view(&mon_out).clone();
     let pool = layout.workspace_pool();
-    let monitors = &layout.monitors;
 
-    let mon = &monitors[0];
     assert_eq!(
         view.active_position(),
         1,
         "the second workspace must remain active"
     );
     assert_eq!(
-        mon.workspace_at(pool, &view, 0)
-            .scrolling()
-            .active_column_idx(),
+        view.workspace_at(pool, 0).scrolling().active_column_idx(),
         1,
         "the new window must become active"
     );
@@ -2706,18 +2699,14 @@ fn open_right_of_on_different_workspace_ewaf() {
     let mon_out = layout.monitors[0].output_id();
     let view = layout.active_view(&mon_out).clone();
     let pool = layout.workspace_pool();
-    let monitors = &layout.monitors;
 
-    let mon = &monitors[0];
     assert_eq!(
         view.active_position(),
         2,
         "the second workspace must remain active"
     );
     assert_eq!(
-        mon.workspace_at(pool, &view, 1)
-            .scrolling()
-            .active_column_idx(),
+        view.workspace_at(pool, 1).scrolling().active_column_idx(),
         1,
         "the new window must become active"
     );
@@ -3533,12 +3522,11 @@ fn add_window_to_named_workspace_with_distinct_layout_config() {
     let mon_out = layout.monitors[0].output_id();
     let view = layout.active_view(&mon_out).clone();
     let pool = layout.workspace_pool();
-    let mon = &layout.monitors[0];
     // View after the two `AddNamedWorkspace` ops: [ws2 @ 0, ws1 @ 1, default_empty @ 2].
     // `ws1` is the `Tabbed` target, at a non-zero position — the proxy would have read
     // `default_column_display` from `ws2` (position 0) instead.
-    let col = mon
-        .workspace_at(pool, &view, 1)
+    let col = view
+        .workspace_at(pool, 1)
         .scrolling()
         .columns()
         .next()

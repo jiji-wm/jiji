@@ -478,39 +478,6 @@ impl<W: LayoutElement> Monitor<W> {
         (monitor, view)
     }
 
-    /// Borrow the workspace this monitor displays at position `pos`.
-    ///
-    /// Panics if `pos` is out of bounds for `view.ids()` or if the id is absent from `pool`;
-    /// both indicate a broken pool/view invariant, not user error.
-    pub fn workspace_at<'a>(
-        &self,
-        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
-        view: &WorkspaceView,
-        pos: usize,
-    ) -> &'a Workspace<W> {
-        let id = view.ids()[pos];
-        pool.get(&id).expect("view id must be a key in the pool")
-    }
-
-    /// Mutably borrow the workspace this monitor displays at position `pos`.
-    ///
-    /// Panics on the same conditions as [`workspace_at`](Self::workspace_at).
-    pub fn workspace_at_mut<'a>(
-        &self,
-        pool: &'a mut HashMap<WorkspaceId, Workspace<W>>,
-        view: &WorkspaceView,
-        pos: usize,
-    ) -> &'a mut Workspace<W> {
-        let id = view.ids()[pos];
-        pool.get_mut(&id)
-            .expect("view id must be a key in the pool")
-    }
-
-    /// Number of workspaces this monitor displays, including empty bookends.
-    pub fn workspaces_len(view: &WorkspaceView) -> usize {
-        view.len()
-    }
-
     pub fn output(&self) -> &Output {
         &self.output
     }
@@ -526,75 +493,6 @@ impl<W: LayoutElement> Monitor<W> {
     /// monitor identity without reaching through `output()` themselves.
     pub fn output_id(&self) -> OutputId {
         OutputId::new(&self.output)
-    }
-
-    pub fn active_workspace_idx(view: &WorkspaceView) -> usize {
-        view.active_position()
-    }
-
-    pub fn active_workspace_ref<'a>(
-        &self,
-        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
-        view: &WorkspaceView,
-    ) -> &'a Workspace<W> {
-        self.workspace_at(pool, view, view.active_position())
-    }
-
-    pub fn find_named_workspace<'a>(
-        &self,
-        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
-        view: &WorkspaceView,
-        workspace_name: &str,
-    ) -> Option<&'a Workspace<W>> {
-        view.ids().iter().find_map(|id| {
-            let ws = pool.get(id).expect("view id must be a key in the pool");
-            ws.name
-                .as_ref()
-                .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
-                .then_some(ws)
-        })
-    }
-
-    pub fn find_named_workspace_index(
-        pool: &HashMap<WorkspaceId, Workspace<W>>,
-        view: &WorkspaceView,
-        workspace_name: &str,
-    ) -> Option<usize> {
-        view.ids().iter().position(|id| {
-            pool.get(id)
-                .expect("view id must be a key in the pool")
-                .name
-                .as_ref()
-                .is_some_and(|name| name.eq_ignore_ascii_case(workspace_name))
-        })
-    }
-
-    pub fn active_workspace<'a>(
-        &self,
-        pool: &'a mut HashMap<WorkspaceId, Workspace<W>>,
-        view: &WorkspaceView,
-    ) -> &'a mut Workspace<W> {
-        self.workspace_at_mut(pool, view, view.active_position())
-    }
-
-    pub fn windows<'a>(
-        &'a self,
-        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
-        view: &'a WorkspaceView,
-    ) -> impl Iterator<Item = &'a W> + 'a {
-        view.ids()
-            .iter()
-            .map(move |id| pool.get(id).expect("view id must be a key in the pool"))
-            .flat_map(|ws| ws.windows())
-    }
-
-    pub fn has_window(
-        &self,
-        pool: &HashMap<WorkspaceId, Workspace<W>>,
-        view: &WorkspaceView,
-        window: &W::Id,
-    ) -> bool {
-        self.windows(pool, view).any(|win| win.id() == window)
     }
 
     pub fn activate_workspace(&mut self, view: &mut WorkspaceView, idx: usize) {
@@ -729,14 +627,6 @@ impl<W: LayoutElement> Monitor<W> {
         if let Some(idx) = view.previous_position() {
             self.switch_workspace(view, idx);
         }
-    }
-
-    pub fn active_window<'a>(
-        &self,
-        pool: &'a HashMap<WorkspaceId, Workspace<W>>,
-        view: &WorkspaceView,
-    ) -> Option<&'a W> {
-        self.active_workspace_ref(pool, view).active_window()
     }
 
     /// Advances per-monitor animations. Returns `true` when a workspace-switch animation
@@ -1062,7 +952,7 @@ impl<W: LayoutElement> Monitor<W> {
             return None;
         }
 
-        self.active_workspace_ref(pool, view)
+        view.active_workspace_ref(pool)
             .active_window_visual_rectangle()
     }
 

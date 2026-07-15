@@ -2467,7 +2467,7 @@ impl<W: LayoutElement> Layout<W> {
         let scrolling_width = {
             let mon = &monitors[mon_idx];
             let (ws_idx, _) = mon.resolve_add_window_target(pool, view, target);
-            mon.workspace_at(pool, view, ws_idx)
+            view.workspace_at(pool, ws_idx)
                 .resolve_scrolling_width(&window, width)
         };
 
@@ -2735,11 +2735,10 @@ impl<W: LayoutElement> Layout<W> {
                     && self.active_view(&mon_out).len() == 2
                     && self.monitors[mon_idx].workspace_switch.is_none();
                 if special {
-                    let mon = &self.monitors[mon_idx];
                     let pool = &self.workspaces;
                     let view = self.active_view(&mon_out);
-                    assert!(!mon.workspace_at(pool, view, 0).has_windows_or_name());
-                    assert!(!mon.workspace_at(pool, view, 1).has_windows_or_name());
+                    assert!(!view.workspace_at(pool, 0).has_windows_or_name());
+                    assert!(!view.workspace_at(pool, 1).has_windows_or_name());
                     let drop_id = self.active_view(&mon_out).ids()[1];
                     // A shared second entry is pinned by another activity's view; the
                     // length-2 view is then the honest minimal shape (the shared empty
@@ -3398,7 +3397,7 @@ impl<W: LayoutElement> Layout<W> {
         }
         let mon = &self.monitors[self.active_monitor_idx];
         let view = self.active_view(&mon.output_id());
-        Some(mon.active_workspace_ref(&self.workspaces, view))
+        Some(view.active_workspace_ref(&self.workspaces))
     }
 
     pub fn active_workspace_mut(&mut self) -> Option<&mut Workspace<W>> {
@@ -3898,7 +3897,7 @@ impl<W: LayoutElement> Layout<W> {
             // If empty_workspace_above_first is set and the first workspace is now no longer empty,
             // add a new empty workspace on top.
             if mon.options.layout.empty_workspace_above_first
-                && mon.workspace_at(pool, view, 0).has_windows_or_name()
+                && view.workspace_at(pool, 0).has_windows_or_name()
             {
                 Self::add_workspace_top_on(monitors, pool, view, mon_idx, seed_activity);
             }
@@ -4083,7 +4082,7 @@ impl<W: LayoutElement> Layout<W> {
                 continue;
             }
 
-            if !mon.workspace_at(pool, view, idx).has_windows_or_name() {
+            if !view.workspace_at(pool, idx).has_windows_or_name() {
                 let id = view.ids()[idx];
                 // A shared workspace is pinned in every member activity's view; pruning it
                 // here while destroy_workspaces_cross_activity skips the pool removal for
@@ -4105,8 +4104,8 @@ impl<W: LayoutElement> Layout<W> {
         // Special case handling when empty_workspace_above_first is set and all workspaces
         // are empty.
         if mon.options.layout.empty_workspace_above_first && view.len() == 2 {
-            assert!(!mon.workspace_at(pool, view, 0).has_windows_or_name());
-            assert!(!mon.workspace_at(pool, view, 1).has_windows_or_name());
+            assert!(!view.workspace_at(pool, 0).has_windows_or_name());
+            assert!(!view.workspace_at(pool, 1).has_windows_or_name());
             let id = view.ids()[1];
             // A shared second entry is pinned by another activity's view; the length-2 view
             // is the honest minimal EWAF shape when the trailing slot is shared.
@@ -4476,9 +4475,7 @@ impl<W: LayoutElement> Layout<W> {
     ) {
         let mon = &monitors[mon_idx];
         let (workspace_idx, target) = mon.resolve_add_window_target(pool, view, target);
-        let tile = mon
-            .workspace_at(pool, view, workspace_idx)
-            .make_tile(window);
+        let tile = view.workspace_at(pool, workspace_idx).make_tile(window);
 
         Self::add_resolved_tile_on(
             monitors,
@@ -4507,7 +4504,7 @@ impl<W: LayoutElement> Layout<W> {
         activate: bool,
     ) {
         let mon = &mut monitors[mon_idx];
-        let workspace = mon.workspace_at_mut(pool, view, workspace_idx);
+        let workspace = view.workspace_at_mut(pool, workspace_idx);
 
         workspace.add_column(Some(&mon.output), column, activate);
 
@@ -4574,7 +4571,7 @@ impl<W: LayoutElement> Layout<W> {
         seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
-        let workspace = mon.workspace_at_mut(pool, view, workspace_idx);
+        let workspace = view.workspace_at_mut(pool, workspace_idx);
 
         workspace.add_tile(
             Some(&mon.output),
@@ -4621,7 +4618,7 @@ impl<W: LayoutElement> Layout<W> {
         allow_to_activate_workspace: bool,
     ) {
         let mon = &mut monitors[mon_idx];
-        let workspace = mon.workspace_at_mut(pool, view, workspace_idx);
+        let workspace = view.workspace_at_mut(pool, workspace_idx);
 
         workspace.add_tile_to_column(Some(&mon.output), column_idx, tile_idx, tile, activate);
 
@@ -4645,7 +4642,7 @@ impl<W: LayoutElement> Layout<W> {
         mon_idx: usize,
         seed_activity: ActivityId,
     ) {
-        if !monitors[mon_idx].active_workspace(pool, view).move_down() {
+        if !view.active_workspace(pool).move_down() {
             Self::move_to_workspace_down_on(monitors, pool, view, mon_idx, true, seed_activity);
         }
     }
@@ -4657,7 +4654,7 @@ impl<W: LayoutElement> Layout<W> {
         mon_idx: usize,
         seed_activity: ActivityId,
     ) {
-        if !monitors[mon_idx].active_workspace(pool, view).move_up() {
+        if !view.active_workspace(pool).move_up() {
             Self::move_to_workspace_up_on(monitors, pool, view, mon_idx, true, seed_activity);
         }
     }
@@ -4668,7 +4665,7 @@ impl<W: LayoutElement> Layout<W> {
         view: &mut WorkspaceView,
         mon_idx: usize,
     ) {
-        if !monitors[mon_idx].active_workspace(pool, view).focus_down() {
+        if !view.active_workspace(pool).focus_down() {
             monitors[mon_idx].switch_workspace_down(view);
         }
     }
@@ -4679,7 +4676,7 @@ impl<W: LayoutElement> Layout<W> {
         view: &mut WorkspaceView,
         mon_idx: usize,
     ) {
-        if !monitors[mon_idx].active_workspace(pool, view).focus_up() {
+        if !view.active_workspace(pool).focus_up() {
             monitors[mon_idx].switch_workspace_up(view);
         }
     }
@@ -4701,7 +4698,7 @@ impl<W: LayoutElement> Layout<W> {
         }
         let new_id = view.ids()[new_idx];
 
-        let workspace = mon.workspace_at_mut(pool, view, source_workspace_idx);
+        let workspace = view.workspace_at_mut(pool, source_workspace_idx);
         let Some(removed) = workspace.remove_active_tile(Some(&mon.output), Transaction::new())
         else {
             return;
@@ -4749,7 +4746,7 @@ impl<W: LayoutElement> Layout<W> {
         }
         let new_id = view.ids()[new_idx];
 
-        let workspace = mon.workspace_at_mut(pool, view, source_workspace_idx);
+        let workspace = view.workspace_at_mut(pool, source_workspace_idx);
         let Some(removed) = workspace.remove_active_tile(Some(&mon.output), Transaction::new())
         else {
             return;
@@ -4842,7 +4839,7 @@ impl<W: LayoutElement> Layout<W> {
         let insert_idx = source_idx;
 
         // (1) Remove the active tile first; bail if the workspace is empty.
-        let workspace = mon.workspace_at_mut(pool, view, source_idx);
+        let workspace = view.workspace_at_mut(pool, source_idx);
         let Some(removed) = workspace.remove_active_tile(Some(&mon.output), Transaction::new())
         else {
             return;
@@ -4919,7 +4916,7 @@ impl<W: LayoutElement> Layout<W> {
         let insert_idx = source_idx + 1;
 
         // (1) Remove the active tile first; bail if the workspace is empty.
-        let workspace = mon.workspace_at_mut(pool, view, source_idx);
+        let workspace = view.workspace_at_mut(pool, source_idx);
         let Some(removed) = workspace.remove_active_tile(Some(&mon.output), Transaction::new())
         else {
             return;
@@ -5070,11 +5067,11 @@ impl<W: LayoutElement> Layout<W> {
         }
         let new_id = view.ids()[new_idx];
 
-        let active_window_id = mon.active_window(pool, view).map(|win| win.id().clone());
+        let active_window_id = view.active_window(pool).map(|win| win.id().clone());
         let activate =
             activate.map_smart(|| window.is_none_or(|win| active_window_id.as_ref() == Some(win)));
 
-        let workspace = mon.workspace_at_mut(pool, view, source_workspace_idx);
+        let workspace = view.workspace_at_mut(pool, source_workspace_idx);
         let transaction = Transaction::new();
         let removed = if let Some(window) = window {
             workspace.remove_tile(Some(&mon.output), window, transaction)
@@ -5131,15 +5128,15 @@ impl<W: LayoutElement> Layout<W> {
 
         // Check floating status on a shared borrow first so we can recurse into the sibling method
         // without a `&mut pool` conflict.
-        if mon
-            .workspace_at(pool, view, source_workspace_idx)
+        if view
+            .workspace_at(pool, source_workspace_idx)
             .floating_is_active()
         {
             Self::move_to_workspace_up_on(monitors, pool, view, mon_idx, activate, seed_activity);
             return;
         }
 
-        let workspace = mon.workspace_at_mut(pool, view, source_workspace_idx);
+        let workspace = view.workspace_at_mut(pool, source_workspace_idx);
         let Some(column) = workspace.remove_active_column(Some(&mon.output)) else {
             return;
         };
@@ -5163,15 +5160,15 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
 
-        if mon
-            .workspace_at(pool, view, source_workspace_idx)
+        if view
+            .workspace_at(pool, source_workspace_idx)
             .floating_is_active()
         {
             Self::move_to_workspace_down_on(monitors, pool, view, mon_idx, activate, seed_activity);
             return;
         }
 
-        let workspace = mon.workspace_at_mut(pool, view, source_workspace_idx);
+        let workspace = view.workspace_at_mut(pool, source_workspace_idx);
         let Some(column) = workspace.remove_active_column(Some(&mon.output)) else {
             return;
         };
@@ -5197,8 +5194,8 @@ impl<W: LayoutElement> Layout<W> {
             return Vec::new();
         }
 
-        if mon
-            .workspace_at(pool, view, source_workspace_idx)
+        if view
+            .workspace_at(pool, source_workspace_idx)
             .floating_is_active()
         {
             let activate = if activate {
@@ -5218,7 +5215,7 @@ impl<W: LayoutElement> Layout<W> {
             );
         }
 
-        let workspace = mon.workspace_at_mut(pool, view, source_workspace_idx);
+        let workspace = view.workspace_at_mut(pool, source_workspace_idx);
         let Some(column) = workspace.remove_active_column(Some(&mon.output)) else {
             return Vec::new();
         };
@@ -6066,7 +6063,7 @@ impl<W: LayoutElement> Layout<W> {
                 let view = views
                     .get(&OutputId::new(&mon.output))
                     .expect("connected output must have a view in the active activity");
-                mon.has_window(pool, view, window)
+                view.has_window(pool, window)
             }) else {
                 warn!(
                     "move_to_workspace: window {:?} is not on the active activity; \
@@ -6205,7 +6202,7 @@ impl<W: LayoutElement> Layout<W> {
                     let view = views
                         .get(&OutputId::new(&mon.output))
                         .expect("connected output must have a view in the active activity");
-                    mon.has_window(pool, view, window)
+                    view.has_window(pool, window)
                 })
                 .expect(
                     "caller filters dormant-source: the named window must be on the active view",
@@ -6531,7 +6528,7 @@ impl<W: LayoutElement> Layout<W> {
 
         let mon = &self.monitors[self.active_monitor_idx];
         let view = self.active_view(&mon.output_id());
-        mon.active_window(&self.workspaces, view)
+        view.active_window(&self.workspaces)
             .map(|win| (win, &mon.output))
     }
 
@@ -8838,7 +8835,7 @@ impl<W: LayoutElement> Layout<W> {
         let removed = {
             let (monitors, pool, view) = self.monitors_pool_view_mut(&source_out);
             let mon = &mut monitors[mon_idx];
-            let active_window_id = mon.active_window(pool, view).map(|w| w.id().clone());
+            let active_window_id = view.active_window(pool).map(|w| w.id().clone());
             let activate_eager = activate.map_smart(|| {
                 window.is_none_or(|win| {
                     mon_idx == active_monitor_idx_val && active_window_id.as_ref() == Some(win)
@@ -8850,7 +8847,7 @@ impl<W: LayoutElement> Layout<W> {
                 ActivateWindow::No
             };
 
-            let ws = mon.workspace_at_mut(pool, view, ws_idx);
+            let ws = view.workspace_at_mut(pool, ws_idx);
             let transaction = Transaction::new();
             let mut removed = if let Some(window) = window {
                 ws.remove_tile(Some(&mon.output), window, transaction)
@@ -8928,9 +8925,7 @@ impl<W: LayoutElement> Layout<W> {
         let is_floating = {
             let pool = &self.workspaces;
             let view = self.active_view(&current_out);
-            self.monitors[active_monitor_idx]
-                .workspace_at(pool, view, active_pos)
-                .floating_is_active()
+            view.workspace_at(pool, active_pos).floating_is_active()
         };
         if is_floating {
             self.move_to_output(None, output, None, ActivateWindow::Smart);
@@ -8941,7 +8936,7 @@ impl<W: LayoutElement> Layout<W> {
         let (monitors, pool, view) = self.monitors_pool_view_mut(&current_out);
         let current = &mut monitors[active_monitor_idx];
         let current_output_ref = &current.output;
-        let ws = current.workspace_at_mut(pool, view, active_pos);
+        let ws = view.workspace_at_mut(pool, active_pos);
 
         let Some(column) = ws.remove_active_column(Some(current_output_ref)) else {
             return;
@@ -9018,7 +9013,7 @@ impl<W: LayoutElement> Layout<W> {
             let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
             let mon = &mut monitors[current_idx];
             let new_output_id = Some(OutputId::new(mon.output()));
-            mon.workspace_at_mut(pool, view, old_idx).output_id = new_output_id;
+            view.workspace_at_mut(pool, old_idx).output_id = new_output_id;
             return false;
         }
 
@@ -9909,7 +9904,7 @@ impl<W: LayoutElement> Layout<W> {
                     } else {
                         let pos_within_workspace =
                             (move_.pointer_pos_within_output - geo.loc).downscale(zoom);
-                        let ws = mon.workspace_at_mut(pool, view, ws_idx);
+                        let ws = view.workspace_at_mut(pool, ws_idx);
                         ws.scrolling_insert_position(pos_within_workspace)
                     };
 
@@ -9932,7 +9927,7 @@ impl<W: LayoutElement> Layout<W> {
             let mon = &monitors[mon_idx];
             let zoom = mon.overview_zoom();
             // No point in trying to use the pointer position on the wrong output.
-            let ws = mon.workspace_at(pool, view, 0);
+            let ws = view.workspace_at(pool, 0);
             let ws_id = ws.id();
             let ws_geo = mon.workspaces_render_geo(view).next().unwrap();
 
@@ -10016,8 +10011,8 @@ impl<W: LayoutElement> Layout<W> {
                     InsertWorkspace::Existing(_) => {
                         if let Some(offset) = offset {
                             let pos = (tile_render_loc - offset).downscale(zoom);
-                            let pos = monitors[mon_idx]
-                                .workspace_at(pool, view, ws_idx)
+                            let pos = view
+                                .workspace_at(pool, ws_idx)
                                 .floating_logical_to_size_frac(pos);
                             tile.floating_pos = Some(pos);
                         } else {
