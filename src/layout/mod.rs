@@ -7665,13 +7665,9 @@ impl<W: LayoutElement> Layout<W> {
             .resolve_activity_ref(activity_ref)
             .ok_or(AddWorkspaceToActivityError::ActivityNotFound)?;
 
-        // Resolve workspace → id only; drop the `&mut self` borrow before
-        // splitting into `&mut self.workspaces` + `&mut self.activities`.
-        let ws_id = match workspace {
-            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
-            None => self.active_workspace_mut().map(|ws| ws.id()),
-        }
-        .ok_or(AddWorkspaceToActivityError::WorkspaceNotFound)?;
+        let ws_id = self
+            .resolve_workspace_ref_or_active(workspace)
+            .ok_or(AddWorkspaceToActivityError::WorkspaceNotFound)?;
 
         // No-op early-exit: the workspace already belongs to the activity.
         // Do not touch views or invariants — the state is unchanged.
@@ -7831,11 +7827,9 @@ impl<W: LayoutElement> Layout<W> {
             .resolve_activity_ref(activity_ref)
             .ok_or(RemoveWorkspaceFromActivityError::ActivityNotFound)?;
 
-        let ws_id = match workspace {
-            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
-            None => self.active_workspace_mut().map(|ws| ws.id()),
-        }
-        .ok_or(RemoveWorkspaceFromActivityError::WorkspaceNotFound)?;
+        let ws_id = self
+            .resolve_workspace_ref_or_active(workspace)
+            .ok_or(RemoveWorkspaceFromActivityError::WorkspaceNotFound)?;
 
         // Read-only inspection phase — no mutation until every error class
         // has been ruled out ( guard-before-mutate).
@@ -8042,11 +8036,9 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         // Resolve the workspace. On miss → WorkspaceNotFound (wire-surfaced).
-        let ws_id = match workspace {
-            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
-            None => self.active_workspace_mut().map(|ws| ws.id()),
-        }
-        .ok_or(SetWorkspaceActivitiesError::WorkspaceNotFound)?;
+        let ws_id = self
+            .resolve_workspace_ref_or_active(workspace)
+            .ok_or(SetWorkspaceActivitiesError::WorkspaceNotFound)?;
 
         // Snapshot the old membership set before any mutation. Resolve the layout-wide holding
         // output before the split-borrow scope below — `workspace_holding_output` takes `&self`,
@@ -8312,11 +8304,9 @@ impl<W: LayoutElement> Layout<W> {
             .resolve_activity_ref(activity_ref)
             .ok_or(MoveWorkspaceToActivityError::ActivityNotFound)?;
 
-        let ws_id = match workspace {
-            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
-            None => self.active_workspace_mut().map(|ws| ws.id()),
-        }
-        .ok_or(MoveWorkspaceToActivityError::WorkspaceNotFound)?;
+        let ws_id = self
+            .resolve_workspace_ref_or_active(workspace)
+            .ok_or(MoveWorkspaceToActivityError::WorkspaceNotFound)?;
 
         // Move requires the workspace to be a member of the currently-active
         // activity.
@@ -8399,11 +8389,9 @@ impl<W: LayoutElement> Layout<W> {
         &mut self,
         workspace: Option<WorkspaceReference>,
     ) -> Result<(WorkspaceId, bool), WorkspaceStickyError> {
-        let ws_id = match workspace {
-            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
-            None => self.active_workspace_mut().map(|ws| ws.id()),
-        }
-        .ok_or(WorkspaceStickyError::WorkspaceNotFound)?;
+        let ws_id = self
+            .resolve_workspace_ref_or_active(workspace)
+            .ok_or(WorkspaceStickyError::WorkspaceNotFound)?;
 
         // Two views of the full live id set: a `HashSet<ActivityId>` for the
         // no-op equality check, and a `Vec<ActivityReferenceArg>` for the
@@ -8476,11 +8464,9 @@ impl<W: LayoutElement> Layout<W> {
         &mut self,
         workspace: Option<WorkspaceReference>,
     ) -> Result<WorkspaceId, WorkspaceStickyError> {
-        let ws_id = match workspace {
-            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
-            None => self.active_workspace_mut().map(|ws| ws.id()),
-        }
-        .ok_or(WorkspaceStickyError::WorkspaceNotFound)?;
+        let ws_id = self
+            .resolve_workspace_ref_or_active(workspace)
+            .ok_or(WorkspaceStickyError::WorkspaceNotFound)?;
 
         let ws = self
             .workspaces
@@ -8512,11 +8498,9 @@ impl<W: LayoutElement> Layout<W> {
         &mut self,
         workspace: Option<WorkspaceReference>,
     ) -> Result<ToggleWorkspaceStickyOutcome, WorkspaceStickyError> {
-        let ws_id = match workspace {
-            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
-            None => self.active_workspace_mut().map(|ws| ws.id()),
-        }
-        .ok_or(WorkspaceStickyError::WorkspaceNotFound)?;
+        let ws_id = self
+            .resolve_workspace_ref_or_active(workspace)
+            .ok_or(WorkspaceStickyError::WorkspaceNotFound)?;
 
         // Read current flag in a narrow scope so the shared borrow releases
         // before the delegate call.
@@ -8545,6 +8529,25 @@ impl<W: LayoutElement> Layout<W> {
                 ws_id,
                 active_affected,
             })
+        }
+    }
+
+    /// Resolve `workspace` to an id: an explicit reference resolves via
+    /// [`Self::find_workspace_by_ref`], `None` falls back to the currently
+    /// active workspace.
+    ///
+    /// Returns the id only, not a `&mut Workspace` — the `None` arm goes
+    /// through [`Self::active_workspace_mut`], so returning a reference would
+    /// keep the `&mut self` borrow alive past the call. Callers that need to
+    /// split into `&mut self.workspaces` / `&mut self.activities` afterwards
+    /// depend on the borrow having already dropped.
+    fn resolve_workspace_ref_or_active(
+        &mut self,
+        workspace: Option<WorkspaceReference>,
+    ) -> Option<WorkspaceId> {
+        match workspace {
+            Some(r) => self.find_workspace_by_ref(r).map(|ws| ws.id()),
+            None => self.active_workspace_mut().map(|ws| ws.id()),
         }
     }
 
