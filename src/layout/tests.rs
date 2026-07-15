@@ -6800,7 +6800,7 @@ fn setup_shared_trailing_bookend_fixture() -> (
 /// `w_target_id` (i.e. the sweep ran), and `layout.verify_invariants` passes (which itself
 /// re-checks `Monitor::verify_invariants`'s per-view bookend assertion).
 #[track_caller]
-fn assert_dormant_trailing_fixup_landed(
+fn assert_dormant_trailing_repair_landed(
     layout: &Layout<TestWindow>,
     beta: ActivityId,
     mon_out: &OutputId,
@@ -6833,7 +6833,7 @@ fn move_column_to_workspace_down_into_shared_trailing_bookend_appends_dormant_bo
     // alpha view = `[W_src(has window, active at 0), W_target]`; beta view trails W_target.
     // `move_column_to_workspace_down` moves the column from W_src into W_target. W_target
     // gains content; beta's dormant view still ends in W_target. Without the public-entry-
-    // point fixup wiring, the per-view bookend invariant trips when verify_invariants runs.
+    // point sweep call, the per-view bookend invariant trips when verify_invariants runs.
     let (mut layout, _alpha, beta, mon_out, w_target_id) = setup_shared_trailing_bookend_fixture();
     let beta_len_before = layout
         .activities
@@ -6846,7 +6846,7 @@ fn move_column_to_workspace_down_into_shared_trailing_bookend_appends_dormant_bo
 
     layout.move_column_to_workspace_down(false);
 
-    assert_dormant_trailing_fixup_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
+    assert_dormant_trailing_repair_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
 }
 
 #[test]
@@ -6864,7 +6864,7 @@ fn move_column_to_workspace_into_shared_trailing_bookend_appends_dormant_bookend
 
     layout.move_column_to_workspace(1, false);
 
-    assert_dormant_trailing_fixup_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
+    assert_dormant_trailing_repair_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
 }
 
 #[test]
@@ -7516,7 +7516,7 @@ fn move_column_to_workspace_up_into_shared_trailing_bookend_appends_dormant_book
     // Position 0 is the formerly-empty trailing bookend that `move_column_to_workspace_down`
     // minted on the previous step; the column moved down into it, so it is now the source
     // workspace for the upcoming `_up` move. It will also receive the column when `_up`
-    // reverses the move — making it the "target" from the fixup's perspective.
+    // reverses the move — making it the "target" from the sweep's perspective.
     let w_target_id = alpha_view_ids[0];
 
     let beta = layout.create_activity("Beta".to_owned()).expect("create");
@@ -7555,7 +7555,7 @@ fn move_column_to_workspace_up_into_shared_trailing_bookend_appends_dormant_book
 
     layout.move_column_to_workspace_up(false);
 
-    assert_dormant_trailing_fixup_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
+    assert_dormant_trailing_repair_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
 }
 
 #[test]
@@ -7606,7 +7606,7 @@ fn add_column_by_idx_into_shared_trailing_bookend_appends_dormant_bookend() {
 
     layout.move_column_to_output(&out2_output, None, true);
 
-    assert_dormant_trailing_fixup_landed(&layout, beta, &out2_id, w_target_id, beta_len_before);
+    assert_dormant_trailing_repair_landed(&layout, beta, &out2_id, w_target_id, beta_len_before);
 }
 
 #[test]
@@ -7683,9 +7683,8 @@ fn add_column_by_idx_into_shared_leading_bookend_under_ewaf_prepends_dormant_boo
         .len();
 
     // Move the column from output1's active workspace to output2's W_target (idx 0). Under
-    // EWAF, `add_column_on` mints a top bookend in alpha (since workspace_idx == 0). The
-    // normalize sweep mirrors for beta: W_target is at beta's position 0 → mint a
-    // leading empty there.
+    // EWAF, the normalize sweep mints a top bookend in alpha (since workspace_idx == 0) and
+    // mirrors for beta: W_target is at beta's position 0 → mint a leading empty there.
     layout.move_column_to_output(&out2_output, Some(0), true);
 
     let beta_view_after = layout
@@ -7698,7 +7697,7 @@ fn add_column_by_idx_into_shared_leading_bookend_under_ewaf_prepends_dormant_boo
     assert_eq!(
         beta_view_after.len(),
         beta_len_before + 1,
-        "EWAF leading share: sweep prepends exactly one leading-fixup empty",
+        "EWAF leading share: sweep prepends exactly one leading empty",
     );
     assert_ne!(
         beta_view_after.ids().first(),
@@ -7767,21 +7766,20 @@ fn repair_view_pool_coherence_prunes_dangling_dormant_view_reference() {
 #[test]
 fn column_add_into_shared_trailing_bookend_keeps_verify_invariants_passing() {
     // Regression pin against the existing per-view bookend assertion in
-    // `Monitor::verify_invariants`. With the public-entry-point fixup wiring in place,
-    // adding a column to a workspace at a dormant view's trailing position leaves every
-    // monitor's per-view assertion satisfied. Without the wiring, the same operation would
-    // trip the assertion (proven by removing the fixup call and observing the panic during
-    // local discrimination).
+    // `Monitor::verify_invariants`. The public-entry-point normalize sweep repairs every
+    // dormant view sharing the receiving workspace, so adding a column to a workspace at a
+    // dormant view's trailing position leaves every monitor's per-view assertion satisfied.
+    // Without the sweep, the same operation would trip the assertion.
     let (mut layout, _alpha, _beta, _mon_out, _w_target_id) =
         setup_shared_trailing_bookend_fixture();
 
-    // Fire any of the four newly-wired entry points — the regression pin is that the
+    // Fire any of the four column-move entry points — the regression pin is that the
     // post-action verify_invariants passes. `move_column_to_workspace_down` is the simplest.
     layout.move_column_to_workspace_down(false);
 
     // `verify_invariants` runs all of `Monitor::verify_invariants` which in turn runs
-    // `assert_view_bookends` per view in every connected monitor — the assertion that would
-    // trip without the new wiring.
+    // `assert_view_bookends` per view in every connected monitor — the assertion the sweep
+    // keeps satisfied.
     layout.verify_invariants();
 }
 
@@ -7790,11 +7788,10 @@ fn move_column_to_workspace_down_floating_path_appends_dormant_bookend() {
     // Exercises the floating-recursion branch of `move_column_to_workspace_down_on`:
     // when the active workspace has `floating_is_active() == true`, the inner associated fn
     // routes through `move_to_workspace_down_on` → `add_tile_on` rather than the scrolling
-    // `add_column_on` path. The public-entry-point fixup at the call site fires
+    // `add_column_on` path. The public-entry-point normalize sweep call fires
     // unconditionally, so the dormant bookend must be repaired regardless of which inner
-    // branch executed. Without the unconditional placement at the public entry point, a
-    // refactor that moved the fixup inside `add_column_on` would silently leave the
-    // floating path unfixed.
+    // branch executed — `add_tile_on` still mints its own active-view bookend inline, but
+    // the sweep is what reaches the dormant view either way.
     let (mut layout, _alpha, beta, mon_out, w_target_id) = setup_shared_trailing_bookend_fixture();
 
     // Add a floating window to the active (source) workspace so we can put floating focus
@@ -7834,7 +7831,7 @@ fn move_column_to_workspace_down_floating_path_appends_dormant_bookend() {
 
     layout.move_column_to_workspace_down(false);
 
-    assert_dormant_trailing_fixup_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
+    assert_dormant_trailing_repair_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
 }
 
 #[test]
@@ -8513,9 +8510,9 @@ fn set_workspace_name_trailing_dormant_view_appends_bookend() {
         "w_target now carries the new name",
     );
 
-    // Dormant view (beta): w_target was at beta's trailing slot too, so the dormant fixup
+    // Dormant view (beta): w_target was at beta's trailing slot too, so the sweep
     // appended a fresh trailing empty.
-    assert_dormant_trailing_fixup_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
+    assert_dormant_trailing_repair_landed(&layout, beta, &mon_out, w_target_id, beta_len_before);
     let _ = alpha;
 }
 
@@ -8610,7 +8607,7 @@ fn set_workspace_name_under_ewaf_leading_dormant_view_prepends_bookend() {
     assert_eq!(
         beta_view_after.len(),
         beta_len_before + 1,
-        "EWAF leading share: dormant fixup prepends exactly one leading empty",
+        "EWAF leading share: sweep prepends exactly one leading empty",
     );
     assert_ne!(
         beta_view_after.ids().first(),
@@ -20806,7 +20803,7 @@ fn add_window_under_ewaf_prepends_leading_empty_to_dormant_view_at_position_zero
         .expect("beta has view");
     assert!(
         beta_view_after.len() > beta_view_len_before,
-        "EWAF fixup must grow beta's view after the window lands at position 0",
+        "EWAF sweep must grow beta's view after the window lands at position 0",
     );
     // beta_ws_id must no longer be the first entry (a new leading empty was prepended).
     assert_ne!(
@@ -22925,7 +22922,7 @@ fn set_workspace_activities_add_for_empty_unnamed_workspace_does_not_mint() {
     // Negative pin for the `has_windows_or_name` gate. ws is empty + unnamed
     // (a valid bookend on its own). Add it to a dormant activity's view that
     // currently holds a single entry. Beta's view grows by exactly 1
-    // (the append), not by 2 — the dormant fixup's `has_windows_or_name`
+    // (the append), not by 2 — the sweep's `has_windows_or_name`
     // check on the trailing entry returns false and no extra mint fires.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);

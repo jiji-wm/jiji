@@ -1931,7 +1931,6 @@ impl<W: LayoutElement> Layout<W> {
             !self.monitors.is_empty(),
             "add_column_by_idx requires at least one connected monitor",
         );
-        let seed_activity = self.activities.active_id();
         let mon_out = self.monitors[monitor_idx].output_id();
         let (monitors, pool, view) = self.monitors_pool_view_mut(&mon_out);
         Self::add_column_on(
@@ -1942,107 +1941,16 @@ impl<W: LayoutElement> Layout<W> {
             workspace_idx,
             column,
             activate,
-            seed_activity,
         );
 
         if activate {
             self.active_monitor_idx = monitor_idx;
         }
 
-        // End of split borrow. `add_column_on` mints the active view's trailing/leading
-        // bookend inline; the sweep additionally repairs any dormant activity's view left
-        // with a violated bookend at the same output.
+        // End of split borrow. `add_column_on` no longer mints inline; the sweep maintains
+        // the active view's bookends along with every dormant activity's view at the same
+        // output.
         self.normalize_view_bookends();
-    }
-
-    /// After a window has been added to `ws_id` on `mon_idx` (window-add path), or after a
-    /// windowed-or-named workspace has been inserted into an activity's view for a connected
-    /// monitor (activity-add path), walk every dormant activity's view of the same output and
-    /// append a fresh trailing-empty bookend
-    /// if `ws_id` is that view's trailing entry; under EWAF, also prepend a fresh leading empty
-    /// if `ws_id` is at position 0. Mirrors the trailing-empty bookend spawn the active-side
-    /// `add_column_on` already does, but for the dormant activities' views.
-    ///
-    /// Called outside the `(monitors, pool, view)` split-borrow scope so `&mut self` is
-    /// available; mirrors the post-split flush pattern in `add_output` / `remove_output`.
-    // Superseded by `Self::normalize_view_bookends` at every mutation exit; retained until
-    // the inline active-view mint sites it exists alongside also retire.
-    #[allow(dead_code)]
-    fn dormant_view_bookend_fixup(&mut self, ws_id: WorkspaceId, mon_idx: usize) {
-        let mon_output = self.monitors[mon_idx].output.clone();
-        let mon_options = self.monitors[mon_idx].options.clone();
-        let mon_out_id = OutputId::new(&mon_output);
-        let ewaf = mon_options.layout.empty_workspace_above_first;
-        let clock = self.clock.clone();
-        let active_id = self.activities.active_id();
-
-        let needs_fixup: Vec<(ActivityId, bool, bool)> = self
-            .activities
-            .iter()
-            .filter_map(|a| {
-                if a.id() == active_id {
-                    // The active view's bookend is maintained by `add_column_on` (window-add)
-                    // or by the inline leading-mint in `add_workspace_to_activity` /
-                    // `set_workspace_activities` (activity-add, EWAF pos-0 case).
-                    return None;
-                }
-                let view = a.views().get(&mon_out_id)?;
-                let pos = view.position_of(ws_id)?;
-                let is_last = pos == view.len() - 1;
-                let is_first = pos == 0;
-                if is_last || (ewaf && is_first) {
-                    Some((a.id(), is_last, is_first))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for (act_id, is_last, is_first) in needs_fixup {
-            if is_last {
-                let bottom = Workspace::new(
-                    &mon_output,
-                    HashSet::from([act_id]),
-                    clock.clone(),
-                    mon_options.clone(),
-                );
-                let bottom_id = bottom.id();
-                assert!(
-                    self.workspaces.insert(bottom_id, bottom).is_none(),
-                    "fresh id must be unique",
-                );
-                let view = self
-                    .activities
-                    .get_mut(act_id)
-                    .expect("act_id sourced from iter")
-                    .views_mut()
-                    .get_mut(&mon_out_id)
-                    .expect("view existed at filter time");
-                let insert_pos = view.len();
-                view.insert(insert_pos, bottom_id);
-            }
-            if ewaf && is_first {
-                let top = Workspace::new(
-                    &mon_output,
-                    HashSet::from([act_id]),
-                    clock.clone(),
-                    mon_options.clone(),
-                );
-                let top_id = top.id();
-                assert!(
-                    self.workspaces.insert(top_id, top).is_none(),
-                    "fresh id must be unique",
-                );
-                let view = self
-                    .activities
-                    .get_mut(act_id)
-                    .expect("act_id sourced from iter")
-                    .views_mut()
-                    .get_mut(&mon_out_id)
-                    .expect("view existed at filter time");
-                view.insert(0, top_id);
-            }
-        }
     }
 
     /// Repairs a violated trailing (or, under EWAF, leading) bookend in every activity's view of
@@ -2065,9 +1973,9 @@ impl<W: LayoutElement> Layout<W> {
     /// see `remove_output`, enforced by `Layout::verify_invariants`), there is no
     /// disconnected-output keyspace left to visit.
     ///
-    /// Unlike [`Self::dormant_view_bookend_fixup`], which patches only the dormant activities
-    /// sharing a single caller-designated `ws_id`, this sweep examines every activity's view —
-    /// active included — independent of which workspace a caller just touched.
+    /// Scope: examines every activity's view — active included — independent of which
+    /// workspace a caller just touched, rather than patching a single caller-designated
+    /// `ws_id` within the dormant activities sharing it.
     ///
     /// Returns the number of workspaces minted.
     fn normalize_view_bookends(&mut self) -> usize {
@@ -2213,7 +2121,7 @@ impl<W: LayoutElement> Layout<W> {
     /// [`Self::reconcile_views_with_membership`], never a silent `continue`.
     ///
     /// Called outside any `(monitors, pool, view)` split-borrow scope so `&mut self` is available
-    /// for the trailing/EWAF-leading bookend fixup, like the post-split flushes in
+    /// for the trailing/EWAF-leading bookend sweep, like the post-split flushes in
     /// [`Self::add_output`] / [`Self::remove_output`].
     fn install_drained_by_membership(&mut self, drained: &[WorkspaceId], mon_idx: usize) {
         let boot_out_id = self.monitors[mon_idx].output_id();
@@ -4589,16 +4497,14 @@ impl<W: LayoutElement> Layout<W> {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn add_column_on(
         monitors: &mut [Monitor<W>],
         pool: &mut HashMap<WorkspaceId, Workspace<W>>,
         view: &mut WorkspaceView,
         mon_idx: usize,
-        mut workspace_idx: usize,
+        workspace_idx: usize,
         column: Column<W>,
         activate: bool,
-        seed_activity: ActivityId,
     ) {
         let mon = &mut monitors[mon_idx];
         let workspace = mon.workspace_at_mut(pool, view, workspace_idx);
@@ -4608,14 +4514,6 @@ impl<W: LayoutElement> Layout<W> {
         // After adding a new window, workspace becomes this output's own.
         if workspace.name().is_none() {
             workspace.output_id = Some(OutputId::new(&mon.output));
-        }
-
-        if workspace_idx == view.len() - 1 {
-            Self::add_workspace_bottom_on(monitors, pool, view, mon_idx, seed_activity);
-        }
-        if monitors[mon_idx].options.layout.empty_workspace_above_first && workspace_idx == 0 {
-            Self::add_workspace_top_on(monitors, pool, view, mon_idx, seed_activity);
-            workspace_idx += 1;
         }
 
         if activate {
@@ -5246,16 +5144,7 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
 
-        Self::add_column_on(
-            monitors,
-            pool,
-            view,
-            mon_idx,
-            new_idx,
-            column,
-            activate,
-            seed_activity,
-        );
+        Self::add_column_on(monitors, pool, view, mon_idx, new_idx, column, activate);
     }
 
     fn move_column_to_workspace_down_on(
@@ -5287,16 +5176,7 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
 
-        Self::add_column_on(
-            monitors,
-            pool,
-            view,
-            mon_idx,
-            new_idx,
-            column,
-            activate,
-            seed_activity,
-        );
+        Self::add_column_on(monitors, pool, view, mon_idx, new_idx, column, activate);
     }
 
     #[must_use]
@@ -5343,16 +5223,7 @@ impl<W: LayoutElement> Layout<W> {
             return Vec::new();
         };
 
-        Self::add_column_on(
-            monitors,
-            pool,
-            view,
-            mon_idx,
-            new_idx,
-            column,
-            activate,
-            seed_activity,
-        );
+        Self::add_column_on(monitors, pool, view, mon_idx, new_idx, column, activate);
 
         // Column moved to an existing target workspace; no empty trailing workspaces to prune.
         Vec::new()
@@ -6463,11 +6334,12 @@ impl<W: LayoutElement> Layout<W> {
             seed_activity,
         );
 
-        // End of split borrow. The associated fn routes through `add_column_on` (which
-        // maintains the active view's bookend) for the scrolling path, or through
-        // `add_tile_on` for the floating-recursion path — both mint the active-view
-        // bookend inline but neither touches dormant views. The sweep repairs any
-        // dormant view left with a violated bookend at the receiving slot.
+        // End of split borrow. The associated fn routes through `add_column_on` for the
+        // scrolling path, which no longer mints inline, or through `add_tile_on` for the
+        // floating-recursion path, which still mints the active-view bookend inline; neither
+        // path touches dormant views. The sweep maintains the active view's bookend on the
+        // scrolling path and repairs any dormant view left with a violated bookend at the
+        // receiving slot.
         self.normalize_view_bookends();
     }
 
@@ -6488,9 +6360,10 @@ impl<W: LayoutElement> Layout<W> {
             seed_activity,
         );
 
-        // End of split borrow. See `move_column_to_workspace_up` for the rationale —
-        // the associated fn maintains the active view's bookend (via `add_column_on`
-        // or the floating-recursion `add_tile_on`) but never touches dormant views.
+        // End of split borrow. See `move_column_to_workspace_up` for the rationale — the
+        // scrolling `add_column_on` path relies on the sweep for its active-view bookend,
+        // the floating-recursion `add_tile_on` path still mints it inline, and neither
+        // path touches dormant views.
         self.normalize_view_bookends();
     }
 
@@ -6922,7 +6795,7 @@ impl<W: LayoutElement> Layout<W> {
 
         // Installs first: each membership without a view gets one, keyed by the output whose view
         // currently holds the workspace (in the losing activity, before any removal runs).
-        let mut installed_windowed: Vec<(WorkspaceId, OutputId, ActivityId)> = Vec::new();
+        let mut installed_windowed: Vec<OutputId> = Vec::new();
         for (ws_id, act_id) in installs {
             let Some(out_id) = self.workspace_holding_output(ws_id) else {
                 trace!(
@@ -6963,7 +6836,7 @@ impl<W: LayoutElement> Layout<W> {
                     .get(&ws_id)
                     .is_some_and(|ws| ws.has_windows_or_name())
             {
-                installed_windowed.push((ws_id, out_id, act_id));
+                installed_windowed.push(out_id);
             }
         }
 
@@ -7021,42 +6894,18 @@ impl<W: LayoutElement> Layout<W> {
             self.ensure_all_activity_views();
         }
 
-        // Bookend repair for windowed/named installs, after removals so the fixup sees final
+        // Bookend repair for windowed/named installs, after removals so the sweep sees final
         // positions. An empty install is itself a valid bookend and needs no repair.
-        for (ws_id, out_id, act_id) in installed_windowed {
-            let Some(mon_idx) = self.monitors.iter().position(|m| m.output_id() == out_id) else {
+        for out_id in &installed_windowed {
+            if self.monitors.iter().all(|m| m.output_id() != *out_id) {
                 debug_assert!(
                     false,
                     "reconcile_views_with_membership: installed view output {out_id:?} must be \
                      connected (connected-keyspace invariant)",
                 );
-                continue;
-            };
-            let active_id = self.activities.active_id();
-            if act_id == active_id {
-                // The active view's leading-empty EWAF bookend is minted inline; the
-                // sweep's active arm would otherwise find nothing to redo.
-                let ewaf = self.monitors[mon_idx]
-                    .options
-                    .layout
-                    .empty_workspace_above_first;
-                let needs_leading_mint = ewaf
-                    && self
-                        .activities
-                        .active()
-                        .views()
-                        .get(&out_id)
-                        .expect(
-                            "active activity must hold a view on every connected output \
-                             (per-activity bookend invariant)",
-                        )
-                        .position_of(ws_id)
-                        == Some(0);
-                if needs_leading_mint {
-                    let (monitors, pool, view) = self.monitors_pool_view_mut(&out_id);
-                    Self::add_workspace_top_on(monitors, pool, view, mon_idx, active_id);
-                }
             }
+        }
+        if !installed_windowed.is_empty() {
             self.normalize_view_bookends();
         }
 
@@ -7843,7 +7692,7 @@ impl<W: LayoutElement> Layout<W> {
 
         // Patch ws.activities + the target activity's view in a tight scope so
         // the split mutable borrows on `self.workspaces` / `self.activities`
-        // die before the bookend mint+fixup below needs `&mut self`.
+        // die before the bookend sweep below needs `&mut self`.
         {
             let pool = &mut self.workspaces;
             let activities = &mut self.activities;
@@ -7911,15 +7760,14 @@ impl<W: LayoutElement> Layout<W> {
         // an existing trailing-empty bookend at the tail, so the only rule a
         // windowed-or-named `ws_id` can still break is EWAF's leading empty —
         // when the target view held a single empty entry (doubling as both
-        // bookends) and `ws_id` landed at position 0. Dormant views are
-        // repaired by the sweep's leading-empty arm; the active view needs the
-        // leading mint inline (the sweep's active arm would otherwise find nothing
-        // to redo). An empty unnamed `ws_id` is itself a valid bookend and the
-        // entire repair block short-circuits.
+        // bookends) and `ws_id` landed at position 0. Both active and dormant
+        // views are repaired by the sweep's leading-empty arm. An empty unnamed
+        // `ws_id` is itself a valid bookend and the entire repair block
+        // short-circuits.
         //
         // Silent-skip case: when `ws_id` has no holding view in any activity — the
         // fully-disconnected window, where every workspace is parked in
-        // `disconnected_workspace_ids` and no activity holds any view — no active mint or
+        // `disconnected_workspace_ids` and no activity holds any view — no
         // sweep runs here. The bookend rule is re-asserted on reconnect via
         // `Monitor::new`'s materializer. Matches the `set_workspace_name` precedent — no
         // warn!, no eager repair, no rendering happens against a disconnected output.
@@ -7930,31 +7778,7 @@ impl<W: LayoutElement> Layout<W> {
             .has_windows_or_name();
         if ws_needs_repair {
             if let Some(out_id) = holding_out_id {
-                let mon_idx_opt = self.monitors.iter().position(|m| m.output_id() == out_id);
-                if let Some(mon_idx) = mon_idx_opt {
-                    let active_id = self.activities.active_id();
-                    if activity_id == active_id {
-                        let ewaf = self.monitors[mon_idx]
-                            .options
-                            .layout
-                            .empty_workspace_above_first;
-                        let needs_leading_mint = ewaf
-                            && self
-                                .activities
-                                .active()
-                                .views()
-                                .get(&out_id)
-                                .expect(
-                                    "active activity must hold a view on every connected \
-                                     output (per-activity bookend invariant)",
-                                )
-                                .position_of(ws_id)
-                                == Some(0);
-                        if needs_leading_mint {
-                            let (monitors, pool, view) = self.monitors_pool_view_mut(&out_id);
-                            Self::add_workspace_top_on(monitors, pool, view, mon_idx, active_id);
-                        }
-                    }
+                if self.monitors.iter().any(|m| m.output_id() == out_id) {
                     self.normalize_view_bookends();
                 }
             }
@@ -8365,26 +8189,25 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        // mon_idx for the post-loop bookend repair, keyed by the holding output.
-        let bookend_mon_idx = holding_out_id
+        // Whether the post-loop bookend repair can run at all, keyed by the holding output
+        // being currently connected.
+        let holding_output_connected = holding_out_id
             .as_ref()
-            .and_then(|out_id| self.monitors.iter().position(|m| &m.output_id() == out_id));
+            .is_some_and(|out_id| self.monitors.iter().any(|m| &m.output_id() == out_id));
 
         // Per-activity bookend invariant: every (activity, connected output)
         // view must end in an empty unnamed workspace. The Add loop above
         // keeps an existing trailing-empty bookend at the tail, so the only
         // rule a windowed-or-named `ws_id` can still break is EWAF's leading
         // empty — when a target view held a single empty entry (doubling as
-        // both bookends) and `ws_id` landed at position 0. Dormant views are
-        // repaired by the sweep's leading-empty arm; the active view needs the
-        // leading mint inline (only when the active activity was itself added —
-        // the sweep's active arm would otherwise find nothing to redo). An empty
-        // unnamed `ws_id` is itself a valid bookend and the entire repair block
-        // short-circuits.
+        // both bookends) and `ws_id` landed at position 0. Both active and
+        // dormant views are repaired by the sweep's leading-empty arm. An
+        // empty unnamed `ws_id` is itself a valid bookend and the entire
+        // repair block short-circuits.
         //
         // Silent-skip case: when `ws_id` has no holding view in any activity — the
         // fully-disconnected window, where every workspace is parked in
-        // `disconnected_workspace_ids` and no activity holds any view — no active mint or
+        // `disconnected_workspace_ids` and no activity holds any view — no
         // sweep runs here. The bookend rule is re-asserted on reconnect via
         // `Monitor::new`'s materializer. Matches the `set_workspace_name` precedent — no
         // warn!, no eager repair, no rendering happens against a disconnected output.
@@ -8393,39 +8216,12 @@ impl<W: LayoutElement> Layout<W> {
             .get(&ws_id)
             .expect("resolved ws_id must be a live pool key")
             .has_windows_or_name();
-        if ws_needs_repair {
-            if let Some(mon_idx) = bookend_mon_idx {
-                let out_id = holding_out_id
-                    .as_ref()
-                    .expect("bookend_mon_idx is derived from holding_out_id");
-                if to_add.contains(&active_id) {
-                    let ewaf = self.monitors[mon_idx]
-                        .options
-                        .layout
-                        .empty_workspace_above_first;
-                    let needs_leading_mint = ewaf
-                        && self
-                            .activities
-                            .active()
-                            .views()
-                            .get(out_id)
-                            .expect(
-                                "active activity must hold a view on every connected output \
-                                 (per-activity bookend invariant)",
-                            )
-                            .position_of(ws_id)
-                            == Some(0);
-                    if needs_leading_mint {
-                        let (monitors, pool, view) = self.monitors_pool_view_mut(out_id);
-                        Self::add_workspace_top_on(monitors, pool, view, mon_idx, active_id);
-                    }
-                }
-                // Safe against the sweep's stricter missing-view assert: ws_needs_repair means
-                // ws_id is windowed-or-named, and the bookend invariant forbids that from being
-                // a view's sole (len-1) entry — the only shape the to_remove loop above drops —
-                // so no activity here can be missing a view when this runs.
-                self.normalize_view_bookends();
-            }
+        if ws_needs_repair && holding_output_connected {
+            // Safe against the sweep's stricter missing-view assert: ws_needs_repair means
+            // ws_id is windowed-or-named, and the bookend invariant forbids that from being
+            // a view's sole (len-1) entry — the only shape the to_remove loop above drops —
+            // so no activity here can be missing a view when this runs.
+            self.normalize_view_bookends();
         }
 
         // Reinstate any dropped views via the materializer — mirrors the

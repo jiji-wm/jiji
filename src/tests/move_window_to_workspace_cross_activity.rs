@@ -357,11 +357,11 @@ fn move_window_to_workspace_id_dormant_landing_mints_fresh_trailing_empty() {
     assert_eq!(
         beta_view.len(),
         beta_view_len_before + 1,
-        "the bookend fixup must mint a fresh trailing empty after the moved \
+        "the bookend sweep must mint a fresh trailing empty after the moved \
          tile lands on what was beta's trailing slot",
     );
     // The previously-trailing id is no longer at the trailing slot.
-    let trailing_after = *beta_view.ids().last().expect("post-fixup view non-empty");
+    let trailing_after = *beta_view.ids().last().expect("post-sweep view non-empty");
     assert_ne!(
         trailing_after.get(),
         beta_target,
