@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::{env, mem, thread};
+use std::{env, iter, mem, thread};
 
 use _server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as KdeDecorationsMode;
 use anyhow::{bail, ensure, Context};
@@ -4755,25 +4755,20 @@ impl Niri {
                 }};
             }
 
-            for (ws, geo) in mon.workspaces_with_render_geo(lctx) {
-                let ns = Some(ws.id().get() as usize);
-                let xray_pos = XrayPos::new(geo.loc, zoom);
-                push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
-                push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
-            }
-
             // The outgoing activity strip slides alongside the incoming one during a switch. It
             // is spatially disjoint from the incoming strip, so its passes interleave freely;
             // within each strip the layer order matches the incoming idiom.
             //
             // NOTE: sticky workspaces belong to every activity and therefore appear in both the
             // incoming and outgoing view simultaneously. Their `ns` (ws.id()-based cache key)
-            // collides across the two strips on the same frame. Whether this causes incorrect
-            // damage-tracker behavior for framebuffer-effect elements is a latent open question
-            // — sticky workspaces are uncommon and the window during a switch is short, but this
-            // should be confirmed before the activity-switch feature ships.
-            if let Some(out_sctx) = out_sctx {
-                for (ws, geo) in mon.workspaces_with_render_geo_for(out_sctx) {
+            // collides across the two strips on the same frame. A visual daily-driver sign-off
+            // on 2026-07-09 found no visible artifacts in either switch direction, including
+            // sticky workspaces rendering cleanly during a slide. Whether the collision still
+            // causes incorrect damage-tracker behavior for framebuffer-effect elements remains
+            // an open question at the damage-tracker level — the visual sign-off doesn't settle
+            // that.
+            for sctx in iter::once(in_sctx).chain(out_sctx) {
+                for (ws, geo) in mon.workspaces_with_render_geo_for(sctx) {
                     let ns = Some(ws.id().get() as usize);
                     let xray_pos = XrayPos::new(geo.loc, zoom);
                     push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
@@ -4781,33 +4776,25 @@ impl Niri {
                 }
             }
 
-            mon.render_workspaces(in_sctx, ctx.r(), focus_ring, &mut |elem| push(elem.into()));
-
-            if let Some(out_sctx) = out_sctx {
-                mon.render_workspaces(out_sctx, ctx.r(), false, &mut |elem| push(elem.into()));
+            for (sctx, focus_ring) in
+                iter::once((in_sctx, focus_ring)).chain(out_sctx.map(|sctx| (sctx, false)))
+            {
+                mon.render_workspaces(sctx, ctx.r(), focus_ring, &mut |elem| push(elem.into()));
             }
 
-            for (ws, geo) in mon.workspaces_with_render_geo(lctx) {
-                // The render element namespace. This will be set to the workspace index for
-                // elements duplicated across workspaces (i.e. background and bottom layers) in
-                // order to have their non-xray framebuffer effects separated from each other.
-                //
-                // This doesn't have to correspond exactly to workspace id or idx, the only
-                // requirement is that there's only one framebuffer effect element with a given id +
-                // namespace on the frame at once. Id + namespace is used as the cache key in the
-                // damage tracker.
-                let ns = Some(ws.id().get() as usize);
-                let xray_pos = XrayPos::new(geo.loc, zoom);
-                push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
-                push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
-
-                process!(geo)(ws.render_background());
-            }
-
-            if let Some(out_sctx) = out_sctx {
-                // Same sticky-workspace ns-collision caveat applies here as for the popups
-                // pass above.
-                for (ws, geo) in mon.workspaces_with_render_geo_for(out_sctx) {
+            for sctx in iter::once(in_sctx).chain(out_sctx) {
+                for (ws, geo) in mon.workspaces_with_render_geo_for(sctx) {
+                    // The render element namespace. This will be set to the workspace index for
+                    // elements duplicated across workspaces (i.e. background and bottom layers) in
+                    // order to have their non-xray framebuffer effects separated from each other.
+                    //
+                    // This doesn't have to correspond exactly to workspace id or idx, the only
+                    // requirement is that there's only one framebuffer effect element with a given
+                    // id + namespace on the frame at once. Id + namespace is
+                    // used as the cache key in the damage tracker.
+                    //
+                    // Same sticky-workspace ns-collision caveat as the popups pass above — see
+                    // the NOTE there.
                     let ns = Some(ws.id().get() as usize);
                     let xray_pos = XrayPos::new(geo.loc, zoom);
                     push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
