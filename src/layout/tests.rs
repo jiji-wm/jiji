@@ -7,6 +7,7 @@ use jiji_config::{
     Bind, CenterFocusedColumn, FloatOrInt, ModKey, OutputName, Struts, TabIndicatorLength,
     TabIndicatorPosition, WorkspaceReference,
 };
+use jiji_ipc::ActivityReferenceArg;
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 use smithay::output::{Mode, PhysicalProperties, Subpixel};
