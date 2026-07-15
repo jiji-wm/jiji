@@ -319,9 +319,8 @@ fn move_window_to_workspace_id_self_move_returns_no_op() {
 fn move_window_to_workspace_id_dormant_landing_mints_fresh_trailing_empty() {
     // Per-activity bookend invariant: if the moved tile lands on beta's
     // trailing-empty bookend, beta's view of that monitor must grow a
-    // fresh empty bookend. Reuses the `dormant_view_bookend_fixup` helper
-    // already used by the in-activity column movers; the cross-activity
-    // mover explicitly invokes that helper post-attach.
+    // fresh empty bookend. The cross-activity mover runs the normalize
+    // sweep post-attach, same as the in-activity column movers.
     let mut f = Fixture::with_config(config_with_two_activities(&[], &[]));
     f.add_output(1, (1920, 1080));
     let client_id = f.add_client();

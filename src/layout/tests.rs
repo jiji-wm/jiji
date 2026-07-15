@@ -6659,8 +6659,8 @@ fn ensure_all_activity_views_no_op_when_monitors_empty() {
 fn add_window_to_active_workspace_maintains_dormant_view_bookend() {
     // Cross-activity bookend maintenance: a workspace shared between alpha (active) and
     // beta (dormant) where beta's view has it as the trailing entry. When a window opens
-    // into the workspace via the active path, the dormant_view_bookend_fixup must append
-    // a fresh trailing empty to beta's view too.
+    // into the workspace via the active path, the normalize sweep must append a fresh
+    // trailing empty to beta's view too.
     let ops = [Op::AddOutput(1)];
     let mut layout = check_ops(ops);
     let alpha = layout.active_activity_id();
@@ -6720,7 +6720,7 @@ fn add_window_to_active_workspace_maintains_dormant_view_bookend() {
         .expect("beta has view");
     assert!(
         beta_view_after.len() > beta_view_before.len(),
-        "dormant_view_bookend_fixup must have extended beta's view past w_id",
+        "normalize_view_bookends must have extended beta's view past w_id",
     );
     assert_ne!(
         beta_view_after.ids().last(),
@@ -6797,7 +6797,7 @@ fn setup_shared_trailing_bookend_fixture() -> (
 }
 
 /// Common post-condition: beta's dormant view grew by exactly one fresh empty appended after
-/// `w_target_id` (i.e. the fixup ran), and `layout.verify_invariants` passes (which itself
+/// `w_target_id` (i.e. the sweep ran), and `layout.verify_invariants` passes (which itself
 /// re-checks `Monitor::verify_invariants`'s per-view bookend assertion).
 #[track_caller]
 fn assert_dormant_trailing_fixup_landed(
@@ -6817,7 +6817,7 @@ fn assert_dormant_trailing_fixup_landed(
     assert_eq!(
         beta_view_after.len(),
         beta_len_before + 1,
-        "dormant_view_bookend_fixup must have appended exactly one fresh empty",
+        "normalize_view_bookends must have appended exactly one fresh empty",
     );
     assert_ne!(
         beta_view_after.ids().last(),
@@ -7612,8 +7612,8 @@ fn add_column_by_idx_into_shared_trailing_bookend_appends_dormant_bookend() {
 #[test]
 fn add_column_by_idx_into_shared_leading_bookend_under_ewaf_prepends_dormant_bookend() {
     // EWAF (empty_workspace_above_first) variant: position 0 is also a bookend slot. The
-    // helper at `dormant_view_bookend_fixup` mints a leading empty in dormant views when
-    // `ewaf && is_first` — i.e. the receiving workspace sits at position 0 of a dormant
+    // normalize sweep mints a leading empty in dormant views when a view's first entry is
+    // windowed-or-named — i.e. the receiving workspace sits at position 0 of a dormant
     // view. Construct beta's dormant view via `test_override_activity_view` so the shared
     // workspace lands at position 0 with extra filler workspaces to satisfy EWAF's 1-or-3+
     // rule. (The Add branch of `set_workspace_activities` does place a windowed workspace at
@@ -7684,7 +7684,7 @@ fn add_column_by_idx_into_shared_leading_bookend_under_ewaf_prepends_dormant_boo
 
     // Move the column from output1's active workspace to output2's W_target (idx 0). Under
     // EWAF, `add_column_on` mints a top bookend in alpha (since workspace_idx == 0). The
-    // dormant-view fixup mirrors for beta: W_target is at beta's position 0 → mint a
+    // normalize sweep mirrors for beta: W_target is at beta's position 0 → mint a
     // leading empty there.
     layout.move_column_to_output(&out2_output, Some(0), true);
 
@@ -7698,7 +7698,7 @@ fn add_column_by_idx_into_shared_leading_bookend_under_ewaf_prepends_dormant_boo
     assert_eq!(
         beta_view_after.len(),
         beta_len_before + 1,
-        "EWAF leading share: helper prepends exactly one leading-fixup empty",
+        "EWAF leading share: sweep prepends exactly one leading-fixup empty",
     );
     assert_ne!(
         beta_view_after.ids().first(),
@@ -7838,13 +7838,12 @@ fn move_column_to_workspace_down_floating_path_appends_dormant_bookend() {
 }
 
 #[test]
-fn dormant_view_bookend_fixup_len1_ewaf_mints_both_bookends() {
+fn move_column_to_output_len1_ewaf_dormant_view_mints_both_bookends() {
     // A dormant view of length 1 under EWAF contains a single workspace that is
-    // simultaneously `is_last` (position == len-1 == 0) and `ewaf && is_first`
-    // (position == 0). Both branches in `dormant_view_bookend_fixup`'s loop body fire
-    // on the same needs_fixup entry, minting a new trailing empty AND a new leading empty
-    // in one call — growing the view from length 1 to length 3 with the original
-    // workspace sandwiched in the middle.
+    // simultaneously the trailing entry (position == len-1 == 0) and, under EWAF, the
+    // leading entry (position == 0). The sweep mints a new trailing empty AND a new
+    // leading empty for that one entry in a single pass — growing the view from length 1
+    // to length 3 with the original workspace sandwiched in the middle.
     let options = Options {
         layout: jiji_config::Layout {
             empty_workspace_above_first: true,
@@ -7895,10 +7894,10 @@ fn dormant_view_bookend_fixup_len1_ewaf_mints_both_bookends() {
     layout.verify_invariants();
 
     // Move the column from out1 to out2's w_target (idx 0). Under EWAF, `add_column_on`
-    // mints both a leading and a trailing bookend in alpha's view. The fixup observes that
-    // w_target is at position 0 of beta's len-1 view, so both `is_last` and
-    // `ewaf && is_first` are true — the helper mints one trailing empty AND one leading
-    // empty, growing beta's out2 view from [W_target] to [fresh_top, W_target, fresh_bottom].
+    // mints both a leading and a trailing bookend in alpha's view. The sweep observes that
+    // w_target is at position 0 of beta's len-1 view, simultaneously the trailing and (under
+    // EWAF) leading entry — it mints one trailing empty AND one leading empty, growing
+    // beta's out2 view from [W_target] to [fresh_top, W_target, fresh_bottom].
     layout.move_column_to_output(&out2_output, Some(0), true);
 
     let beta_view_after = layout
@@ -7911,7 +7910,7 @@ fn dormant_view_bookend_fixup_len1_ewaf_mints_both_bookends() {
     assert_eq!(
         beta_view_after.len(),
         3,
-        "len-1 EWAF dormant view: fixup must mint both leading and trailing empty, growing view to 3",
+        "len-1 EWAF dormant view: sweep must mint both leading and trailing empty, growing view to 3",
     );
     assert_ne!(
         beta_view_after.ids().first(),
@@ -8032,8 +8031,8 @@ fn normalize_sweep_repairs_missing_trailing_bookend_in_dormant_view() {
 #[test]
 fn normalize_sweep_repairs_missing_ewaf_leading_bookend() {
     // Mirror of the trailing-bookend repair test, on the EWAF leading slot: the production
-    // insert path (via `dormant_view_bookend_fixup`'s leading branch) mints a correct leading
-    // empty, which is then directly deleted from both the view and the pool.
+    // insert path (via the normalize sweep's leading arm) mints a correct leading empty,
+    // which is then directly deleted from both the view and the pool.
     let options = Options {
         layout: jiji_config::Layout {
             empty_workspace_above_first: true,
@@ -8451,8 +8450,7 @@ fn set_workspace_name_trailing_dormant_view_appends_bookend() {
     // Naming a workspace at the trailing bookend slot of a dormant view violates the
     // per-view bookend invariant on that view (name.is_some() at a slot whose contract
     // requires name.is_none()). The active view's bookend is patched inline via
-    // `add_workspace_bottom_on`; the dormant view is patched via
-    // `dormant_view_bookend_fixup`.
+    // `add_workspace_bottom_on`; the dormant view is patched by the normalize sweep.
     let (mut layout, alpha, beta, mon_out, w_target_id) = setup_shared_trailing_bookend_fixture();
     // Pin the fixture: w_target is at the trailing slot of both alpha (active) and beta
     // (dormant). Both views need a fresh trailing empty after the rename.
@@ -8688,7 +8686,7 @@ fn set_workspace_name_via_id_targets_non_active_monitor() {
 fn set_workspace_name_dormant_only_view_via_id_appends_bookend() {
     // Regression pin: when `wsid` is held only in a dormant activity's view of a
     // connected monitor (no active-activity view contains it), the monitor lookup
-    // must still locate the hosting monitor and `dormant_view_bookend_fixup` must
+    // must still locate the hosting monitor and the normalize sweep must
     // re-mint the trailing bookend on the dormant view. Without the fan-out, the
     // active-view-only predicate returns `None` and the silent skip leaves the
     // dormant view's trailing slot named — `verify_invariants` then trips at the
@@ -8811,7 +8809,7 @@ fn set_workspace_name_under_ewaf_dormant_only_view_via_id_prepends_bookend() {
     // `empty_workspace_above_first` set, position 0 of every view is also a bookend slot.
     // A workspace held only at position 0 of a dormant activity's view of a connected
     // monitor — addressed via `WorkspaceReference::Id` — must still be located and
-    // patched by `dormant_view_bookend_fixup`, which prepends a fresh leading empty.
+    // patched by the normalize sweep, which prepends a fresh leading empty.
     let options = Options {
         layout: jiji_config::Layout {
             empty_workspace_above_first: true,
@@ -20674,10 +20672,10 @@ fn monitor_for_workspace_in_activity_resolves_case_insensitively() {
     );
 }
 
-// `add_window_to_hidden_workspace` must call `dormant_view_bookend_fixup` so that
-// a dormant activity whose view has the target workspace as its trailing entry gets
-// a fresh trailing empty appended after the window lands via the pool-direct hidden
-// path (the workspace is NOT in any active view).
+// `add_window_to_hidden_workspace` must run the normalize sweep so that a dormant
+// activity whose view has the target workspace as its trailing entry gets a fresh
+// trailing empty appended after the window lands via the pool-direct hidden path
+// (the workspace is NOT in any active view).
 #[test]
 fn add_window_to_hidden_workspace_with_dormant_trailing_appends_bookend() {
     // Two config activities (alpha + beta). "beta-ws" is exclusively beta's.
@@ -20700,7 +20698,7 @@ fn add_window_to_hidden_workspace_with_dormant_trailing_appends_bookend() {
         .id();
 
     // Hand-roll beta's view so beta-ws is the sole trailing entry (no bookend).
-    // This is the precondition the fixup must correct: after the window lands on
+    // This is the precondition the sweep must correct: after the window lands on
     // beta-ws, the view must grow.
     test_override_activity_view(
         &mut layout,
@@ -20724,7 +20722,7 @@ fn add_window_to_hidden_workspace_with_dormant_trailing_appends_bookend() {
         ActivateWindow::No,
     );
 
-    // beta's view must have grown: dormant_view_bookend_fixup must have appended a
+    // beta's view must have grown: the normalize sweep must have appended a
     // fresh trailing empty after beta_ws_id.
     let beta_view_after = layout
         .activities
@@ -20735,7 +20733,7 @@ fn add_window_to_hidden_workspace_with_dormant_trailing_appends_bookend() {
         .expect("beta has view");
     assert!(
         beta_view_after.len() > beta_view_len_before,
-        "dormant_view_bookend_fixup must extend beta's view after add_window_to_hidden_workspace",
+        "normalize_view_bookends must extend beta's view after add_window_to_hidden_workspace",
     );
     assert_ne!(
         beta_view_after.ids().last(),
@@ -20746,11 +20744,11 @@ fn add_window_to_hidden_workspace_with_dormant_trailing_appends_bookend() {
     layout.verify_invariants();
 }
 
-// `dormant_view_bookend_fixup` under `empty_workspace_above_first = true`: when a
-// window lands on a workspace that sits at position 0 of a dormant activity's view,
-// the fixup must prepend a fresh leading-empty bookend in addition to appending the
+// The normalize sweep under `empty_workspace_above_first = true`: when a window
+// lands on a workspace that sits at position 0 of a dormant activity's view, the
+// sweep must prepend a fresh leading-empty bookend in addition to appending the
 // trailing one. A single-entry view (`[shared_ws]`) where `shared_ws` is both first
-// and last exercises both branches.
+// and last exercises both arms.
 #[test]
 fn add_window_under_ewaf_prepends_leading_empty_to_dormant_view_at_position_zero() {
     // Build a layout with EWAF enabled.
@@ -23365,9 +23363,8 @@ fn set_workspace_activities_ewaf_active_len1_view_gains_leading_empty() {
 #[test]
 fn set_workspace_activities_ewaf_dormant_len1_view_gains_leading_empty() {
     // EWAF dormant counterpart: beta (dormant) holds a single-bookend view.
-    // The Add inserts the windowed workspace at position 0;
-    // `dormant_view_bookend_fixup` must prepend a fresh leading empty,
-    // yielding [fresh_top, ws, reused_bookend].
+    // The Add inserts the windowed workspace at position 0; the normalize sweep
+    // must prepend a fresh leading empty, yielding [fresh_top, ws, reused_bookend].
     let options = Options {
         layout: jiji_config::Layout {
             empty_workspace_above_first: true,
