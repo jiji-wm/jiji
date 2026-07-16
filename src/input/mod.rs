@@ -49,6 +49,7 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::ipc::server::role_title_to_tag_and_clean;
+use crate::layout::activity::ActivityId;
 use crate::layout::bookmarks::{
     AnchorWire, BookmarkJumpOutcome, BookmarkKey, BookmarkKeyError, BookmarkName, BookmarkRule,
     WalkDirection,
@@ -1338,12 +1339,7 @@ impl State {
                 }
 
                 self.niri.layout.switch_activity(target);
-                self.maybe_warp_cursor_to_focus();
-                self.niri.layer_shell_on_demand_focus = None;
-                self.niri.queue_redraw_all();
-                // Reconcile inhibitor state with the new visibility.
-                self.niri
-                    .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
+                self.activity_switch_epilogue();
 
                 // `focus_window` performs the actual activate + cursor warp
                 // under the newly-active activity.
@@ -2307,11 +2303,7 @@ impl State {
                                     .layout
                                     .pick_activity_for_hidden_window(target_ws_id, focus_hint);
                                 if target_activity != self.niri.layout.active_activity_id() {
-                                    self.niri.layout.switch_activity(target_activity);
-                                    self.niri.layer_shell_on_demand_focus = None;
-                                    self.niri
-                                        .refresh_keyboard_shortcut_inhibitors_after_activity_switch(
-                                        );
+                                    self.switch_activity_and_reconcile(target_activity);
                                 }
                                 if let Some(window) = focused_window.as_ref() {
                                     self.focus_window(window);
@@ -2498,11 +2490,7 @@ impl State {
                                         .layout
                                         .pick_activity_for_hidden_window(target_ws_id, focus_hint);
                                     if target_activity != self.niri.layout.active_activity_id() {
-                                        self.niri.layout.switch_activity(target_activity);
-                                        self.niri.layer_shell_on_demand_focus = None;
-                                        self.niri
-                                            .refresh_keyboard_shortcut_inhibitors_after_activity_switch(
-                                            );
+                                        self.switch_activity_and_reconcile(target_activity);
                                     }
                                     self.focus_window(&window);
                                 } else {
@@ -2828,15 +2816,7 @@ impl State {
                 match self.niri.layout.resolve_activity_ref(&arg) {
                     Some(id) => {
                         self.niri.layout.switch_activity(id);
-                        self.maybe_warp_cursor_to_focus();
-                        self.niri.layer_shell_on_demand_focus = None;
-                        self.niri.queue_redraw_all();
-                        // Reconcile inhibitor state with the new
-                        // visibility. Future activity-flipping actions
-                        // (e.g. `MoveWorkspaceToActivity`) must add the same
-                        // call.
-                        self.niri
-                            .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
+                        self.activity_switch_epilogue();
                     }
                     None => {
                         warn!("switch_activity: activity not found: {arg:?}");
@@ -2855,12 +2835,7 @@ impl State {
                     return Err(block.into());
                 }
                 self.niri.layout.switch_activity_previous(depth);
-                self.maybe_warp_cursor_to_focus();
-                self.niri.layer_shell_on_demand_focus = None;
-                self.niri.queue_redraw_all();
-                // Reconcile inhibitor state with the new visibility.
-                self.niri
-                    .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
+                self.activity_switch_epilogue();
             }
             Action::CreateActivity(name) => {
                 let name_str = name.clone();
@@ -2906,17 +2881,11 @@ impl State {
                     Ok(id) => {
                         debug!("RemoveActivity: removed {id:?} ({arg:?})");
                         // The cascade branch may have flipped the active
-                        // activity; mirror SwitchActivity's focus / redraw
-                        // invalidation so the next frame rebinds cleanly.
-                        self.maybe_warp_cursor_to_focus();
-                        self.niri.layer_shell_on_demand_focus = None;
-                        self.niri.queue_redraw_all();
-                        // The cascade branch of `remove_activity`
-                        // flips the active activity internally; reconcile
-                        // inhibitor state here (not inside `Layout`) because
-                        // the tracking map lives on `Niri`.
-                        self.niri
-                            .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
+                        // activity internally; run the epilogue unconditionally
+                        // (not inside `Layout`, since the inhibitor tracking map
+                        // lives on `Niri`) so the next frame rebinds cleanly
+                        // either way.
+                        self.activity_switch_epilogue();
                     }
                     Err(e) => {
                         warn!("remove_activity: {e}: {arg:?}");
@@ -3054,15 +3023,7 @@ impl State {
                             // is live, so `switch_activity`'s debug_assert
                             // is satisfied — no inner re-check needed.
                             self.niri.layout.switch_activity(target_id);
-                            self.maybe_warp_cursor_to_focus();
-                            self.niri.layer_shell_on_demand_focus = None;
-                            self.niri.queue_redraw_all();
-                            // Reconcile inhibitor state with the
-                            // new active-activity visibility. Required on
-                            // every path that flips `Activities.active_id` —
-                            // same pattern as `Action::SwitchActivity`'s arm.
-                            self.niri
-                                .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
+                            self.activity_switch_epilogue();
                         }
                     }
                     Err(e) => {
@@ -4225,6 +4186,40 @@ impl State {
             }
         }
         Ok(())
+    }
+
+    /// Perform the four post-switch steps shared by every dispatch arm that flips
+    /// the active activity: cursor warp, layer-shell on-demand focus clear, redraw,
+    /// and keyboard-shortcut inhibitor reconciliation.
+    ///
+    /// This deliberately excludes the switch call itself — callers diverge there
+    /// (`Layout::switch_activity`, `Layout::switch_activity_previous`, or the
+    /// cascade branch inside `Layout::remove_activity`) — so callers perform their
+    /// own switch first, then call this. The inhibitor refresh must run on every
+    /// path that flips `Activities.active_id`; centralizing it here means new
+    /// activity-flipping arms get it by construction instead of by hand-maintained
+    /// instruction.
+    fn activity_switch_epilogue(&mut self) {
+        self.maybe_warp_cursor_to_focus();
+        self.niri.layer_shell_on_demand_focus = None;
+        self.niri.queue_redraw_all();
+        self.niri
+            .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
+    }
+
+    /// Switch to `target` and reconcile keyboard-shortcut inhibitor state, without
+    /// the cursor warp / redraw steps.
+    ///
+    /// Used by the `MoveWindowToPoolOutcome::MovedDormant` arms, where a
+    /// `focus_window` call always follows and performs the warp/redraw itself;
+    /// duplicating them here would be redundant. See `activity_switch_epilogue`
+    /// for the full four-step shape used by dispatch arms with no follow-up focus
+    /// call.
+    fn switch_activity_and_reconcile(&mut self, target: ActivityId) {
+        self.niri.layout.switch_activity(target);
+        self.niri.layer_shell_on_demand_focus = None;
+        self.niri
+            .refresh_keyboard_shortcut_inhibitors_after_activity_switch();
     }
 
     /// Perform the post-restore cursor-warp, redraw, and inhibitor bookkeeping
