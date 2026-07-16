@@ -4351,9 +4351,10 @@ impl<W: LayoutElement> Layout<W> {
                 false
             } else {
                 // Illegal middle: either an active-view violation (the no-empty-middle
-                // clause in `monitor::assert_view_bookends`) or a dormant-view delayed-bomb
-                // (the same `assert_view_bookends` check is not animation-gated, so it
-                // fires on the next switch into this activity).
+                // block in `Monitor::verify_invariants`, gated on
+                // `self.workspace_switch.is_none()`) or a dormant-view delayed-bomb
+                // (that same block is not animation-gated, so it fires on the next
+                // switch into this activity).
                 true
             };
 
@@ -4364,7 +4365,7 @@ impl<W: LayoutElement> Layout<W> {
             // Step 6: snap the holding monitor's animation before mutating its
             // active view. assert_view_bookends (called from verify_invariants
             // for every view including dormant ones) is not animation-gated —
-            // only the no-empty-middle clause in `monitor::assert_view_bookends`
+            // only the no-empty-middle block in `Monitor::verify_invariants`
             // gates on workspace_switch.is_none(). Snapping here prevents
             // clean_up_workspaces_on's assert!(mon.workspace_switch.is_none())
             // from firing if the caller-level animate path runs next.
