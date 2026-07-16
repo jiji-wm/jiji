@@ -4210,10 +4210,12 @@ impl State {
     /// Switch to `target` and reconcile keyboard-shortcut inhibitor state, without
     /// the cursor warp / redraw steps.
     ///
-    /// Used by the `MoveWindowToPoolOutcome::MovedDormant` arms, where a
-    /// `focus_window` call always follows and performs the warp/redraw itself;
-    /// duplicating them here would be redundant. See `activity_switch_epilogue`
-    /// for the full four-step shape used by dispatch arms with no follow-up focus
+    /// Used by the `MoveWindowToPoolOutcome::MovedDormant` arms, where warp/redraw
+    /// are deferred to the caller — typically a following `focus_window` call. On
+    /// the no-active-window path the caller instead falls back to
+    /// `maybe_warp_cursor_to_focus()`, so warp coverage holds either way;
+    /// duplicating it here would be redundant. See `activity_switch_epilogue` for
+    /// the full four-step shape used by dispatch arms with no follow-up focus
     /// call.
     fn switch_activity_and_reconcile(&mut self, target: ActivityId) {
         self.niri.layout.switch_activity(target);
