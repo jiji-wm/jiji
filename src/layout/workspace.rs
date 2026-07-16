@@ -239,7 +239,9 @@ impl FloatingActive {
 impl<W: LayoutElement> Workspace<W> {
     /// Construct a freshly-id'd workspace bound to `output`.
     ///
-    /// `activities` seeds the workspace's activity membership; must be non-empty per.
+    /// `activities` seeds the workspace's activity membership; must be non-empty —
+    /// enforced by the `assert!` in this constructor and re-checked by
+    /// `Layout::verify_invariants`.
     pub fn new(
         output: &Output,
         activities: HashSet<ActivityId>,
@@ -255,7 +257,9 @@ impl<W: LayoutElement> Workspace<W> {
 
     /// Construct a freshly-id'd workspace bound to `output`, optionally merging `config`.
     ///
-    /// `activities` seeds the workspace's activity membership; must be non-empty per.
+    /// `activities` seeds the workspace's activity membership; must be non-empty —
+    /// enforced by the `assert!` in this constructor and re-checked by
+    /// `Layout::verify_invariants`.
     pub fn new_with_config(
         output: &Output,
         mut config: Option<WorkspaceConfig>,
@@ -333,7 +337,9 @@ impl<W: LayoutElement> Workspace<W> {
     /// Construct a freshly-id'd workspace that does not yet hold an output, optionally merging
     /// `config`.
     ///
-    /// `activities` seeds the workspace's activity membership; must be non-empty per.
+    /// `activities` seeds the workspace's activity membership; must be non-empty —
+    /// enforced by the `assert!` in this constructor and re-checked by
+    /// `Layout::verify_invariants`.
     pub fn new_with_config_no_outputs(
         mut config: Option<WorkspaceConfig>,
         activities: HashSet<ActivityId>,
@@ -408,7 +414,9 @@ impl<W: LayoutElement> Workspace<W> {
 
     /// Construct a freshly-id'd workspace that does not yet hold an output.
     ///
-    /// `activities` seeds the workspace's activity membership; must be non-empty per.
+    /// `activities` seeds the workspace's activity membership; must be non-empty —
+    /// enforced by the `assert!` in this constructor and re-checked by
+    /// `Layout::verify_invariants`.
     pub fn new_no_outputs(
         activities: HashSet<ActivityId>,
         clock: Clock,

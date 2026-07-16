@@ -2246,10 +2246,10 @@ impl State {
                 if let WorkspaceReference::Id(raw) = reference {
                     // Gate the hard-block check before any mutating call when
                     // `focus:true` requests an activity switch. Mirrors the
-                    // `Action::FocusWindow` precedent (input/mod.rs:1017-1046)
-                    // which checks `is_activity_switch_hard_blocked` before
-                    // acting, so an in-flight gesture cannot observe a moved
-                    // window with no matching focus change.
+                    // `Action::FocusWindow` precedent, which checks
+                    // `is_activity_switch_hard_blocked` before acting, so an
+                    // in-flight gesture cannot observe a moved window with no
+                    // matching focus change.
                     if focus {
                         if let Some(block) = self.niri.layout.is_activity_switch_hard_blocked() {
                             return Err(block.into());
@@ -2987,7 +2987,7 @@ impl State {
                             // active activity. `is_in_active_activity` may
                             // have changed for workspaces that lost their
                             // active-activity tag — the structural diff at
-                            // ipc/server.rs:1611-1613 emits
+                            // ipc/server.rs diff_workspaces emits
                             // `WorkspaceOpenedOrChanged` for those. Focus
                             // and frame may need refresh. No call
                             // here: the active activity id is unchanged —

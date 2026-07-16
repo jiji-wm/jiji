@@ -3870,8 +3870,8 @@ impl Niri {
     /// [`Layout::find_workspace_by_id`] (active-view + disconnected-pool
     /// scoped) — workspaces exclusive to a dormant activity therefore yield
     /// `None`. Callers silent-no-op on `None`; the activity-action cohort
-    /// wires this into the carve-out at `jiji-ipc::Action` (see
-    /// `jiji-ipc/src/lib.rs:959`).
+    /// wires this into the workspace-miss carve-out documented on
+    /// `jiji_ipc::Action`.
     pub fn find_output_and_workspace_index(
         &self,
         workspace_reference: WorkspaceReference,

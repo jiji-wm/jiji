@@ -1801,8 +1801,8 @@ impl<W: LayoutElement> Layout<W> {
         // Smithay `output_enter` markers from the disconnecting output to primary. The
         // workspace's own `output_id` field is left pointing at the disconnecting output
         // (`Workspace::bind_output` only refreshes `output_id` when it already matches
-        // the bound output — see workspace.rs:602-607), so a future `add_output` for
-        // the same monitor reclaims them via `ensure_view_for`'s pool-tag lift branch.
+        // the bound output), so a future `add_output` for the same monitor reclaims
+        // them via `ensure_view_for`'s pool-tag lift branch.
         let primary_output = self.monitors[primary_idx].output.clone();
         let primary_output_id = OutputId::new(&primary_output);
         let primary_options = self.monitors[primary_idx].options.clone();
@@ -4312,8 +4312,8 @@ impl<W: LayoutElement> Layout<W> {
 
             // Step 4: resolve EWAF. Connected monitors use their per-monitor
             // merged options; views on disconnected / dormant outputs fall back
-            // to the layout-root option. This mirrors assert_view_bookends'
-            // documented source-of-truth split (monitor.rs:1994-1996).
+            // to the layout-root option. This mirrors the EWAF source-of-truth
+            // split documented on `monitor::assert_view_bookends`.
             let ewaf = self
                 .monitors
                 .iter()
@@ -4350,10 +4350,10 @@ impl<W: LayoutElement> Layout<W> {
                 // bookend, or the active / remembered-active position.
                 false
             } else {
-                // Illegal middle: either an active-view violation (no-empty-middle
-                // assert at monitor.rs:1931) or a dormant-view delayed-bomb (the
-                // assert_view_bookends check is not animation-gated, so it fires
-                // on the next switch into this activity).
+                // Illegal middle: either an active-view violation (the no-empty-middle
+                // clause in `monitor::assert_view_bookends`) or a dormant-view delayed-bomb
+                // (the same `assert_view_bookends` check is not animation-gated, so it
+                // fires on the next switch into this activity).
                 true
             };
 
@@ -4364,14 +4364,15 @@ impl<W: LayoutElement> Layout<W> {
             // Step 6: snap the holding monitor's animation before mutating its
             // active view. assert_view_bookends (called from verify_invariants
             // for every view including dormant ones) is not animation-gated —
-            // only the no-empty-middle check at monitor.rs:1921 gates on
-            // workspace_switch.is_none(). Snapping here prevents
+            // only the no-empty-middle clause in `monitor::assert_view_bookends`
+            // gates on workspace_switch.is_none(). Snapping here prevents
             // clean_up_workspaces_on's assert!(mon.workspace_switch.is_none())
             // from firing if the caller-level animate path runs next.
             // Only the holding monitor is snapped because the mutation is
             // provably scoped to this one (activity, output) view; snapping all
-            // monitors (the precedent at mod.rs:7014-7020 and :6860-6866) is
-            // unnecessarily broad for a per-id mutation.
+            // monitors (the precedent in `activity::remove_workspace_from_activity`
+            // and `activity::set_workspace_activities`) is unnecessarily broad for
+            // a per-id mutation.
             if sole_activity_id == self.activities.active_id() {
                 for mon in &mut self.monitors {
                     if mon.output_id() == view_key
