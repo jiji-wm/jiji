@@ -83,7 +83,7 @@ fn popup_grab_refused_when_mru_open() {
     let popup_surface = f.client(id).create_popup(&parent).surface.clone();
     f.client(id).grab_popup(&popup_surface, 1);
     f.client(id).popup(&popup_surface).commit();
-    f.roundtrip_no_refresh(id);
+    f.double_roundtrip_no_refresh(id);
 
     // Asserted inside the pre-refresh window: this pins the proactive refusal
     // in `grab()` itself, not the reactive cleanup `update_keyboard_focus`
@@ -120,7 +120,7 @@ fn popup_grab_refused_when_overview_open() {
     let popup_surface = f.client(id).create_popup(&parent).surface.clone();
     f.client(id).grab_popup(&popup_surface, 1);
     f.client(id).popup(&popup_surface).commit();
-    f.roundtrip_no_refresh(id);
+    f.double_roundtrip_no_refresh(id);
 
     // Asserted inside the pre-refresh window: this pins the proactive refusal
     // in `grab()` itself, not the reactive cleanup `update_keyboard_focus`
@@ -161,7 +161,7 @@ fn popup_grab_refused_when_bookmark_switcher_open() {
     let popup_surface = f.client(id).create_popup(&parent).surface.clone();
     f.client(id).grab_popup(&popup_surface, 1);
     f.client(id).popup(&popup_surface).commit();
-    f.roundtrip_no_refresh(id);
+    f.double_roundtrip_no_refresh(id);
 
     // Asserted inside the pre-refresh window: this pins the proactive refusal
     // in `grab()` itself, not the reactive cleanup `update_keyboard_focus`

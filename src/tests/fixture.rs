@@ -159,6 +159,18 @@ impl Fixture {
         self.roundtrip(id);
     }
 
+    /// Like `double_roundtrip`, but for `roundtrip_no_refresh`: the same
+    /// under-multithreading timing artifact (a single roundtrip sometimes
+    /// fails to deliver a queued event before the sync done) applies here
+    /// too. Unlike `double_roundtrip`, this must NOT call the refreshing
+    /// `roundtrip` for either leg — that would run the reactive
+    /// `update_keyboard_focus` cleanup this variant exists to observe
+    /// around, making callers relying on the no-refresh property vacuous.
+    pub fn double_roundtrip_no_refresh(&mut self, id: ClientId) {
+        self.roundtrip_no_refresh(id);
+        self.roundtrip_no_refresh(id);
+    }
+
     /// Install the in-memory event-stream tap on the fixture's `IpcServer`.
     /// Each call replaces the prior buffer with a fresh empty `Vec`, so
     /// successive flows in a single test cannot leak captured events into
