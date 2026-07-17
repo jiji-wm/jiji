@@ -600,6 +600,7 @@ pub enum KeyboardFocus {
 /// | `refresh_pointer_contents` | ConfirmDialog, LockScreen, ScreenshotUi |
 /// | `contents_under` | ConfirmDialog, LockScreen, ScreenshotUi, Mru (BookmarkSwitcher and no-modal both fall through to the layout) |
 /// | `Niri::modal_overlay_blocks_bookmark_overlay` | ConfirmDialog, LockScreen, ScreenshotUi, Mru |
+/// | `crate::handlers::xdg_shell::grab` | all five, in priority order (LockScreen refuses the grab only when its root is not the lock surface) |
 ///
 /// `BookmarkSwitcher` is deliberately absent from the `window_under` row: a
 /// pointer press activates the window underneath *and* dismisses the
@@ -619,8 +620,6 @@ pub enum KeyboardFocus {
 ///   change behavior when a higher-priority modal is open concurrently.
 /// - `Niri::open_screenshot_ui`'s own guard refuses opening under `{LockScreen, ScreenshotUi}` but
 ///   not `ConfirmDialog`.
-/// - `crate::handlers::xdg_shell::grab` walks a `{ConfirmDialog, LockScreen, ScreenshotUi}`
-///   priority prefix independently of this table, with no `Mru`/`BookmarkSwitcher` arms.
 ///
 /// # Not a `ModalKind`
 ///

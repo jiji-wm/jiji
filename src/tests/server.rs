@@ -36,4 +36,17 @@ impl Server {
             .unwrap();
         self.state.refresh_and_flush_clients();
     }
+
+    /// Dispatch pending client requests and flush the replies without running
+    /// `refresh_and_flush_clients`'s `refresh()` pass. `refresh()` tears down a
+    /// popup grab whose root has lost keyboard focus in the same cycle it was
+    /// granted, so this variant lets a caller observe a request handler's
+    /// immediate outcome (e.g. a synchronous `grab()` refusal) before that
+    /// teardown has a chance to run.
+    pub fn dispatch_no_refresh(&mut self) {
+        self.event_loop
+            .dispatch(Duration::ZERO, &mut self.state)
+            .unwrap();
+        self.state.niri.display_handle.flush_clients().unwrap();
+    }
 }

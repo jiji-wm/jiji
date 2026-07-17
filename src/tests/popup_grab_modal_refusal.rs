@@ -1,14 +1,17 @@
-//! Pins `XdgShellHandler::grab`'s modal-gating behavior.
+//! Pins `XdgShellHandler::grab`'s modal-gating behavior after routing it
+//! through `Niri::active_modal`.
 //!
-//! A granted counterfactual with no modal open, confirming the popup-grab
-//! test harness itself (positioner completeness, explicit-parent rooting,
-//! the client-side `grab` + `commit` request pair) reaches the production
-//! handler and registers a real `popup_grab`.
+//! One granted counterfactual (no modal open) plus one refusal each for
+//! the two modal kinds that previously had no arm in the popup-grab gate
+//! (`Mru`, `BookmarkSwitcher`) and so fell through to the no-modal
+//! layer/toplevel checks instead of being refused.
 
+use jiji_config::{Action, MruDirection};
 use wayland_client::protocol::wl_surface::WlSurface;
 
 use super::client::ClientId;
 use super::fixture::Fixture;
+use crate::niri::ModalKind;
 
 fn map_window(f: &mut Fixture, id: ClientId, w: u16, h: u16) -> WlSurface {
     let window = f.client(id).create_window();
@@ -46,4 +49,89 @@ fn popup_grab_granted_when_no_modal_open() {
 
     assert!(!f.client(id).popup(&popup_surface).popup_done_received);
     assert!(f.niri().popup_grab.is_some());
+}
+
+/// The MRU switcher owns keyboard focus while open; a popup grab must be
+/// refused (dismissed via `popup_done`) rather than falling through to the
+/// no-modal layer/toplevel checks.
+#[test]
+fn popup_grab_refused_when_mru_open() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let window_surface = map_window(&mut f, id, 100, 100);
+
+    f.niri_state()
+        .do_action_inner(
+            Action::MruAdvance {
+                direction: MruDirection::Forward,
+                scope: None,
+                filter: None,
+            },
+            false,
+        )
+        .unwrap();
+    // Not just `is_open()`: pins the exact input `popup_grab_disposition`
+    // consumes, so a higher-priority modal being open concurrently can't
+    // make this pass through the wrong arm.
+    assert_eq!(f.niri().active_modal(), Some(ModalKind::Mru));
+
+    let parent = f.client(id).window(&window_surface).xdg_surface.clone();
+    let popup_surface = f.client(id).create_popup(&parent).surface.clone();
+    f.client(id).grab_popup(&popup_surface, 1);
+    f.client(id).popup(&popup_surface).commit();
+    f.roundtrip_no_refresh(id);
+
+    // Asserted inside the pre-refresh window: this pins the proactive refusal
+    // in `grab()` itself, not the reactive cleanup `update_keyboard_focus`
+    // would otherwise perform on the next refresh.
+    assert!(f.client(id).popup(&popup_surface).popup_done_received);
+    assert!(f.niri().popup_grab.is_none());
+
+    // Steady-state coverage: still refused after a normal refreshing
+    // roundtrip.
+    f.double_roundtrip(id);
+    assert!(f.niri().popup_grab.is_none());
+}
+
+/// The bookmark switcher owns keyboard focus while open; a popup grab must
+/// be refused the same way.
+#[test]
+fn popup_grab_refused_when_bookmark_switcher_open() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let window_surface = map_window(&mut f, id, 100, 100);
+
+    // A fresh window has no bookmark yet, so this appends one (no confirm
+    // dialog) and gives the switcher something visible to hint.
+    f.niri_state()
+        .do_action_inner(Action::AddBookmark, false)
+        .unwrap();
+    f.niri_state()
+        .do_action_inner(Action::OpenBookmarkSwitcher, false)
+        .unwrap();
+    // Not just `is_open()`: pins the exact input `popup_grab_disposition`
+    // consumes, so a higher-priority modal being open concurrently can't
+    // make this pass through the wrong arm.
+    assert_eq!(f.niri().active_modal(), Some(ModalKind::BookmarkSwitcher));
+
+    let parent = f.client(id).window(&window_surface).xdg_surface.clone();
+    let popup_surface = f.client(id).create_popup(&parent).surface.clone();
+    f.client(id).grab_popup(&popup_surface, 1);
+    f.client(id).popup(&popup_surface).commit();
+    f.roundtrip_no_refresh(id);
+
+    // Asserted inside the pre-refresh window: this pins the proactive refusal
+    // in `grab()` itself, not the reactive cleanup `update_keyboard_focus`
+    // would otherwise perform on the next refresh.
+    assert!(f.client(id).popup(&popup_surface).popup_done_received);
+    assert!(f.niri().popup_grab.is_none());
+
+    // Steady-state coverage: still refused after a normal refreshing
+    // roundtrip.
+    f.double_roundtrip(id);
+    assert!(f.niri().popup_grab.is_none());
 }

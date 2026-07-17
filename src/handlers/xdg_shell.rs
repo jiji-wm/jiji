@@ -42,12 +42,172 @@ use crate::input::resize_grab::ResizeGrab;
 use crate::input::touch_resize_grab::TouchResizeGrab;
 use crate::input::{PointerOrTouchStartData, DOUBLE_CLICK_TIME};
 use crate::layout::ActivateWindow;
-use crate::niri::{CastTarget, PopupGrabState, State};
+use crate::niri::{CastTarget, ModalKind, PopupGrabState, State};
 use crate::utils::transaction::Transaction;
 use crate::utils::{
     get_monotonic_time, output_matches_name, send_scale_transform, update_tiled_state, ResizeEdge,
 };
 use crate::window::{InitialConfigureState, ResolvedWindowRules, Unmapped, WindowRef};
+
+/// What `XdgShellHandler::grab` should do with a popup-grab request, given
+/// which modal overlay (if any) is open and whether the popup's root is the
+/// lock surface itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PopupGrabDisposition {
+    /// Refuse the grab: trace the carried reason, dismiss the popup, and
+    /// return without handing anything out.
+    Refuse(&'static str),
+    /// Hand the grab out directly, skipping the layer/toplevel checks below
+    /// — a lock-surface-rooted grab while the session is locked.
+    ProceedToHandout,
+    /// No modal owns the decision: run the layer-surface/toplevel logic.
+    EvaluateUnderNoModal,
+}
+
+/// Decide `popup_grab_disposition` from the currently active modal and
+/// whether the popup's root is the lock surface. Pure so its mapping can be
+/// pinned by hardcoded unit tests independent of `update_keyboard_focus`'s
+/// reactive cleanup, which runs later in the refresh cycle and can produce
+/// the same final observables regardless of what `grab()` itself decided.
+fn popup_grab_disposition(
+    active_modal: Option<ModalKind>,
+    grab_root_is_lock_surface: bool,
+) -> PopupGrabDisposition {
+    match active_modal {
+        Some(ModalKind::ConfirmDialog) => {
+            PopupGrabDisposition::Refuse("ignoring popup grab because the confirm dialog is open")
+        }
+        Some(ModalKind::LockScreen) => {
+            if grab_root_is_lock_surface {
+                PopupGrabDisposition::ProceedToHandout
+            } else {
+                PopupGrabDisposition::Refuse("ignoring popup grab because the session is locked")
+            }
+        }
+        Some(ModalKind::ScreenshotUi) => {
+            PopupGrabDisposition::Refuse("ignoring popup grab because the screenshot UI is open")
+        }
+        Some(ModalKind::Mru) => PopupGrabDisposition::Refuse(
+            "ignoring popup grab because the recent-windows switcher is open",
+        ),
+        Some(ModalKind::BookmarkSwitcher) => PopupGrabDisposition::Refuse(
+            "ignoring popup grab because the bookmark switcher is open",
+        ),
+        None => PopupGrabDisposition::EvaluateUnderNoModal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{popup_grab_disposition, PopupGrabDisposition};
+    use crate::niri::ModalKind;
+
+    #[test]
+    fn confirm_dialog_refuses() {
+        assert_eq!(
+            popup_grab_disposition(Some(ModalKind::ConfirmDialog), false),
+            PopupGrabDisposition::Refuse("ignoring popup grab because the confirm dialog is open")
+        );
+        assert_eq!(
+            popup_grab_disposition(Some(ModalKind::ConfirmDialog), true),
+            PopupGrabDisposition::Refuse("ignoring popup grab because the confirm dialog is open")
+        );
+    }
+
+    #[test]
+    fn lock_screen_refuses_when_root_is_not_the_lock_surface() {
+        assert_eq!(
+            popup_grab_disposition(Some(ModalKind::LockScreen), false),
+            PopupGrabDisposition::Refuse("ignoring popup grab because the session is locked")
+        );
+    }
+
+    #[test]
+    fn lock_screen_proceeds_to_handout_when_root_is_the_lock_surface() {
+        assert_eq!(
+            popup_grab_disposition(Some(ModalKind::LockScreen), true),
+            PopupGrabDisposition::ProceedToHandout
+        );
+    }
+
+    #[test]
+    fn screenshot_ui_refuses() {
+        assert_eq!(
+            popup_grab_disposition(Some(ModalKind::ScreenshotUi), false),
+            PopupGrabDisposition::Refuse("ignoring popup grab because the screenshot UI is open")
+        );
+        assert_eq!(
+            popup_grab_disposition(Some(ModalKind::ScreenshotUi), true),
+            PopupGrabDisposition::Refuse("ignoring popup grab because the screenshot UI is open")
+        );
+    }
+
+    #[test]
+    fn mru_refuses() {
+        assert_eq!(
+            popup_grab_disposition(Some(ModalKind::Mru), false),
+            PopupGrabDisposition::Refuse(
+                "ignoring popup grab because the recent-windows switcher is open"
+            )
+        );
+        assert_eq!(
+            popup_grab_disposition(Some(ModalKind::Mru), true),
+            PopupGrabDisposition::Refuse(
+                "ignoring popup grab because the recent-windows switcher is open"
+            )
+        );
+    }
+
+    #[test]
+    fn bookmark_switcher_refuses() {
+        assert_eq!(
+            popup_grab_disposition(Some(ModalKind::BookmarkSwitcher), false),
+            PopupGrabDisposition::Refuse(
+                "ignoring popup grab because the bookmark switcher is open"
+            )
+        );
+        assert_eq!(
+            popup_grab_disposition(Some(ModalKind::BookmarkSwitcher), true),
+            PopupGrabDisposition::Refuse(
+                "ignoring popup grab because the bookmark switcher is open"
+            )
+        );
+    }
+
+    #[test]
+    fn no_modal_evaluates_under_no_modal() {
+        assert_eq!(
+            popup_grab_disposition(None, false),
+            PopupGrabDisposition::EvaluateUnderNoModal
+        );
+        assert_eq!(
+            popup_grab_disposition(None, true),
+            PopupGrabDisposition::EvaluateUnderNoModal
+        );
+    }
+
+    /// Every modal kind other than `LockScreen` decides the disposition on
+    /// its own, independent of the lock-surface-root flag — only
+    /// `LockScreen` reads it.
+    #[test]
+    fn non_lock_screen_modals_are_independent_of_the_lock_surface_flag() {
+        for modal in [
+            ModalKind::ConfirmDialog,
+            ModalKind::ScreenshotUi,
+            ModalKind::Mru,
+            ModalKind::BookmarkSwitcher,
+        ] {
+            assert_eq!(
+                popup_grab_disposition(Some(modal), false),
+                popup_grab_disposition(Some(modal), true),
+            );
+        }
+        assert_eq!(
+            popup_grab_disposition(None, false),
+            popup_grab_disposition(None, true),
+        );
+    }
+}
 
 impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
@@ -276,77 +436,78 @@ impl XdgShellHandler for State {
         // We need to hand out the grab in a way consistent with what update_keyboard_focus()
         // thinks the current focus is, otherwise it will desync and cause weird issues with
         // keyboard focus being at the wrong place.
-        if self.niri.confirm_dialog.is_open() {
-            trace!("ignoring popup grab because the confirm dialog is open");
-            let _ = PopupManager::dismiss_popup(&root, &popup);
-            return;
-        } else if self.niri.is_locked() {
-            if Some(&root) != self.niri.lock_surface_focus().as_ref() {
-                trace!("ignoring popup grab because the session is locked");
+        let grab_root_is_lock_surface = Some(&root) == self.niri.lock_surface_focus().as_ref();
+        match popup_grab_disposition(self.niri.active_modal(), grab_root_is_lock_surface) {
+            PopupGrabDisposition::Refuse(reason) => {
+                trace!("{reason}");
                 let _ = PopupManager::dismiss_popup(&root, &popup);
                 return;
             }
-        } else if self.niri.screenshot_ui.is_open() {
-            trace!("ignoring popup grab because the screenshot UI is open");
-            let _ = PopupManager::dismiss_popup(&root, &popup);
-            return;
-        } else if let Some(output) = self.niri.layout.active_output() {
-            let layers = layer_map_for_output(output);
+            PopupGrabDisposition::ProceedToHandout => {}
+            PopupGrabDisposition::EvaluateUnderNoModal => {
+                if let Some(output) = self.niri.layout.active_output() {
+                    let layers = layer_map_for_output(output);
 
-            // FIXME: somewhere here we probably need to check is_overview_open to match the logic
-            // in update_keyboard_focus().
+                    // FIXME: somewhere here we probably need to check is_overview_open to match the
+                    // logic in update_keyboard_focus().
 
-            if let Some(layer) = layers.layer_for_surface(&root, WindowSurfaceType::TOPLEVEL) {
-                // This is a grab for a layer surface.
+                    if let Some(layer) =
+                        layers.layer_for_surface(&root, WindowSurfaceType::TOPLEVEL)
+                    {
+                        // This is a grab for a layer surface.
 
-                if let Some(mapped) = self.niri.mapped_layer_surfaces.get(layer) {
-                    if mapped.place_within_backdrop() {
-                        trace!("ignoring popup grab for a layer surface within overview backdrop");
-                        let _ = PopupManager::dismiss_popup(&root, &popup);
-                        return;
+                        if let Some(mapped) = self.niri.mapped_layer_surfaces.get(layer) {
+                            if mapped.place_within_backdrop() {
+                                trace!("ignoring popup grab for a layer surface within overview backdrop");
+                                let _ = PopupManager::dismiss_popup(&root, &popup);
+                                return;
+                            }
+                        }
+                    } else {
+                        // This is a grab for a regular window; check that there's no layer surface
+                        // with a higher input priority.
+
+                        if layers.layers_on(Layer::Overlay).any(|l| {
+                            (l.cached_state().keyboard_interactivity
+                                == wlr_layer::KeyboardInteractivity::Exclusive
+                                || Some(l) == self.niri.layer_shell_on_demand_focus.as_ref())
+                                && self.niri.mapped_layer_surfaces.contains_key(l)
+                        }) {
+                            trace!(
+                                "ignoring toplevel popup grab because the overlay layer has focus"
+                            );
+                            let _ = PopupManager::dismiss_popup(&root, &popup);
+                            return;
+                        }
+
+                        let mon = self.niri.layout.monitor_for_output(output).unwrap();
+                        let ctx = self.niri.layout.ctx_for(mon);
+                        if !mon.render_above_top_layer(ctx)
+                            && layers.layers_on(Layer::Top).any(|l| {
+                                (l.cached_state().keyboard_interactivity
+                                    == wlr_layer::KeyboardInteractivity::Exclusive
+                                    || Some(l) == self.niri.layer_shell_on_demand_focus.as_ref())
+                                    && self.niri.mapped_layer_surfaces.contains_key(l)
+                            })
+                        {
+                            trace!("ignoring toplevel popup grab because the top layer has focus");
+                            let _ = PopupManager::dismiss_popup(&root, &popup);
+                            return;
+                        }
+
+                        let layout_focus = self.niri.layout.focus();
+                        if Some(&root) != layout_focus.map(|win| win.toplevel().wl_surface()) {
+                            trace!("ignoring toplevel popup grab because another window has focus");
+                            let _ = PopupManager::dismiss_popup(&root, &popup);
+                            return;
+                        }
                     }
-                }
-            } else {
-                // This is a grab for a regular window; check that there's no layer surface with a
-                // higher input priority.
-
-                if layers.layers_on(Layer::Overlay).any(|l| {
-                    (l.cached_state().keyboard_interactivity
-                        == wlr_layer::KeyboardInteractivity::Exclusive
-                        || Some(l) == self.niri.layer_shell_on_demand_focus.as_ref())
-                        && self.niri.mapped_layer_surfaces.contains_key(l)
-                }) {
-                    trace!("ignoring toplevel popup grab because the overlay layer has focus");
-                    let _ = PopupManager::dismiss_popup(&root, &popup);
-                    return;
-                }
-
-                let mon = self.niri.layout.monitor_for_output(output).unwrap();
-                let ctx = self.niri.layout.ctx_for(mon);
-                if !mon.render_above_top_layer(ctx)
-                    && layers.layers_on(Layer::Top).any(|l| {
-                        (l.cached_state().keyboard_interactivity
-                            == wlr_layer::KeyboardInteractivity::Exclusive
-                            || Some(l) == self.niri.layer_shell_on_demand_focus.as_ref())
-                            && self.niri.mapped_layer_surfaces.contains_key(l)
-                    })
-                {
-                    trace!("ignoring toplevel popup grab because the top layer has focus");
-                    let _ = PopupManager::dismiss_popup(&root, &popup);
-                    return;
-                }
-
-                let layout_focus = self.niri.layout.focus();
-                if Some(&root) != layout_focus.map(|win| win.toplevel().wl_surface()) {
-                    trace!("ignoring toplevel popup grab because another window has focus");
+                } else {
+                    trace!("ignoring popup grab because no output is active");
                     let _ = PopupManager::dismiss_popup(&root, &popup);
                     return;
                 }
             }
-        } else {
-            trace!("ignoring popup grab because no output is active");
-            let _ = PopupManager::dismiss_popup(&root, &popup);
-            return;
         }
 
         let seat = &self.niri.seat;

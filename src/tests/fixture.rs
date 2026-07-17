@@ -132,6 +132,19 @@ impl Fixture {
         }
     }
 
+    /// Like `roundtrip`, but drives the server side with `dispatch_no_refresh`
+    /// instead of the fixture's own event loop. The fixture's event loop
+    /// routes the server fd through the refreshing `Server::dispatch`, which
+    /// would run the same teardown this variant exists to observe around, so
+    /// this drives both sides directly and bypasses it.
+    pub fn roundtrip_no_refresh(&mut self, id: ClientId) {
+        let data = self.state.client(id).send_sync();
+        while !data.done.load(Ordering::Relaxed) {
+            self.state.server.dispatch_no_refresh();
+            self.state.client(id).dispatch();
+        }
+    }
+
     /// Roundtrip twice in a row.
     ///
     /// For some reason, when running tests on many threads at once, a single roundtrip is
