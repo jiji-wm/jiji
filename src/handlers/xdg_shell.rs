@@ -60,7 +60,9 @@ enum PopupGrabDisposition {
     /// Hand the grab out directly, skipping the layer/toplevel checks below
     /// — a lock-surface-rooted grab while the session is locked.
     ProceedToHandout,
-    /// No modal owns the decision: run the layer-surface/toplevel logic.
+    /// No modal owns the decision: run the layer-surface/toplevel logic,
+    /// which now also refuses toplevel and Bottom/Background grabs while
+    /// the overview is open.
     EvaluateUnderNoModal,
 }
 
@@ -97,9 +99,28 @@ fn popup_grab_disposition(
     }
 }
 
+/// Decide whether the overview being open should refuse a popup grab whose
+/// root is not already an Overlay/Top layer surface. Mirrors
+/// `update_keyboard_focus`'s overview gating: Overlay/Top layer grabs still
+/// win keyboard focus while the overview is open (`grab_on_layer` runs
+/// unconditionally for those layers), Bottom/Background layer grabs are
+/// skipped while open, and a toplevel can never own keyboard focus while
+/// the overview is open (the `KeyboardFocus::Overview` insertion outranks
+/// `layout_focus` in that arm).
+///
+/// `root_layer` is `None` when the grab root is not a layer surface of the
+/// active output (i.e. it is a toplevel or another kind of root).
+fn overview_grab_refusal(overview_open: bool, root_layer: Option<Layer>) -> Option<&'static str> {
+    let refuse =
+        overview_open && matches!(root_layer, None | Some(Layer::Bottom | Layer::Background));
+    refuse.then_some("ignoring popup grab because the overview is open")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{popup_grab_disposition, PopupGrabDisposition};
+    use smithay::wayland::shell::wlr_layer::Layer;
+
+    use super::{overview_grab_refusal, popup_grab_disposition, PopupGrabDisposition};
     use crate::niri::ModalKind;
 
     #[test]
@@ -205,6 +226,45 @@ mod tests {
         assert_eq!(
             popup_grab_disposition(None, false),
             popup_grab_disposition(None, true),
+        );
+    }
+
+    #[test]
+    fn closed_permits_all_root_kinds() {
+        for root_layer in [
+            None,
+            Some(Layer::Overlay),
+            Some(Layer::Top),
+            Some(Layer::Bottom),
+            Some(Layer::Background),
+        ] {
+            assert_eq!(overview_grab_refusal(false, root_layer), None);
+        }
+    }
+
+    #[test]
+    fn open_refuses_toplevel_roots() {
+        assert_eq!(
+            overview_grab_refusal(true, None),
+            Some("ignoring popup grab because the overview is open")
+        );
+    }
+
+    #[test]
+    fn open_permits_overlay_and_top_layer_roots() {
+        assert_eq!(overview_grab_refusal(true, Some(Layer::Overlay)), None);
+        assert_eq!(overview_grab_refusal(true, Some(Layer::Top)), None);
+    }
+
+    #[test]
+    fn open_refuses_bottom_and_background_layer_roots() {
+        assert_eq!(
+            overview_grab_refusal(true, Some(Layer::Bottom)),
+            Some("ignoring popup grab because the overview is open")
+        );
+        assert_eq!(
+            overview_grab_refusal(true, Some(Layer::Background)),
+            Some("ignoring popup grab because the overview is open")
         );
     }
 }
@@ -447,13 +507,19 @@ impl XdgShellHandler for State {
             PopupGrabDisposition::EvaluateUnderNoModal => {
                 if let Some(output) = self.niri.layout.active_output() {
                     let layers = layer_map_for_output(output);
+                    let layer_surface =
+                        layers.layer_for_surface(&root, WindowSurfaceType::TOPLEVEL);
 
-                    // FIXME: somewhere here we probably need to check is_overview_open to match the
-                    // logic in update_keyboard_focus().
+                    if let Some(reason) = overview_grab_refusal(
+                        self.niri.layout.is_overview_open(),
+                        layer_surface.map(|l| l.layer()),
+                    ) {
+                        trace!("{reason}");
+                        let _ = PopupManager::dismiss_popup(&root, &popup);
+                        return;
+                    }
 
-                    if let Some(layer) =
-                        layers.layer_for_surface(&root, WindowSurfaceType::TOPLEVEL)
-                    {
+                    if let Some(layer) = layer_surface {
                         // This is a grab for a layer surface.
 
                         if let Some(mapped) = self.niri.mapped_layer_surfaces.get(layer) {

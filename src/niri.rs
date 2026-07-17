@@ -600,7 +600,7 @@ pub enum KeyboardFocus {
 /// | `refresh_pointer_contents` | ConfirmDialog, LockScreen, ScreenshotUi |
 /// | `contents_under` | ConfirmDialog, LockScreen, ScreenshotUi, Mru (BookmarkSwitcher and no-modal both fall through to the layout) |
 /// | `Niri::modal_overlay_blocks_bookmark_overlay` | ConfirmDialog, LockScreen, ScreenshotUi, Mru |
-/// | `crate::handlers::xdg_shell::grab` | all five, in priority order (LockScreen refuses the grab only when its root is not the lock surface) |
+/// | `crate::handlers::xdg_shell::grab` | all five, in priority order (LockScreen refuses the grab only when its root is not the lock surface); under no modal, additionally refuses while the overview is open unless the grab root is an Overlay- or Top-layer surface |
 ///
 /// `BookmarkSwitcher` is deliberately absent from the `window_under` row: a
 /// pointer press activates the window underneath *and* dismisses the
@@ -625,6 +625,14 @@ pub enum KeyboardFocus {
 ///
 /// The hotkey overlay never takes keyboard focus, so it has no row above; it
 /// participates only in the hide-on-input handling in `src/input/mod.rs`.
+///
+/// The overview owns keyboard focus (`KeyboardFocus::Overview`) but is
+/// pointer-interactive, so it deliberately fails the modal shape; adding it
+/// to `ModalKind` would enroll it in every gate that walks this table
+/// (`contents_under`, `refresh_pointer_contents`), changing overview pointer
+/// behavior. `crate::handlers::xdg_shell::grab` therefore consults
+/// [`crate::layout::Layout::is_overview_open`] beside [`Niri::active_modal`]
+/// instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalKind {
     ConfirmDialog,

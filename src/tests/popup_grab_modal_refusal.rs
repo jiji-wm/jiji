@@ -4,7 +4,9 @@
 //! One granted counterfactual (no modal open) plus one refusal each for
 //! the two modal kinds that previously had no arm in the popup-grab gate
 //! (`Mru`, `BookmarkSwitcher`) and so fell through to the no-modal
-//! layer/toplevel checks instead of being refused.
+//! layer/toplevel checks instead of being refused, plus a refusal for the
+//! overview, which owns keyboard focus without being a `ModalKind` and so
+//! is gated in `grab()` separately from `Niri::active_modal`.
 
 use jiji_config::{Action, MruDirection};
 use wayland_client::protocol::wl_surface::WlSurface;
@@ -76,6 +78,43 @@ fn popup_grab_refused_when_mru_open() {
     // consumes, so a higher-priority modal being open concurrently can't
     // make this pass through the wrong arm.
     assert_eq!(f.niri().active_modal(), Some(ModalKind::Mru));
+
+    let parent = f.client(id).window(&window_surface).xdg_surface.clone();
+    let popup_surface = f.client(id).create_popup(&parent).surface.clone();
+    f.client(id).grab_popup(&popup_surface, 1);
+    f.client(id).popup(&popup_surface).commit();
+    f.roundtrip_no_refresh(id);
+
+    // Asserted inside the pre-refresh window: this pins the proactive refusal
+    // in `grab()` itself, not the reactive cleanup `update_keyboard_focus`
+    // would otherwise perform on the next refresh.
+    assert!(f.client(id).popup(&popup_surface).popup_done_received);
+    assert!(f.niri().popup_grab.is_none());
+
+    // Steady-state coverage: still refused after a normal refreshing
+    // roundtrip.
+    f.double_roundtrip(id);
+    assert!(f.niri().popup_grab.is_none());
+}
+
+/// The overview owns keyboard focus while open, but is not a `ModalKind`;
+/// a toplevel-rooted popup grab must still be refused proactively.
+#[test]
+fn popup_grab_refused_when_overview_open() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let window_surface = map_window(&mut f, id, 100, 100);
+
+    f.niri_state()
+        .do_action_inner(Action::ToggleOverview, false)
+        .unwrap();
+    // Not just `is_overview_open()`: pins that this refusal is reached via
+    // the overview gate and not `Niri::active_modal`, since the overview is
+    // deliberately not a `ModalKind`.
+    assert_eq!(f.niri().active_modal(), None);
+    assert!(f.niri().layout.is_overview_open());
 
     let parent = f.client(id).window(&window_surface).xdg_surface.clone();
     let popup_surface = f.client(id).create_popup(&parent).surface.clone();
