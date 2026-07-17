@@ -24,6 +24,7 @@ mod move_window_to_workspace_cross_activity;
 mod move_window_to_workspace_no_op_self;
 mod move_workspace_to_monitor_multi_activity_cross_activity;
 mod open_on_activity_destroyed_target_cross_activity;
+mod popup_grab_modal_refusal;
 mod queued_activity_switch_cross_activity;
 mod remove_activity_workspace_membership_cross_activity;
 mod remove_output;

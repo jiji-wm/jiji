@@ -17,6 +17,8 @@ use smithay::reexports::wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::
 use smithay::reexports::wayland_protocols::wp::single_pixel_buffer;
 use smithay::reexports::wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use smithay::reexports::wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_popup::{self, XdgPopup};
+use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_positioner::XdgPositioner;
 use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_surface::{self, XdgSurface};
 use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_toplevel::{self, XdgToplevel};
 use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_wm_base::{self, XdgWmBase};
@@ -65,6 +67,7 @@ pub struct State {
 
     pub windows: Vec<Window>,
     pub layers: Vec<LayerSurface>,
+    pub popups: Vec<Popup>,
 }
 
 pub struct Window {
@@ -80,6 +83,28 @@ pub struct Window {
     pub close_requested: bool,
 
     pub configures_looked_at: usize,
+}
+
+pub struct Popup {
+    pub surface: WlSurface,
+    pub xdg_surface: XdgSurface,
+    pub xdg_popup: XdgPopup,
+    pub popup_done_received: bool,
+}
+
+impl Popup {
+    /// Commit the popup's `wl_surface`.
+    ///
+    /// `XdgShellHandler::grab` is not invoked directly by the `xdg_popup.grab`
+    /// request; Smithay only records the requested grab and hands it to the
+    /// handler from the popup's pre-commit hook (`ff5fa7df`,
+    /// `wayland::shell::xdg::PopupSurface::pre_commit_hook`). Every caller so
+    /// far commits before attaching a buffer, which is enough to reach that
+    /// hook without acking anything and stays short of popup *mapping* — but
+    /// this method does not itself check or enforce that.
+    pub fn commit(&self) {
+        self.surface.commit();
+    }
 }
 
 pub struct LayerSurface {
@@ -192,6 +217,7 @@ impl Client {
             kb_shortcuts_inhibit_manager: None,
             windows: Vec::new(),
             layers: Vec::new(),
+            popups: Vec::new(),
         };
 
         Self {
@@ -240,6 +266,30 @@ impl Client {
 
     pub fn layer(&mut self, surface: &WlSurface) -> &mut LayerSurface {
         self.state.layer(surface)
+    }
+
+    pub fn create_popup(&mut self, parent: &XdgSurface) -> &mut Popup {
+        self.state.create_popup(parent)
+    }
+
+    pub fn popup(&mut self, surface: &WlSurface) -> &mut Popup {
+        self.state.popup(surface)
+    }
+
+    /// Send `xdg_popup.grab` for the popup whose main surface is `surface`,
+    /// using the client's already-bound `WlSeat`.
+    ///
+    /// Smithay performs no serial validation on popup grabs (only root,
+    /// kind, and topmost-ordering checks), so `serial` need not correspond
+    /// to a real input event.
+    pub fn grab_popup(&mut self, surface: &WlSurface, serial: u32) {
+        let seat = self
+            .state
+            .seat
+            .as_ref()
+            .expect("WlSeat must be bound")
+            .clone();
+        self.state.popup(surface).xdg_popup.grab(&seat, serial);
     }
 
     pub fn output(&mut self, name: &str) -> WlOutput {
@@ -346,6 +396,48 @@ impl State {
         self.layers
             .iter_mut()
             .find(|w| w.surface == *surface)
+            .unwrap()
+    }
+
+    /// Create an xdg-popup rooted at `parent`.
+    ///
+    /// The positioner is completed with a nominal size and anchor rect
+    /// (both mandatory before `get_popup`, else the server raises
+    /// `invalid_positioner`) but is otherwise unused: these tests only
+    /// exercise the grab request, not popup placement.
+    ///
+    /// `parent` must be passed so the popup is rooted via
+    /// `get_popup(Some(parent), ..)`: a parentless popup lands in Smithay's
+    /// unmapped-popup list instead of the root's popup tree, and
+    /// `PopupManager::dismiss_popup` then silently no-ops instead of
+    /// delivering `popup_done`.
+    pub fn create_popup(&mut self, parent: &XdgSurface) -> &mut Popup {
+        let compositor = self.compositor.as_ref().unwrap();
+        let xdg_wm_base = self.xdg_wm_base.as_ref().unwrap();
+
+        let positioner: XdgPositioner = xdg_wm_base.create_positioner(&self.qh, ());
+        positioner.set_size(100, 100);
+        positioner.set_anchor_rect(0, 0, 1, 1);
+
+        let surface = compositor.create_surface(&self.qh, ());
+        let xdg_surface = xdg_wm_base.get_xdg_surface(&surface, &self.qh, ());
+        let xdg_popup = xdg_surface.get_popup(Some(parent), &positioner, &self.qh, ());
+
+        let popup = Popup {
+            surface,
+            xdg_surface,
+            xdg_popup,
+            popup_done_received: false,
+        };
+
+        self.popups.push(popup);
+        self.popups.last_mut().unwrap()
+    }
+
+    pub fn popup(&mut self, surface: &WlSurface) -> &mut Popup {
+        self.popups
+            .iter_mut()
+            .find(|p| p.surface == *surface)
             .unwrap()
     }
 }
@@ -672,14 +764,66 @@ impl Dispatch<XdgSurface, ()> for State {
     ) {
         match event {
             xdg_surface::Event::Configure { serial } => {
-                let window = state
+                if let Some(window) = state
                     .windows
                     .iter_mut()
                     .find(|w| w.xdg_surface == *xdg_surface)
-                    .unwrap();
-                let configure = window.pending_configure.clone();
-                window.configures_received.push((serial, configure));
+                {
+                    let configure = window.pending_configure.clone();
+                    window.configures_received.push((serial, configure));
+                } else {
+                    // Confirm the surface is a known popup (panics otherwise);
+                    // the popup's own configure sequencing is tracked via
+                    // `xdg_popup::Event::Configure` below, not here.
+                    state
+                        .popups
+                        .iter()
+                        .find(|p| p.xdg_surface == *xdg_surface)
+                        .unwrap();
+                }
             }
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<XdgPositioner, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &XdgPositioner,
+        _event: <XdgPositioner as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
+    }
+}
+
+impl Dispatch<XdgPopup, ()> for State {
+    fn event(
+        state: &mut Self,
+        xdg_popup: &XdgPopup,
+        event: <XdgPopup as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let popup = state
+            .popups
+            .iter_mut()
+            .find(|p| p.xdg_popup == *xdg_popup)
+            .unwrap();
+
+        match event {
+            // No test currently asserts on individual popup configures; this
+            // arm exists to keep the match exhaustive and explicit rather
+            // than falling through to `unreachable!()`.
+            xdg_popup::Event::Configure { .. } => {}
+            xdg_popup::Event::PopupDone => {
+                popup.popup_done_received = true;
+            }
+            xdg_popup::Event::Repositioned { .. } => (),
             _ => unreachable!(),
         }
     }
