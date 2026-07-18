@@ -36,8 +36,8 @@ pub struct BookmarkKey(Key);
 /// Why a [`Key`] was rejected by [`BookmarkKey::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BookmarkKeyError {
-    /// The trigger is not a keysym (a mouse button, wheel, or touchpad
-    /// gesture).
+    /// The trigger is not a keysym (a mouse button, wheel, touchpad
+    /// gesture, or mod-tap).
     NotAKeysym,
     /// The key carries no modifiers.
     NoModifiers,
@@ -46,7 +46,10 @@ pub enum BookmarkKeyError {
 impl fmt::Display for BookmarkKeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotAKeysym => write!(f, "must be a keyboard key, not a mouse or wheel trigger"),
+            Self::NotAKeysym => write!(
+                f,
+                "must be a keyboard key, not a mouse, wheel, or mod-tap trigger"
+            ),
             Self::NoModifiers => write!(f, "must include at least one modifier"),
         }
     }

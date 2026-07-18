@@ -2751,6 +2751,74 @@ mod tests {
     }
 
     #[test]
+    fn mod_tap_bind_parses() {
+        let parsed = do_parse(
+            r##"
+            binds {
+                Mod { toggle-overview; }
+            }
+            "##,
+        );
+        assert_eq!(parsed.binds.0.len(), 1);
+        let bind = &parsed.binds.0[0];
+        assert_eq!(bind.key.trigger, Trigger::ModTap);
+        assert_eq!(bind.key.modifiers, Modifiers::empty());
+        // Forced regardless of the (absent) `repeat` property: a tap fires once
+        // on release and must never engage `start_key_repeat`.
+        assert!(!bind.repeat);
+        assert_eq!(bind.cooldown, None);
+    }
+
+    #[test]
+    fn mod_tap_bind_rejects_repeat() {
+        for text in [
+            r##"binds { Mod repeat=true { toggle-overview; } }"##,
+            r##"binds { Mod repeat=false { toggle-overview; } }"##,
+        ] {
+            Config::parse_mem(text)
+                .expect_err("`repeat` on a mod-tap bind must be rejected regardless of value");
+        }
+    }
+
+    #[test]
+    fn mod_tap_bind_rejects_cooldown() {
+        Config::parse_mem(r##"binds { Mod cooldown-ms=150 { toggle-overview; } }"##)
+            .expect_err("`cooldown-ms` on a mod-tap bind must be rejected");
+    }
+
+    #[test]
+    fn mod_tap_bind_duplicate_rejected() {
+        Config::parse_mem(
+            r##"
+            binds {
+                Mod { toggle-overview; }
+                Mod { close-window; }
+            }
+            "##,
+        )
+        .expect_err("two bare `Mod` binds must collide as duplicate keybinds");
+    }
+
+    #[test]
+    fn mod_tap_bind_inherits_allow_when_locked_and_overlay_title() {
+        // `repeat`/`cooldown-ms` are rejected on a mod-tap bind, but every
+        // other `Bind` property still applies. `allow-when-locked` is only
+        // accepted on spawn actions, so use one here alongside the trigger.
+        let parsed = do_parse(
+            r##"
+            binds {
+                Mod allow-when-locked=true hotkey-overlay-title="Overview" { spawn "true"; }
+            }
+            "##,
+        );
+        assert_eq!(parsed.binds.0.len(), 1);
+        let bind = &parsed.binds.0[0];
+        assert_eq!(bind.key.trigger, Trigger::ModTap);
+        assert!(bind.allow_when_locked);
+        assert_eq!(bind.hotkey_overlay_title, Some(Some("Overview".to_owned())));
+    }
+
+    #[test]
     fn bookmarks_section_defaults_when_absent() {
         let parsed = do_parse("");
         assert_eq!(parsed.bookmarks, BookmarksConfig::default());

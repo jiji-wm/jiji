@@ -42,6 +42,10 @@ pub struct Key {
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Trigger {
     Keysym(Keysym),
+    /// A bare `Mod` press-and-release with no other key pressed in between
+    /// (arm/disarm/fire state machine lands separately; this variant is
+    /// parse-only and inert until then).
+    ModTap,
     MouseLeft,
     MouseRight,
     MouseMiddle,
@@ -1117,7 +1121,9 @@ where
             .map_err(|e| DecodeError::conversion(&node.node_name, e.wrap_err("invalid keybind")))?;
 
         let mut repeat = true;
+        let mut repeat_node = None;
         let mut cooldown = None;
+        let mut cooldown_node = None;
         let mut allow_when_locked = false;
         let mut allow_when_locked_node = None;
         let mut allow_inhibiting = true;
@@ -1126,11 +1132,13 @@ where
             match &***name {
                 "repeat" => {
                     repeat = knuffel::traits::DecodeScalar::decode(val, ctx)?;
+                    repeat_node = Some(name);
                 }
                 "cooldown-ms" => {
                     cooldown = Some(Duration::from_millis(
                         knuffel::traits::DecodeScalar::decode(val, ctx)?,
                     ));
+                    cooldown_node = Some(name);
                 }
                 "allow-when-locked" => {
                     allow_when_locked = knuffel::traits::DecodeScalar::decode(val, ctx)?;
@@ -1150,6 +1158,27 @@ where
                     ));
                 }
             }
+        }
+
+        if key.trigger == Trigger::ModTap {
+            if let Some(node) = repeat_node {
+                ctx.emit_error(DecodeError::unexpected(
+                    node,
+                    "property",
+                    "a release-fired tap bind cannot repeat",
+                ));
+            }
+            if let Some(node) = cooldown_node {
+                ctx.emit_error(DecodeError::unexpected(
+                    node,
+                    "property",
+                    "a release-fired tap bind cannot take a cooldown",
+                ));
+            }
+            // The state machine that fires a tap bind runs once per press-release
+            // pair; forcing this here (rather than only rejecting the property)
+            // keeps a stray default from ever reaching `start_key_repeat`.
+            repeat = false;
         }
 
         let mut children = node.children();
@@ -1252,7 +1281,9 @@ impl FromStr for Key {
             }
         }
 
-        let trigger = if key.eq_ignore_ascii_case("MouseLeft") {
+        let trigger = if key.eq_ignore_ascii_case("mod") {
+            Trigger::ModTap
+        } else if key.eq_ignore_ascii_case("MouseLeft") {
             Trigger::MouseLeft
         } else if key.eq_ignore_ascii_case("MouseRight") {
             Trigger::MouseRight
@@ -1313,6 +1344,10 @@ impl FromStr for Key {
             Trigger::Keysym(keysym)
         };
 
+        if trigger == Trigger::ModTap && !modifiers.is_empty() {
+            return Err(miette!("a Mod tap bind takes no modifiers"));
+        }
+
         Ok(Key { trigger, modifiers })
     }
 }
@@ -1356,6 +1391,7 @@ pub fn key_to_wire_string(key: Key) -> String {
 fn trigger_to_wire_string(trigger: Trigger) -> String {
     match trigger {
         Trigger::Keysym(keysym) => keysym_get_name(keysym),
+        Trigger::ModTap => "Mod".to_owned(),
         Trigger::MouseLeft => "MouseLeft".to_owned(),
         Trigger::MouseRight => "MouseRight".to_owned(),
         Trigger::MouseMiddle => "MouseMiddle".to_owned(),
@@ -1567,6 +1603,7 @@ mod tests {
             "ISO_Level3_Shift+A",
             "ISO_Level5_Shift+A",
             "Ctrl+Alt+Delete",
+            "Mod",
         ] {
             let key: Key = s.parse().unwrap();
             let formatted = key_to_wire_string(key);
@@ -1576,6 +1613,30 @@ mod tests {
             assert_eq!(
                 reparsed, key,
                 "round-trip mismatch for {s:?} -> {formatted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mod_tap_key_parses() {
+        for s in ["Mod", "mod", "MOD"] {
+            assert_eq!(
+                s.parse::<Key>().unwrap(),
+                Key {
+                    trigger: Trigger::ModTap,
+                    modifiers: Modifiers::empty(),
+                },
+                "case variant {s:?} failed to parse as a bare mod tap",
+            );
+        }
+    }
+
+    #[test]
+    fn mod_tap_rejects_modifier_prefix() {
+        for s in ["Shift+Mod", "Mod+Mod", "Ctrl+Mod"] {
+            assert!(
+                s.parse::<Key>().is_err(),
+                "{s:?} must be rejected: a mod tap takes no modifiers"
             );
         }
     }
