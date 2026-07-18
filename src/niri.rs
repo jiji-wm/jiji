@@ -128,6 +128,7 @@ use crate::dbus::gnome_shell_introspect::{self, IntrospectToNiri, NiriToIntrospe
 use crate::dbus::gnome_shell_screenshot::{NiriToScreenshot, ScreenshotToNiri};
 use crate::frame_clock::FrameClock;
 use crate::handlers::{configure_lock_surface, XDG_ACTIVATION_TOKEN_TIMEOUT};
+use crate::input::mod_tap::ModTapState;
 use crate::input::pick_color_grab::PickColorGrab;
 use crate::input::scroll_swipe_gesture::ScrollSwipeGesture;
 use crate::input::scroll_tracker::ScrollTracker;
@@ -346,6 +347,9 @@ pub struct Niri {
     pub seat: Seat<State>,
     /// Scancodes of the keys to suppress.
     pub suppressed_keys: HashSet<Keycode>,
+    /// Arm/disarm/fire state for a bare `Mod` tap bind. See the `mod_tap`
+    /// module docs for the full state machine.
+    pub mod_tap: ModTapState,
     /// Button codes of the mouse buttons to suppress.
     pub suppressed_buttons: HashSet<u32>,
     pub bind_cooldown_timers: HashMap<Key, RegistrationToken>,
@@ -601,6 +605,7 @@ pub enum KeyboardFocus {
 /// | `contents_under` | ConfirmDialog, LockScreen, ScreenshotUi, Mru (BookmarkSwitcher and no-modal both fall through to the layout) |
 /// | `Niri::modal_overlay_blocks_bookmark_overlay` | ConfirmDialog, LockScreen, ScreenshotUi, Mru |
 /// | `crate::handlers::xdg_shell::grab` | all five, in priority order (LockScreen refuses the grab only when its root is not the lock surface); under no modal, additionally refuses while the overview is open unless the grab root is an Overlay- or Top-layer surface |
+/// | `crate::input::mod_tap::tap_fire_allowed` | ConfirmDialog, ScreenshotUi (action-filtered via `allowed_during_screenshot`), Mru, BookmarkSwitcher; LockScreen is deliberately absent — allowed here and deferred to the bind's own `allow-when-locked` |
 ///
 /// `BookmarkSwitcher` is deliberately absent from the `window_under` row: a
 /// pointer press activates the window underneath *and* dismisses the
@@ -2833,6 +2838,7 @@ impl Niri {
             popups: PopupManager::default(),
             popup_grab: None,
             suppressed_keys: HashSet::new(),
+            mod_tap: ModTapState::new(),
             suppressed_buttons: HashSet::new(),
             bind_cooldown_timers: HashMap::new(),
             bind_repeat_timer: Option::default(),

@@ -67,6 +67,7 @@ use crate::utils::spawning::{spawn, spawn_sh};
 use crate::utils::{center, get_monotonic_time, with_toplevel_role, CastSessionId, ResizeEdge};
 
 pub mod backend_ext;
+pub mod mod_tap;
 pub mod move_grab;
 pub mod pick_color_grab;
 pub mod pick_window_grab;
@@ -157,6 +158,10 @@ impl State {
 
         if should_reset_pointer_inactivity_timer(&event) {
             self.niri.reset_pointer_inactivity_timer();
+        }
+
+        if should_disarm_mod_tap(&event) {
+            self.niri.mod_tap.disarm();
         }
 
         // Each pair below couples its own event predicate; there is no
@@ -446,6 +451,26 @@ impl State {
         let serial = SERIAL_COUNTER.next_serial();
         let time = Event::time_msec(&event);
         let pressed = event.state() == KeyState::Pressed;
+        let key_code = event.key_code();
+
+        // Hoisted so the mod-tap tracking below and the `.input()` call further down share one
+        // handle. `pressed_keys()` must be read before `.input()`, which is what applies this
+        // event to the keyboard's internal state.
+        let keyboard = self.niri.seat.get_keyboard().unwrap();
+
+        // Track mod-tap arm/disarm before anything below (accessibility grabs, modal overlays)
+        // gets a chance to intercept this event, so a press or release that a11y/modal consumes
+        // still disarms/fires correctly. See `mod_tap` module docs for the full state machine.
+        let other_keys_held;
+        let tap_fire_candidate;
+        if pressed {
+            self.niri.mod_tap.on_key_press(key_code);
+            other_keys_held = !keyboard.pressed_keys().is_empty();
+            tap_fire_candidate = false;
+        } else {
+            other_keys_held = false;
+            tap_fire_candidate = self.niri.mod_tap.on_key_release(key_code);
+        }
 
         // Stop bind key repeat on any release. This won't work 100% correctly in cases like:
         // 1. Press Mod
@@ -491,9 +516,11 @@ impl State {
         #[cfg(not(feature = "dbus"))]
         let _ = consumed_by_a11y;
 
-        let Some(Some(bind)) = self.niri.seat.get_keyboard().unwrap().input(
+        let mut mod_tap_bind: Option<Bind> = None;
+
+        let bind_result = keyboard.input(
             self,
-            event.key_code(),
+            key_code,
             event.state(),
             serial,
             time,
@@ -868,6 +895,40 @@ impl State {
                         }
                     }
 
+                    if pressed {
+                        if mod_tap::is_bare_mod_press(mod_key, raw, modifiers, other_keys_held) {
+                            this.niri.mod_tap.arm(key_code);
+                        }
+                    } else if tap_fire_candidate {
+                        // A fire candidate implies the armed key's own release just emptied the
+                        // modifier state (nothing else was pressed since arming) — implication
+                        // only, not a biconditional, since an unrelated already-empty release can
+                        // reach this arm too.
+                        debug_assert!(
+                            modifiers.is_empty(),
+                            "mod-tap fire candidate with non-empty modifiers: {modifiers:?}"
+                        );
+
+                        // No `Key { trigger: Trigger::ModTap, .. }` literal is synthesized here;
+                        // this is the same canonical lookup the wheel/touchpad triggers use, so a
+                        // future non-empty-modifiers literal elsewhere can't silently shadow it.
+                        let candidate = {
+                            let config = this.niri.config.borrow();
+                            find_configured_bind(&config.binds.0, mod_key, Trigger::ModTap, *mods)
+                        };
+
+                        if let Some(bind) = candidate {
+                            if mod_tap::tap_fire_allowed(
+                                this.niri.active_modal(),
+                                &bind.action,
+                                is_inhibiting_shortcuts,
+                                bind.allow_inhibiting,
+                            ) {
+                                mod_tap_bind = Some(bind);
+                            }
+                        }
+                    }
+
                     // Interaction with the active window, immediately update the active window's
                     // focus timestamp without waiting for a possible pending MRU lock-in delay.
                     this.niri.mru_apply_keyboard_commit();
@@ -875,7 +936,19 @@ impl State {
 
                 res
             },
-        ) else {
+        );
+
+        // Dispatched here, outside the filter closure, so the client has already received the
+        // forwarded release via `input_forward` before the bound action runs. Checked before the
+        // existing `Some(Some(bind))` handling below: a mod-tap fire is a release-time event, so
+        // `bind_result` itself is never `Some(Some(_))` on this path (only a press can produce
+        // that from `should_intercept_key`).
+        if let Some(bind) = mod_tap_bind {
+            self.handle_bind(bind);
+            return;
+        }
+
+        let Some(Some(bind)) = bind_result else {
             return;
         };
 
@@ -1031,11 +1104,13 @@ impl State {
                 self.backend.change_vt(vt);
                 // Changing VT may not deliver the key releases, so clear the state.
                 self.niri.suppressed_keys.clear();
+                self.niri.mod_tap.disarm();
             }
             Action::Suspend => {
                 self.backend.suspend();
                 // Suspend may not deliver the key releases, so clear the state.
                 self.niri.suppressed_keys.clear();
+                self.niri.mod_tap.disarm();
             }
             Action::PowerOffMonitors => {
                 self.niri.deactivate_monitors(&mut self.backend);
@@ -6680,6 +6755,28 @@ fn should_reset_pointer_inactivity_timer<I: InputBackend>(event: &InputEvent<I>)
             | InputEvent::TabletToolButton { .. }
             | InputEvent::TabletToolProximity { .. }
             | InputEvent::TabletToolTip { .. }
+    )
+}
+
+/// Non-keyboard input that disarms a pending mod-tap: any signal that the
+/// user has moved on to something else. Both `PointerButton` states are
+/// included — even a release-only ordering (button down before the mod
+/// press) still signals interaction, and disarming too eagerly only loses a
+/// tap, never fires one spuriously. Motion events (`PointerMotion`,
+/// `PointerMotionAbsolute`, `TouchMotion`, `TabletToolAxis`,
+/// `TabletToolProximity`) are deliberately excluded so that moving the mouse
+/// during a tap doesn't disarm it.
+fn should_disarm_mod_tap<I: InputBackend>(event: &InputEvent<I>) -> bool {
+    matches!(
+        event,
+        InputEvent::PointerButton { .. }
+            | InputEvent::PointerAxis { .. }
+            | InputEvent::TouchDown { .. }
+            | InputEvent::TabletToolTip { .. }
+            | InputEvent::TabletToolButton { .. }
+            | InputEvent::GestureSwipeBegin { .. }
+            | InputEvent::GesturePinchBegin { .. }
+            | InputEvent::GestureHoldBegin { .. }
     )
 }
 
