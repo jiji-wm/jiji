@@ -63,7 +63,11 @@ pub use self::activity::{
 };
 use self::bookmarks::Bookmarks;
 pub use self::monitor::MonitorRenderElement;
-use self::monitor::{Monitor, SlideDirection, StripCtx, WorkspaceSwitch};
+// Only referenced by the debug-gated `verify_invariants` (activity-switch consistency check),
+// so the import must carry the same gate or release builds see it as unused.
+#[cfg(debug_assertions)]
+use self::monitor::SlideDirection;
+use self::monitor::{Monitor, StripCtx, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
